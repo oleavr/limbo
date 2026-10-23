@@ -28,6 +28,7 @@
 #pragma once
 
 #include <mach/mach.h>
+#include <pthread.h>
 #include <setjmp.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -68,6 +69,9 @@ struct thread {
 	bool terminating;
 	void *stack;
 	size_t stack_size;
+	pthread_mutex_t suspend_lock;
+	pthread_cond_t resumed;
+	uint32_t suspend_count;
 };
 
 struct thread *thread_current(void);
@@ -75,4 +79,6 @@ struct thread *thread_new(thread_continuation_t continuation, void *context);
 int thread_start(struct thread *thread, const struct thread_state *state);
 void __attribute__((noreturn)) thread_enter(const struct thread_state *state);
 void __attribute__((noreturn)) thread_block(void);
+void thread_suspend_self(void);
+void thread_resume_thread(struct thread *thread);
 void __attribute__((noreturn)) thread_exit(void *stack, size_t stack_size);

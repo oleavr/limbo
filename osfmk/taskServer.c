@@ -8,6 +8,9 @@
 
 /* Module task */
 
+#undef __MigTypeCheck
+#define __MigTypeCheck 1
+
 #define	__MIG_check__Request__task_subsystem__ 1
 
 #include <string.h>

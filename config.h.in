@@ -5,10 +5,22 @@
 #define __MigTypeCheck 0
 
 static inline void __attribute__ ((noreturn))
-unimplemented(void)
+limbo_unimplemented(const char *function, int line)
 {
 	extern long write(int, const void *, unsigned long);
+	extern unsigned long strlen(const char *);
 	extern void abort(void);
-	write(2, "not implemented\n", 16);
+	char digits[12];
+	int i = sizeof(digits);
+	digits[--i] = '\n';
+	do {
+		digits[--i] = '0' + line % 10;
+		line /= 10;
+	} while (line != 0);
+	write(2, "not implemented: ", 17);
+	write(2, function, strlen(function));
+	write(2, ":", 1);
+	write(2, digits + i, sizeof(digits) - i);
 	abort();
 }
+#define unimplemented() limbo_unimplemented(__func__, __LINE__)

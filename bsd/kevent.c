@@ -44,6 +44,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "commpage.h"
 #include "handler.h"
 #include "kevent.h"
 #include "osfmk/ipc.h"
@@ -93,6 +94,7 @@
 #define NOTE_WL_THREAD_REQUEST 0x00000001
 #define NOTE_WL_SYNC_WAIT      0x00000004
 #define NOTE_WL_SYNC_WAKE      0x00000008
+#define NOTE_WL_SYNC_IPC       0x80000000
 #define NOTE_WL_COMMANDS_MASK  0x8000000f
 #define NOTE_WL_END_OWNERSHIP  0x00000020
 #define NOTE_WL_IGNORE_ESTALE  0x00000100
@@ -121,6 +123,8 @@ struct knote {
 	bool disabled;
 	bool manager;
 	bool woken;
+	bool waiting;
+	bool deleted;
 	uint64_t deadline;
 	uint64_t interval;
 };
@@ -501,6 +505,12 @@ kevent_register(struct kqueue *kq, const struct kevent_qos_s *change)
 		if (kn == NULL) {
 			return _ENOENT;
 		}
+		if (change->filter == EVFILT_WORKLOOP
+				&& (change->fflags & NOTE_WL_COMMANDS_MASK)
+						== NOTE_WL_SYNC_WAKE) {
+			kn->woken = true;
+			pthread_cond_broadcast(&sync_wakeup);
+		}
 		knote_detach(kn);
 		return 0;
 	}
@@ -576,6 +586,10 @@ knote_detach(struct knote *kn)
 			break;
 		}
 	}
+	if (kn->waiting) {
+		kn->deleted = true;
+		return;
+	}
 	free(kn);
 }
 
@@ -635,10 +649,18 @@ timer_arm(struct knote *kn)
 
 	if (fflags & NOTE_ABSOLUTE) {
 		kn->interval = 0;
-		kn->deadline = (fflags & NOTE_MACHTIME) ? nanoseconds
-							: now_monotonic()
-						+ (nanoseconds > now_realtime() ? nanoseconds - now_realtime()
-										: 0);
+		uint64_t delay;
+		if (fflags & NOTE_MACHTIME) {
+			uint64_t now = commpage_absolute_time();
+			delay = commpage_absolute_to_nanoseconds(
+					kn->kev.data > (int64_t)now
+							? kn->kev.data - now
+							: 0);
+		} else {
+			uint64_t now = now_realtime();
+			delay = nanoseconds > now ? nanoseconds - now : 0;
+		}
+		kn->deadline = now_monotonic() + delay;
 	} else {
 		kn->interval = (kn->kev.flags & (EV_ONESHOT | EV_DISPATCH))
 				? 0
@@ -661,7 +683,10 @@ timer_nanoseconds(uint32_t fflags, int64_t data)
 	if (fflags & NOTE_USECONDS) {
 		return data * 1000ULL;
 	}
-	if (fflags & (NOTE_NSECONDS | NOTE_MACHTIME)) {
+	if (fflags & NOTE_MACHTIME) {
+		return commpage_absolute_to_nanoseconds(data);
+	}
+	if (fflags & NOTE_NSECONDS) {
 		return data;
 	}
 	return data * 1000000ULL;
@@ -787,6 +812,8 @@ workloop_touch(struct knote *kn, const struct kevent_qos_s *change)
 		kn->woken = true;
 		pthread_cond_broadcast(&sync_wakeup);
 		return 0;
+	case NOTE_WL_SYNC_IPC:
+		return 0;
 	default:
 		unimplemented();
 	}
@@ -809,9 +836,14 @@ workloop_state_matches(const struct kevent_qos_s *change)
 static void
 workloop_sync_wait(struct knote *kn)
 {
+	kn->waiting = true;
 	kqueue_request(kn->kq, false);
 	while (!kn->woken) {
 		pthread_cond_wait(&sync_wakeup, &lock);
+	}
+	kn->waiting = false;
+	if (kn->deleted) {
+		free(kn);
 	}
 }
 
@@ -1151,5 +1183,43 @@ sys_kqueue_workloop_ctl(
 	fprintf(stderr, "kqueue_workloop_ctl(%p, %p, %p, %p)\n", (void *)cmd,
 			(void *)options, (void *)addr, (void *)sz);
 #endif
-	unimplemented();
+	struct kqueue_workloop_params {
+		int kqwlp_version;
+		int kqwlp_flags;
+		uint64_t kqwlp_id;
+		int kqwlp_sched_pri;
+		int kqwlp_sched_pol;
+		int kqwlp_cpu_percent;
+		int kqwlp_cpu_refillms;
+	};
+	enum { KQ_WORKLOOP_CREATE = 1, KQ_WORKLOOP_DESTROY = 2 };
+
+	const struct kqueue_workloop_params *params = addr;
+	if (params == NULL || sz < sizeof(*params)) {
+		return _EINVAL;
+	}
+
+	int result = 0;
+	pthread_mutex_lock(&lock);
+	switch ((uintptr_t)cmd) {
+	case KQ_WORKLOOP_CREATE:
+		if (workloop_lookup(params->kqwlp_id,
+				    KEVENT_FLAG_DYNAMIC_KQ_MUST_NOT_EXIST)
+				== NULL) {
+			result = _EEXIST;
+		}
+		break;
+	case KQ_WORKLOOP_DESTROY:
+		if (workloop_lookup(params->kqwlp_id,
+				    KEVENT_FLAG_DYNAMIC_KQ_MUST_EXIST)
+				== NULL) {
+			result = _ENOENT;
+		}
+		break;
+	default:
+		result = _EINVAL;
+		break;
+	}
+	pthread_mutex_unlock(&lock);
+	return result;
 }

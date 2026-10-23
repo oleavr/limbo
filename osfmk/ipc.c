@@ -44,6 +44,7 @@
 #include "broker.h"
 #include "broker_client.h"
 #include "libinfo.h"
+#include "mach_vm.h"
 #include "xpc_bootstrap.h"
 #include "bsd/kevent.h"
 #include "ipc.h"
@@ -63,7 +64,9 @@ struct ipc_port {
 	mach_port_name_t name;
 	ipc_kobject_type_t kotype;
 	void *kobject;
-	struct ipc_port *pset;
+	struct ipc_port **psets;
+	uint32_t pset_count;
+	bool is_pset;
 	struct ipc_kmsg *messages;
 	struct ipc_kmsg **messages_tail;
 	mach_port_seqno_t seqno;
@@ -180,6 +183,15 @@ static struct ipc_entry *lookup(mach_port_name_t name);
 static struct ipc_port *port_alloc(ipc_kobject_type_t kotype);
 static struct ipc_entry *entry_alloc(struct ipc_port *port);
 static void entry_release_if_unused(struct ipc_entry *entry);
+static kern_return_t member_and_set(mach_port_name_t member,
+		mach_port_name_t pset, struct ipc_port **member_port,
+		struct ipc_port **pset_port);
+static bool port_in_set(
+		const struct ipc_port *port, const struct ipc_port *pset);
+static void port_join_set(struct ipc_port *port, struct ipc_port *pset);
+static void port_leave_all_sets(struct ipc_port *port);
+static void pset_release_members(const struct ipc_port *pset);
+static bool port_leave_set(struct ipc_port *port, const struct ipc_port *pset);
 
 mach_port_name_t
 ipc_task_self(void)
@@ -467,7 +479,8 @@ export_body_port(mach_port_name_t name, mach_msg_type_name_t disposition,
 
 	struct ipc_entry *entry = lookup(name);
 	entry->port->global_id = broker_global_id(dest_guest_id,
-			0x80000000 | ++transfer_counter);
+			0x80000000 | (broker_client_guest_id() & 0x7ff) << 20
+					| (++transfer_counter & 0xfffff));
 	entry->port->remote = true;
 	entry->type = MACH_PORT_TYPE_SEND;
 	if (entry->urefs == 0) {
@@ -961,13 +974,16 @@ static void
 unlock_and_notify_arrival(struct ipc_port *port)
 {
 	mach_port_name_t name = port->name;
-	mach_port_name_t pset = (port->pset != NULL) ? port->pset->name
-						     : MACH_PORT_NULL;
+	uint32_t count = port->pset_count;
+	mach_port_name_t psets[count + 1];
+	for (uint32_t i = 0; i < count; i++) {
+		psets[i] = port->psets[i]->name;
+	}
 	pthread_mutex_unlock(&lock);
 
 	kevent_machport_arrival(name);
-	if (pset != MACH_PORT_NULL) {
-		kevent_machport_arrival(pset);
+	for (uint32_t i = 0; i < count; i++) {
+		kevent_machport_arrival(psets[i]);
 	}
 }
 
@@ -1076,6 +1092,9 @@ receive(mach_msg_header_t *msg, mach_msg_option64_t options,
 			= REQUESTED_TRAILER_SIZE((mach_msg_option_t)options);
 	if (size + trailer_size > rcv_size && (options & MACH_RCV_LARGE)) {
 		msg->msgh_size = size + trailer_size;
+		if (options & MACH_RCV_LARGE_IDENTITY) {
+			msg->msgh_local_port = port->name;
+		}
 		pthread_mutex_unlock(&lock);
 		return MACH_RCV_TOO_LARGE;
 	}
@@ -1107,8 +1126,8 @@ port_with_message(struct ipc_entry *entry)
 
 	for (uint32_t i = 1; i < entry_count; i++) {
 		struct ipc_port *member = entries[i].port;
-		if (member != NULL && member->pset == entry->port
-				&& member->messages != NULL) {
+		if (member != NULL && member->messages != NULL
+				&& port_in_set(member, entry->port)) {
 			return member;
 		}
 	}
@@ -1190,6 +1209,7 @@ ipc_port_allocate(mach_port_right_t right, mach_port_name_t *name)
 	pthread_mutex_lock(&lock);
 	struct ipc_entry *entry = entry_alloc(port_alloc(IPC_KOBJECT_NONE));
 	entry->type = type;
+	entry->port->is_pset = type == MACH_PORT_TYPE_PORT_SET;
 	*name = entry->port->name;
 	pthread_mutex_unlock(&lock);
 	return KERN_SUCCESS;
@@ -1357,6 +1377,42 @@ ipc_port_insert_right(mach_port_name_t name, mach_port_name_t poly,
 }
 
 kern_return_t
+ipc_port_extract_right(mach_port_name_t name, mach_msg_type_name_t msgt_name,
+		mach_port_name_t *poly, mach_msg_type_name_t *poly_poly)
+{
+	pthread_mutex_lock(&lock);
+	kern_return_t kr = KERN_SUCCESS;
+	struct ipc_entry *entry = lookup(name);
+	if (entry == NULL) {
+		kr = KERN_INVALID_NAME;
+	} else if (!has_right(entry, msgt_name)) {
+		kr = KERN_INVALID_RIGHT;
+	} else {
+		switch (msgt_name) {
+		case MACH_MSG_TYPE_MOVE_SEND:
+			if (--entry->urefs == 0) {
+				entry->type &= ~MACH_PORT_TYPE_SEND;
+			}
+			break;
+		case MACH_MSG_TYPE_MOVE_SEND_ONCE:
+			if (--entry->sorights == 0) {
+				entry->type &= ~MACH_PORT_TYPE_SEND_ONCE;
+			}
+			break;
+		case MACH_MSG_TYPE_MOVE_RECEIVE:
+			entry->type &= ~MACH_PORT_TYPE_RECEIVE;
+			break;
+		default:
+			break;
+		}
+		*poly = name;
+		*poly_poly = received_type(msgt_name);
+	}
+	pthread_mutex_unlock(&lock);
+	return kr;
+}
+
+kern_return_t
 ipc_port_type(mach_port_name_t name, mach_port_type_t *type)
 {
 	pthread_mutex_lock(&lock);
@@ -1369,6 +1425,44 @@ ipc_port_type(mach_port_name_t name, mach_port_type_t *type)
 	}
 	pthread_mutex_unlock(&lock);
 	return kr;
+}
+
+kern_return_t
+ipc_port_names(mach_port_name_t **names, mach_port_type_t **types,
+		uint32_t *count)
+{
+	pthread_mutex_lock(&lock);
+	uint32_t used = 0;
+	for (uint32_t index = 1; index < entry_count; index++) {
+		if (entries[index].port != NULL) {
+			used++;
+		}
+	}
+	*names = NULL;
+	*types = NULL;
+	*count = used;
+	if (used != 0) {
+		mach_vm_address_t name_address = 0;
+		mach_vm_address_t type_address = 0;
+		_kernelrpc_mach_vm_allocate(0, &name_address,
+				used * sizeof(**names), VM_FLAGS_ANYWHERE);
+		_kernelrpc_mach_vm_allocate(0, &type_address,
+				used * sizeof(**types), VM_FLAGS_ANYWHERE);
+		*names = (mach_port_name_t *)name_address;
+		*types = (mach_port_type_t *)type_address;
+		uint32_t i = 0;
+		for (uint32_t index = 1; index < entry_count; index++) {
+			struct ipc_entry *entry = &entries[index];
+			if (entry->port == NULL) {
+				continue;
+			}
+			(*names)[i] = entry->port->name;
+			(*types)[i] = entry->type;
+			i++;
+		}
+	}
+	pthread_mutex_unlock(&lock);
+	return KERN_SUCCESS;
 }
 
 kern_return_t
@@ -1434,33 +1528,80 @@ ipc_port_set_context(mach_port_name_t name, mach_port_context_t context)
 }
 
 kern_return_t
-ipc_port_move_member(mach_port_name_t member, mach_port_name_t pset)
+ipc_port_insert_member(mach_port_name_t member, mach_port_name_t pset)
 {
 	pthread_mutex_lock(&lock);
-	kern_return_t kr = KERN_SUCCESS;
-	struct ipc_entry *member_entry = lookup(member);
-	struct ipc_entry *pset_entry = lookup(pset);
-	if (member_entry == NULL
-			|| (pset != MACH_PORT_NULL && pset_entry == NULL)) {
-		kr = KERN_INVALID_NAME;
-	} else if (!(member_entry->type & MACH_PORT_TYPE_RECEIVE)
-			|| (pset_entry != NULL
-					&& !(pset_entry->type
-							& MACH_PORT_TYPE_PORT_SET))) {
+	struct ipc_port *port, *set;
+	kern_return_t kr = member_and_set(member, pset, &port, &set);
+	if (kr == KERN_SUCCESS && set == NULL) {
 		kr = KERN_INVALID_RIGHT;
-	} else {
-		member_entry->port->pset = (pset_entry != NULL)
-				? pset_entry->port
-				: NULL;
+	} else if (kr == KERN_SUCCESS && port_in_set(port, set)) {
+		kr = KERN_ALREADY_IN_SET;
+	} else if (kr == KERN_SUCCESS) {
+		port_join_set(port, set);
 		pthread_cond_broadcast(&arrival);
-		if (pset_entry != NULL
-				&& member_entry->port->messages != NULL) {
-			unlock_and_notify_arrival(member_entry->port);
+		if (port->messages != NULL) {
+			unlock_and_notify_arrival(port);
 			return kr;
 		}
 	}
 	pthread_mutex_unlock(&lock);
 	return kr;
+}
+
+kern_return_t
+ipc_port_extract_member(mach_port_name_t member, mach_port_name_t pset)
+{
+	pthread_mutex_lock(&lock);
+	struct ipc_port *port, *set;
+	kern_return_t kr = member_and_set(member, pset, &port, &set);
+	if (kr == KERN_SUCCESS && (set == NULL || !port_leave_set(port, set))) {
+		kr = KERN_NOT_IN_SET;
+	}
+	pthread_mutex_unlock(&lock);
+	return kr;
+}
+
+kern_return_t
+ipc_port_move_member(mach_port_name_t member, mach_port_name_t pset)
+{
+	pthread_mutex_lock(&lock);
+	struct ipc_port *port, *set;
+	kern_return_t kr = member_and_set(member, pset, &port, &set);
+	if (kr == KERN_SUCCESS) {
+		port_leave_all_sets(port);
+		if (set != NULL) {
+			port_join_set(port, set);
+			pthread_cond_broadcast(&arrival);
+			if (port->messages != NULL) {
+				unlock_and_notify_arrival(port);
+				return kr;
+			}
+		}
+	}
+	pthread_mutex_unlock(&lock);
+	return kr;
+}
+
+static kern_return_t
+member_and_set(mach_port_name_t member, mach_port_name_t pset,
+		struct ipc_port **member_port, struct ipc_port **pset_port)
+{
+	struct ipc_entry *member_entry = lookup(member);
+	struct ipc_entry *pset_entry = lookup(pset);
+	if (member_entry == NULL
+			|| (pset != MACH_PORT_NULL && pset_entry == NULL)) {
+		return KERN_INVALID_NAME;
+	}
+	if (!(member_entry->type & MACH_PORT_TYPE_RECEIVE)
+			|| (pset_entry != NULL
+					&& !(pset_entry->type
+							& MACH_PORT_TYPE_PORT_SET))) {
+		return KERN_INVALID_RIGHT;
+	}
+	*member_port = member_entry->port;
+	*pset_port = (pset_entry != NULL) ? pset_entry->port : NULL;
+	return KERN_SUCCESS;
 }
 
 kern_return_t
@@ -1476,8 +1617,9 @@ ipc_port_get_status(mach_port_name_t name, mach_port_status_t *status)
 	} else {
 		struct ipc_port *port = entry->port;
 		memset(status, 0, sizeof(*status));
-		status->mps_pset = (port->pset != NULL) ? port->pset->name
-							: MACH_PORT_NULL;
+		status->mps_pset = (port->pset_count != 0)
+				? port->psets[0]->name
+				: MACH_PORT_NULL;
 		status->mps_seqno = port->seqno;
 		status->mps_qlimit = MACH_PORT_QLIMIT_DEFAULT;
 		for (struct ipc_kmsg *kmsg = port->messages; kmsg != NULL;
@@ -1500,6 +1642,7 @@ destroy_receive_right(struct ipc_entry *entry)
 		port->messages = kmsg->next;
 		free(kmsg);
 	}
+	port_leave_all_sets(port);
 
 	entry->type &= ~MACH_PORT_TYPE_RECEIVE;
 	if (entry->type & MACH_PORT_TYPE_SEND) {
@@ -1567,11 +1710,65 @@ entry_release_if_unused(struct ipc_entry *entry)
 
 	struct ipc_port *port = entry->port;
 	port->name = MACH_PORT_NULL;
+	if (port->is_pset) {
+		pset_release_members(port);
+	}
 	if (port->kotype == IPC_KOBJECT_NONE) {
+		free(port->psets);
 		free(port);
 	}
 	entry->port = NULL;
 	entry->urefs = 0;
 	entry->sorights = 0;
 	entry->generation += MACH_PORT_GEN(4);
+}
+
+static bool
+port_in_set(const struct ipc_port *port, const struct ipc_port *pset)
+{
+	for (uint32_t i = 0; i < port->pset_count; i++) {
+		if (port->psets[i] == pset) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void
+port_join_set(struct ipc_port *port, struct ipc_port *pset)
+{
+	port->psets = realloc(port->psets,
+			(port->pset_count + 1) * sizeof(*port->psets));
+	port->psets[port->pset_count++] = pset;
+}
+
+static void
+port_leave_all_sets(struct ipc_port *port)
+{
+	free(port->psets);
+	port->psets = NULL;
+	port->pset_count = 0;
+}
+
+static void
+pset_release_members(const struct ipc_port *pset)
+{
+	for (uint32_t i = 1; i < entry_count; i++) {
+		struct ipc_port *member = entries[i].port;
+		if (member != NULL) {
+			port_leave_set(member, pset);
+		}
+	}
+}
+
+static bool
+port_leave_set(struct ipc_port *port, const struct ipc_port *pset)
+{
+	for (uint32_t i = 0; i < port->pset_count; i++) {
+		if (port->psets[i] == pset) {
+			port->psets[i] = port->psets[--port->pset_count];
+			return true;
+		}
+	}
+	return false;
 }

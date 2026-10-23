@@ -28,6 +28,9 @@
 #include <mach/mach.h>
 #include <stdio.h>
 
+#include "ipc.h"
+#include "thread.h"
+
 kern_return_t
 thread_terminate(mach_port_t target_act)
 {
@@ -91,7 +94,16 @@ thread_suspend(thread_read_t target_act)
 #ifdef ENABLE_STRACE
 	fprintf(stderr, "thread_suspend(%p)\n", (void *)target_act);
 #endif
-	unimplemented();
+	struct thread *thread
+			= ipc_kobject_lookup(target_act, IPC_KOBJECT_THREAD);
+	if (thread == NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	if (thread != thread_current()) {
+		unimplemented();
+	}
+	thread_suspend_self();
+	return KERN_SUCCESS;
 }
 
 kern_return_t
@@ -100,7 +112,13 @@ thread_resume(thread_read_t target_act)
 #ifdef ENABLE_STRACE
 	fprintf(stderr, "thread_resume(%p)\n", (void *)target_act);
 #endif
-	unimplemented();
+	struct thread *thread
+			= ipc_kobject_lookup(target_act, IPC_KOBJECT_THREAD);
+	if (thread == NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	thread_resume_thread(thread);
+	return KERN_SUCCESS;
 }
 
 kern_return_t
@@ -164,7 +182,52 @@ thread_info(thread_inspect_t target_act, thread_flavor_t flavor,
 			(void *)flavor, (void *)thread_info_out,
 			(void *)thread_info_outCnt);
 #endif
-	unimplemented();
+	switch (flavor) {
+	case THREAD_BASIC_INFO: {
+		if (*thread_info_outCnt < THREAD_BASIC_INFO_COUNT) {
+			return KERN_INVALID_ARGUMENT;
+		}
+		thread_basic_info_t info = (thread_basic_info_t)thread_info_out;
+		*info = (thread_basic_info_data_t){
+				.policy = POLICY_TIMESHARE,
+				.run_state = TH_STATE_RUNNING,
+		};
+		*thread_info_outCnt = THREAD_BASIC_INFO_COUNT;
+		return KERN_SUCCESS;
+	}
+	case THREAD_EXTENDED_INFO: {
+		if (*thread_info_outCnt < THREAD_EXTENDED_INFO_COUNT) {
+			return KERN_INVALID_ARGUMENT;
+		}
+		thread_extended_info_t info
+				= (thread_extended_info_t)thread_info_out;
+		*info = (thread_extended_info_data_t){
+				.pth_policy = POLICY_TIMESHARE,
+				.pth_run_state = TH_STATE_RUNNING,
+				.pth_curpri = 31,
+				.pth_priority = 31,
+				.pth_maxpriority = 63,
+		};
+		*thread_info_outCnt = THREAD_EXTENDED_INFO_COUNT;
+		return KERN_SUCCESS;
+	}
+	case THREAD_SCHED_TIMESHARE_INFO: {
+		if (*thread_info_outCnt < POLICY_TIMESHARE_INFO_COUNT) {
+			return KERN_INVALID_ARGUMENT;
+		}
+		policy_timeshare_info_t info
+				= (policy_timeshare_info_t)thread_info_out;
+		*info = (policy_timeshare_info_data_t){
+				.max_priority = 63,
+				.base_priority = 31,
+				.cur_priority = 31,
+		};
+		*thread_info_outCnt = POLICY_TIMESHARE_INFO_COUNT;
+		return KERN_SUCCESS;
+	}
+	default:
+		unimplemented();
+	}
 }
 
 kern_return_t
@@ -229,7 +292,7 @@ _kernelrpc_thread_policy(thread_act_t thr_act, policy_t policy,
 			(void *)thr_act, (void *)policy, (void *)base,
 			(void *)baseCnt, (void *)set_limit);
 #endif
-	unimplemented();
+	return KERN_SUCCESS;
 }
 
 kern_return_t
@@ -242,7 +305,7 @@ _kernelrpc_thread_policy_set(thread_act_t thread, thread_policy_flavor_t flavor,
 			(void *)thread, (void *)flavor, (void *)policy_info,
 			(void *)policy_infoCnt);
 #endif
-	unimplemented();
+	return KERN_SUCCESS;
 }
 
 kern_return_t

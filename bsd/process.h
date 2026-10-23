@@ -27,6 +27,7 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 struct process {
@@ -44,3 +45,5 @@ struct process {
 int process_lookup(int32_t pid, struct process *process);
 void process_start_time(
 		const struct process *process, uint64_t *sec, uint64_t *usec);
+
+bool process_executable_path(int32_t pid, char *path);

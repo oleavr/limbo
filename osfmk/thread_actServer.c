@@ -8,6 +8,9 @@
 
 /* Module thread_act */
 
+#undef __MigTypeCheck
+#define __MigTypeCheck 1
+
 #define	__MIG_check__Request__thread_act_subsystem__ 1
 
 #include <string.h>

@@ -30,9 +30,11 @@
 #define _GNU_SOURCE
 #endif
 #include <fcntl.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "bsd/xnu-errno.h"
@@ -117,8 +119,30 @@
 #define _O_ASYNC    0x00000040
 #define _O_FSYNC    0x00000080
 
+#define _F_RDLCK 1
+#define _F_UNLCK 2
+#define _F_WRLCK 3
+
+struct darwin_flock {
+	int64_t l_start;
+	int64_t l_len;
+	int32_t l_pid;
+	int16_t l_type;
+	int16_t l_whence;
+};
+
 static int status_flags_to_darwin(int flags);
 static int status_flags_from_darwin(int flags);
+struct darwin_flocktimeout {
+	struct darwin_flock fl;
+	struct timespec timeout;
+};
+
+static int record_lock_timeout(
+		int fd, int cmd, struct darwin_flocktimeout *lock);
+static int record_lock(int fd, int cmd, struct darwin_flock *lock);
+static short lock_type_from_darwin(short type);
+static short lock_type_to_darwin(short type);
 
 int
 sys_sys_fcntl(int fd, int cmd, long arg)
@@ -152,16 +176,38 @@ sys_sys_fcntl(int fd, int cmd, long arg)
 		return errno_map(fcntl(
 				fd, F_SETFL, status_flags_from_darwin(arg)));
 	case _F_FULLFSYNC:
+	case _F_BARRIERFSYNC:
 		return errno_map(fsync(fd));
+	case _F_GETLK:
+		return record_lock(fd, F_GETLK, (void *)arg);
+	case _F_SETLK:
+		return record_lock(fd, F_SETLK, (void *)arg);
+	case _F_SETLKW:
+		return record_lock(fd, F_SETLKW, (void *)arg);
+	case _F_OFD_GETLK:
+		return record_lock(fd, F_OFD_GETLK, (void *)arg);
+	case _F_OFD_SETLK:
+		return record_lock(fd, F_OFD_SETLK, (void *)arg);
+	case _F_OFD_SETLKW:
+		return record_lock(fd, F_OFD_SETLKW, (void *)arg);
+	case _F_SETLKWTIMEOUT:
+		return record_lock_timeout(fd, F_SETLK, (void *)arg);
+	case _F_OFD_SETLKWTIMEOUT:
+		return record_lock_timeout(fd, F_OFD_SETLK, (void *)arg);
+	case _F_SETCONFINED:
+	case _F_RDADVISE:
+	case _F_RDAHEAD:
 	case _F_NOCACHE:
 	case _F_SINGLE_WRITER:
 	case _F_SETNOSIGPIPE:
 		return 0;
 	case _F_GETPROTECTIONCLASS:
 		return _ENOTSUP;
+	case _F_SETPROTECTIONCLASS:
+		return 0;
 	case _F_GETPATH: {
-		char link[32], path[PATH_MAX];
-		snprintf(link, sizeof(link), "/proc/self/fd/%d", fd);
+		char link[48], path[PATH_MAX];
+		snprintf(link, sizeof(link), "/proc/thread-self/fd/%d", fd);
 		ssize_t length = readlink(link, path, sizeof(path) - 1);
 		if (length == -1) {
 			return err_map(errno);
@@ -213,4 +259,80 @@ status_flags_from_darwin(int flags)
 		result |= O_ASYNC;
 	}
 	return result;
+}
+
+static int
+record_lock_timeout(int fd, int cmd, struct darwin_flocktimeout *lock)
+{
+	struct timespec deadline;
+	clock_gettime(CLOCK_MONOTONIC, &deadline);
+	deadline.tv_sec += lock->timeout.tv_sec;
+	deadline.tv_nsec += lock->timeout.tv_nsec;
+	if (deadline.tv_nsec >= 1000000000) {
+		deadline.tv_sec++;
+		deadline.tv_nsec -= 1000000000;
+	}
+
+	while (true) {
+		int result = record_lock(fd, cmd, &lock->fl);
+		if (result != _EAGAIN && result != _EACCES) {
+			return result;
+		}
+		struct timespec now;
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		if (now.tv_sec > deadline.tv_sec
+				|| (now.tv_sec == deadline.tv_sec
+						&& now.tv_nsec >= deadline.tv_nsec)) {
+			return _ETIMEDOUT;
+		}
+		nanosleep(&(struct timespec){.tv_nsec = 1000000}, NULL);
+	}
+}
+
+static int
+record_lock(int fd, int cmd, struct darwin_flock *lock)
+{
+	struct flock host = {
+			.l_type = lock_type_from_darwin(lock->l_type),
+			.l_whence = lock->l_whence,
+			.l_start = lock->l_start,
+			.l_len = lock->l_len,
+	};
+	if (fcntl(fd, cmd, &host) == -1) {
+		return err_map(errno);
+	}
+	if (cmd == F_GETLK || cmd == F_OFD_GETLK) {
+		lock->l_type = lock_type_to_darwin(host.l_type);
+		lock->l_whence = host.l_whence;
+		lock->l_start = host.l_start;
+		lock->l_len = host.l_len;
+		lock->l_pid = host.l_pid;
+	}
+	return 0;
+}
+
+static short
+lock_type_from_darwin(short type)
+{
+	switch (type) {
+	case _F_RDLCK:
+		return F_RDLCK;
+	case _F_WRLCK:
+		return F_WRLCK;
+	default:
+		return F_UNLCK;
+	}
+}
+
+static short
+lock_type_to_darwin(short type)
+{
+	switch (type) {
+	case F_RDLCK:
+		return _F_RDLCK;
+	case F_WRLCK:
+		return _F_WRLCK;
+	default:
+		return _F_UNLCK;
+	}
 }

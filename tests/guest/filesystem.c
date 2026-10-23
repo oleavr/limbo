@@ -33,6 +33,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/acl.h>
 #include <sys/attr.h>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -187,6 +188,57 @@ check_attributes(void)
 	struct stat st;
 	CHECK(stat("attributes", &st) == 0);
 	CHECK(st.st_mtime == 1000000000 && st.st_atime == 1100000000);
+
+	char path[PATH_MAX];
+	CHECK(getcwd(path, sizeof(path)) != NULL);
+	strlcat(path, "/attributes", sizeof(path));
+	times[0].tv_sec = 1200000000;
+	CHECK(setattrlist(path, &times_request, times, sizeof(times), 0) == 0);
+	CHECK(stat("attributes", &st) == 0);
+	CHECK(st.st_mtime == 1200000000);
+
+	CHECK(symlink("nowhere", "link") == 0);
+	struct attrlist flags_request = {
+			.bitmapcount = ATTR_BIT_MAP_COUNT,
+			.commonattr = ATTR_CMN_FLAGS,
+	};
+	uint32_t flags = UF_HIDDEN;
+	CHECK(setattrlist("link", &flags_request, &flags, sizeof(flags),
+			      FSOPT_NOFOLLOW)
+			== 0);
+	CHECK(setattrlist("link", &times_request, times, sizeof(times),
+			      FSOPT_NOFOLLOW)
+			== 0);
+	CHECK(lstat("link", &st) == 0);
+	CHECK(st.st_mtime == 1200000000);
+	CHECK(lchmod("link", 0700) == 0);
+	CHECK(lchmod("attributes", 0600) == 0);
+	CHECK(stat("attributes", &st) == 0);
+	CHECK((st.st_mode & 0777) == 0600);
+	acl_t acl = acl_init(1);
+	CHECK(acl != NULL);
+	CHECK(acl_set_file("attributes", ACL_TYPE_EXTENDED, acl) == 0);
+	acl_free(acl);
+	CHECK(setattrlist("link", &times_request, times, sizeof(times), 0)
+			== -1);
+	CHECK(errno == ENOENT);
+	CHECK(unlink("link") == 0);
+
+	CHECK(chflags("attributes", UF_HIDDEN) == 0);
+	CHECK(chflags("missing", UF_HIDDEN) == -1 && errno == ENOENT);
+	struct stat flagged;
+	CHECK(stat("attributes", &flagged) == 0);
+	CHECK(flagged.st_flags == UF_HIDDEN);
+	CHECK(listxattr("attributes", NULL, 0, 0) == 0);
+	fd = open("attributes", O_RDONLY);
+	CHECK(fd != -1);
+	CHECK(fchflags(fd, SF_NOUNLINK) == 0);
+	CHECK(fstat(fd, &flagged) == 0);
+	CHECK(flagged.st_flags == SF_NOUNLINK);
+	CHECK(fchflags(fd, 0) == 0);
+	CHECK(fstat(fd, &flagged) == 0);
+	CHECK(flagged.st_flags == 0);
+	CHECK(close(fd) == 0);
 	CHECK(unlink("attributes") == 0);
 }
 

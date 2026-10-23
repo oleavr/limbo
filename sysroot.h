@@ -28,7 +28,10 @@
 #pragma once
 
 #include <limits.h>
+#include <stdint.h>
+#include <sys/types.h>
 
 int sysroot_open(void);
 const char *sysroot_host_path(const char *path, int flags, char *buffer);
 const char *sysroot_guest_path(const char *path);
+uint64_t sysroot_file_id(dev_t dev, uint64_t ino);

@@ -192,14 +192,16 @@ check_time(void)
 {
 	mach_timebase_info_data_t timebase;
 	CHECK(mach_timebase_info(&timebase) == KERN_SUCCESS);
-	CHECK(timebase.numer == 1 && timebase.denom == 1);
+	CHECK(timebase.numer != 0 && timebase.denom != 0);
 
 	uint64_t start = mach_absolute_time();
 	usleep(50000);
-	uint64_t elapsed = mach_absolute_time() - start;
+	uint64_t elapsed = (mach_absolute_time() - start) * timebase.numer
+			/ timebase.denom;
 	CHECK(elapsed >= 45000000 && elapsed < 1000000000);
 
-	uint64_t deadline = mach_absolute_time() + 20000000;
+	uint64_t deadline = mach_absolute_time()
+			+ 20000000ULL * timebase.denom / timebase.numer;
 	CHECK(mach_wait_until(deadline) == KERN_SUCCESS);
 	CHECK(mach_absolute_time() >= deadline);
 }

@@ -33,6 +33,18 @@
 
 #define DARWIN_FSTYPE_APFS 0x1a
 
+#define DARWIN_MNT_LOCAL      0x00001000
+#define DARWIN_MNT_ROOTFS     0x00004000
+#define DARWIN_MNT_DOVOLFS    0x00008000
+#define DARWIN_MNT_JOURNALED  0x00800000
+#define DARWIN_MNT_MULTILABEL 0x04000000
+#define DARWIN_MNT_SNAPSHOT   0x40000000
+
+#define DARWIN_MOUNT_FLAGS                                                     \
+	(DARWIN_MNT_LOCAL | DARWIN_MNT_ROOTFS | DARWIN_MNT_DOVOLFS             \
+			| DARWIN_MNT_JOURNALED | DARWIN_MNT_MULTILABEL         \
+			| DARWIN_MNT_SNAPSHOT)
+
 static inline int32_t
 darwin_device(dev_t dev)
 {

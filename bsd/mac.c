@@ -25,10 +25,17 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <errno.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
 
+#include "fs/device.h"
 #include "handler.h"
+#include "sha.h"
+#include "sysroot.h"
 #include "xnu-errno.h"
 
 #define MAC_MAX_POLICY_NAME 32
@@ -75,6 +82,23 @@ amfi_handle_cdhash_in_trustcache_syscall(
 	return 0;
 }
 
+struct amfi_launch_constraint_args {
+	uint32_t audit_token[8];
+	uint64_t constraint;
+	uint64_t constraint_length;
+	uint32_t *error;
+	uint64_t error_size;
+};
+
+static int
+amfi_handle_launch_constraint_syscall(struct amfi_launch_constraint_args *args)
+{
+	if (args->error != NULL && args->error_size >= sizeof(uint32_t)) {
+		*args->error = 0;
+	}
+	return 0;
+}
+
 static int
 amfi_handle_syscall(int call, void *arg)
 {
@@ -83,6 +107,8 @@ amfi_handle_syscall(int call, void *arg)
 		return amfi_handle_check_dyld_policy_self_syscall((long)arg);
 	case 95:
 		return amfi_handle_cdhash_in_trustcache_syscall(arg);
+	case 102:
+		return amfi_handle_launch_constraint_syscall(arg);
 	default:
 		unimplemented();
 	}
@@ -92,11 +118,78 @@ static int
 quarantine_handle_syscall(int call)
 {
 	switch (call) {
+	case 80:
+	case 81:
 	case 82:
-	case 87:
+	case 84:
+	case 180:
 		return _ENOATTR;
+	case 87:
+		return 0;
 	default:
 		unimplemented();
+	}
+}
+
+#define SANDBOX_CONTAINER_PATH 4
+#define SANDBOX_EXTENSION_ISSUE 5
+#define SANDBOX_EXTENSION_FILE  0
+#define SANDBOX_EXTENSION_TOKEN_SIZE 0x3ff0
+
+struct sandbox_extension_issue_args {
+	const char *class;
+	uint64_t type;
+	const char *data;
+	uint64_t flags;
+	char *token;
+	int64_t pid;
+	uint64_t reserved;
+};
+
+static int
+sandbox_extension_issue(struct sandbox_extension_issue_args *args)
+{
+	char rest[PATH_MAX + 256];
+	int length = snprintf(rest, sizeof(rest),
+			";%02x;%08x;00000000;00000000;%016zx;%s",
+			(unsigned)args->type, (unsigned)args->flags,
+			strlen(args->class), args->class);
+	if (args->type == SANDBOX_EXTENSION_FILE) {
+		char buffer[PATH_MAX];
+		struct stat s;
+		if (stat(sysroot_host_path(args->data, 0, buffer), &s) == -1) {
+			return err_map(errno);
+		}
+		length += snprintf(rest + length, sizeof(rest) - length,
+				";01;%08x;%016llx;01;%s",
+				(unsigned)darwin_device(s.st_dev),
+				(unsigned long long)s.st_ino, args->data);
+	} else if (args->data != NULL) {
+		length += snprintf(rest + length, sizeof(rest) - length, ";%s",
+				args->data);
+	}
+
+	uint8_t digest[SHA256_DIGEST_LENGTH];
+	sha256(rest, strlen(rest), digest);
+	char *cursor = args->token;
+	for (size_t i = 0; i < sizeof(digest); i++) {
+		cursor += sprintf(cursor, "%02x", digest[i]);
+	}
+	snprintf(cursor, SANDBOX_EXTENSION_TOKEN_SIZE - 2 * sizeof(digest),
+			"%s", rest);
+	return 0;
+}
+
+static int
+sandbox_handle_syscall(int call, void *arg)
+{
+	switch (call) {
+	case SANDBOX_CONTAINER_PATH:
+		return _ENOTSUP;
+	case SANDBOX_EXTENSION_ISSUE:
+		return sandbox_extension_issue(arg);
+	default:
+		return 0;
 	}
 }
 
@@ -104,15 +197,15 @@ int
 sys___mac_syscall(char *policy, int call, user_addr_t arg)
 {
 #ifdef ENABLE_STRACE
-	fprintf(stderr, "__mac_syscall(%p, %p, %p)\n", (void *)policy,
-			(void *)call, (void *)arg);
+	fprintf(stderr, "__mac_syscall(\"%s\", %p, %p)\n", policy, (void *)call,
+			(void *)arg);
 #endif
 	if (strncmp(policy, "AMFI", MAC_MAX_POLICY_NAME) == 0) {
 		return amfi_handle_syscall(call, arg);
 	} else if (strncmp(policy, "Quarantine", MAC_MAX_POLICY_NAME) == 0) {
 		return quarantine_handle_syscall(call);
 	} else if (strncmp(policy, "Sandbox", MAC_MAX_POLICY_NAME) == 0) {
-		return 0;
+		return sandbox_handle_syscall(call, arg);
 	} else {
 		unimplemented();
 	}

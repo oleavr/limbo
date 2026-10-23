@@ -232,7 +232,7 @@ static void
 close_unlisted(const struct darwin_file_actions *src,
 		posix_spawn_file_actions_t *dst)
 {
-	DIR *fds = opendir("/proc/self/fd");
+	DIR *fds = opendir("/proc/thread-self/fd");
 	struct dirent *entry;
 	while ((entry = readdir(fds)) != NULL) {
 		int fd = atoi(entry->d_name);

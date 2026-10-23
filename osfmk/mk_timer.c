@@ -216,7 +216,8 @@ timer_wait(uint64_t expire_time)
 {
 	struct timespec deadline;
 	clock_gettime(CLOCK_MONOTONIC, &deadline);
-	uint64_t delay = expire_time - commpage_absolute_time();
+	uint64_t delay = commpage_absolute_to_nanoseconds(
+			expire_time - commpage_absolute_time());
 	deadline.tv_sec += delay / 1000000000;
 	deadline.tv_nsec += delay % 1000000000;
 	if (deadline.tv_nsec >= 1000000000) {

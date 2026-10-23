@@ -40,6 +40,7 @@
 #include <unistd.h>
 
 #include "at.h"
+#include "bsd_flags.h"
 #include "bsd/xnu-errno.h"
 #include "device.h"
 #include "sysroot.h"
@@ -182,13 +183,16 @@ static int
 stat_at(int fd, const char *path, int flags, struct __darwin_user64_stat64 *ub)
 {
 	char buffer[PATH_MAX];
+	const char *host_path = sysroot_host_path(path, flags, buffer);
 	struct statx tmp;
-	if (statx(fd, sysroot_host_path(path, flags, buffer), flags,
-			    STATX_BASIC_STATS | STATX_BTIME, &tmp)
+	if (statx(fd, host_path, flags, STATX_BASIC_STATS | STATX_BTIME, &tmp)
 			== -1) {
 		return err_map(errno);
 	}
 	convert_statx(&tmp, ub);
+	if (!S_ISLNK(tmp.stx_mode)) {
+		ub->st_flags = bsd_flags_get_at(fd, host_path, flags);
+	}
 	return 0;
 }
 
@@ -199,7 +203,9 @@ convert_statx(struct statx *stat, struct __darwin_user64_stat64 *dest)
 			makedev(stat->stx_dev_major, stat->stx_dev_minor));
 	dest->st_mode = stat->stx_mode;
 	dest->st_nlink = stat->stx_nlink;
-	dest->st_ino = stat->stx_ino;
+	dest->st_ino = sysroot_file_id(
+			makedev(stat->stx_dev_major, stat->stx_dev_minor),
+			stat->stx_ino);
 	dest->st_uid = stat->stx_uid;
 	dest->st_gid = stat->stx_gid;
 	dest->st_rdev = (stat->stx_rdev_major << 24) | stat->stx_rdev_minor;
@@ -365,9 +371,7 @@ convert_statfs(const struct statfs *src, dev_t device,
 	dest->f_fsid.__val[0] = darwin_device(device);
 	dest->f_fsid.__val[1] = DARWIN_FSTYPE_APFS;
 	dest->f_type = src->f_type;
-	/* This makes dyld use getdirentries64, but I am not sure what it does,
-	 * it checks if the 0x20 bit is set */
-	dest->f_flags = 0x20;
+	dest->f_flags = DARWIN_MOUNT_FLAGS;
 	strcpy(dest->f_fstypename, "apfs");
 	strcpy(dest->f_mntonname, "/");
 	strcpy(dest->f_mntfromname, "/dev/disk1s1");
@@ -429,7 +433,7 @@ int
 sys_fstatat64(int fd, user_addr_t path, user_addr_t ub, int flag)
 {
 #ifdef ENABLE_STRACE
-	fprintf(stderr, "fstatat64(%p, %p, %p, %p)\n", (void *)fd, (void *)path,
+	fprintf(stderr, "fstatat64(%p, \"%s\", %p, %p)\n", (void *)fd, (char *)path,
 			(void *)ub, (void *)flag);
 #endif
 	return stat_at(at_fd(fd), path, at_flags(flag), ub);

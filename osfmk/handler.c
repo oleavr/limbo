@@ -365,7 +365,8 @@ sys__kernelrpc_mach_vm_purgable_control_trap(mach_port_name_t target,
 			(void *)target, (void *)address, (void *)control,
 			(void *)state);
 #endif
-	unimplemented();
+	return _kernelrpc_mach_vm_purgable_control(
+			target, address, control, state);
 }
 
 kern_return_t
@@ -454,7 +455,7 @@ sys__kernelrpc_mach_port_insert_member_trap(mach_port_name_t target,
 	fprintf(stderr, "_kernelrpc_mach_port_insert_member_trap(%p, %p, %p)\n",
 			(void *)target, (void *)name, (void *)pset);
 #endif
-	return ipc_port_move_member(name, pset);
+	return ipc_port_insert_member(name, pset);
 }
 
 kern_return_t
@@ -467,7 +468,7 @@ sys__kernelrpc_mach_port_extract_member_trap(mach_port_name_t target,
 			"%p)\n",
 			(void *)target, (void *)name, (void *)pset);
 #endif
-	return ipc_port_move_member(name, MACH_PORT_NULL);
+	return ipc_port_extract_member(name, pset);
 }
 
 kern_return_t
@@ -713,7 +714,11 @@ sys_task_name_for_pid(
 	fprintf(stderr, "task_name_for_pid(%p, %p, %p)\n", (void *)target_tport,
 			(void *)pid, (void *)tn);
 #endif
-	unimplemented();
+	if (pid != getpid()) {
+		return KERN_FAILURE;
+	}
+	*tn = ipc_task_self();
+	return KERN_SUCCESS;
 }
 
 kern_return_t
@@ -743,8 +748,7 @@ sys_mach_timebase_info_trap(void *info)
 	fprintf(stderr, "mach_timebase_info_trap(%p)\n", (void *)info);
 #endif
 	uint32_t *numer_denom = info;
-	numer_denom[0] = 1;
-	numer_denom[1] = 1;
+	commpage_timebase(&numer_denom[0], &numer_denom[1]);
 	return KERN_SUCCESS;
 }
 
@@ -756,7 +760,8 @@ sys_mach_wait_until_trap(uint64_t deadline)
 #endif
 	uint64_t now;
 	while ((now = commpage_absolute_time()) < deadline) {
-		uint64_t delay = deadline - now;
+		uint64_t delay = commpage_absolute_to_nanoseconds(
+				deadline - now);
 		nanosleep(&(struct timespec){.tv_sec = delay / 1000000000,
 					  .tv_nsec = delay % 1000000000},
 				NULL);

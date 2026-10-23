@@ -301,6 +301,12 @@ int sys_psynch_cvwait(user_addr_t cv, uint64_t cvlsgen, uint32_t cvugen,
 int sys_psynch_cvclrprepost(user_addr_t cv, uint32_t cvgen, uint32_t cvugen,
 		uint32_t cvsgen, uint32_t prepocnt, uint32_t preposeq,
 		uint32_t flags);
+int sys_psynch_rw_rdlock(user_addr_t rwlock, uint32_t lgenval,
+		uint32_t ugenval, uint32_t rw_wc, int flags);
+int sys_psynch_rw_wrlock(user_addr_t rwlock, uint32_t lgenval,
+		uint32_t ugenval, uint32_t rw_wc, int flags);
+int sys_psynch_rw_unlock(user_addr_t rwlock, uint32_t lgenval,
+		uint32_t ugenval, uint32_t rw_wc, int flags);
 int sys_getsid(uint64_t pid);
 int sys_settid_with_pid(uint64_t pid, int assume);
 int sys_aio_fsync(int op, user_addr_t aiocbp);

@@ -26,6 +26,8 @@
  */
 
 #include <pthread.h>
+#include <pthread/qos.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -42,9 +44,14 @@ static pthread_key_t key;
 static int counter;
 static int initializations;
 
+static pthread_rwlock_t rwlock = PTHREAD_RWLOCK_INITIALIZER;
+static atomic_int holders;
+static int written;
+
 static void *increment(void *arg);
 static void initialize(void);
 static void *produce(void *arg);
+static void *read_and_write(void *arg);
 
 int
 main(void)
@@ -72,6 +79,18 @@ main(void)
 	}
 	pthread_mutex_unlock(&lock);
 	CHECK(pthread_join(producer, NULL) == 0);
+
+	for (intptr_t i = 0; i < THREADS; i++) {
+		CHECK(pthread_create(&threads[i], NULL, read_and_write,
+				      (void *)i)
+				== 0);
+	}
+	for (intptr_t i = 0; i < THREADS; i++) {
+		CHECK(pthread_join(threads[i], NULL) == 0);
+	}
+	CHECK(written == THREADS / 2 * ITERATIONS / 10);
+
+	CHECK(qos_class_main() != QOS_CLASS_UNSPECIFIED);
 
 	char name[32];
 	CHECK(pthread_setname_np("limbo-main") == 0);
@@ -112,4 +131,27 @@ produce(void *arg)
 			return NULL;
 		}
 	}
+}
+
+static void *
+read_and_write(void *arg)
+{
+	bool writer = (intptr_t)arg % 2 == 0;
+	int iterations = writer ? ITERATIONS / 10 : ITERATIONS;
+	for (int i = 0; i < iterations; i++) {
+		if (writer) {
+			CHECK(pthread_rwlock_wrlock(&rwlock) == 0);
+			int expected = 0;
+			CHECK(atomic_compare_exchange_strong(
+					&holders, &expected, -1));
+			written++;
+			atomic_store(&holders, 0);
+		} else {
+			CHECK(pthread_rwlock_rdlock(&rwlock) == 0);
+			CHECK(atomic_fetch_add(&holders, 1) >= 0);
+			atomic_fetch_sub(&holders, 1);
+		}
+		CHECK(pthread_rwlock_unlock(&rwlock) == 0);
+	}
+	return NULL;
 }

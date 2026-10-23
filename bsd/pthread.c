@@ -33,6 +33,7 @@
 #include <mach/mach.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <strings.h>
@@ -58,6 +59,8 @@
 #define WORKQ_FEATURE_WORKLOOP 0x80
 
 #define PTHREAD_START_TSD_BASE_SET 0x10000000
+
+#define MAIN_THREAD_PRIORITY 0x8ff
 #define PTHREAD_START_SUSPENDED    0x20000000
 
 #define BSDTHREAD_CTL_SET_QOS                         0x10
@@ -73,6 +76,7 @@
 
 #define WQOPS_THREAD_RETURN              0x004
 #define WQOPS_QUEUE_REQTHREADS           0x020
+#define WQOPS_QUEUE_REQTHREADS2          0x030
 #define WQOPS_THREAD_KEVENT_RETURN       0x040
 #define WQOPS_SET_EVENT_MANAGER_PRIORITY 0x080
 #define WQOPS_THREAD_WORKLOOP_RETURN     0x100
@@ -87,12 +91,20 @@
 #define WQ_FLAG_THREAD_EVENT_MANAGER 0x00100000
 #define WQ_FLAG_THREAD_TSD_BASE_SET  0x00200000
 #define WQ_FLAG_THREAD_WORKLOOP      0x00400000
+#define WQ_FLAG_THREAD_COOPERATIVE   0x01000000
 
-#define PTHREAD_PRIORITY_OVERCOMMIT_FLAG 0x80000000
+#define PTHREAD_PRIORITY_OVERCOMMIT_FLAG  0x80000000
+#define PTHREAD_PRIORITY_COOPERATIVE_FLAG 0x08000000
 #define PTHREAD_PRIORITY_QOS_CLASS_MASK  0x003fff00
 #define PTHREAD_PRIORITY_QOS_CLASS_SHIFT 8
 
 #define WORKQ_QOS_COUNT        7
+
+enum {
+	WORKQ_CONSTRAINED,
+	WORKQ_OVERCOMMIT,
+	WORKQ_COOPERATIVE,
+};
 #define WORKQ_STACK_SIZE       (512 * 1024)
 #define WORKQ_KEVENT_LIST_LEN  16
 #define WORKQ_KEVENT_DATA_SIZE (32 * 1024)
@@ -110,6 +122,7 @@ struct pthread_registration_data {
 struct workq_request {
 	uint32_t qos;
 	bool overcommit;
+	bool cooperative;
 	struct kqueue *kq;
 	bool manager;
 };
@@ -140,7 +153,7 @@ static struct {
 static struct {
 	pthread_mutex_t lock;
 	pthread_cond_t wakeup;
-	uint32_t requests[WORKQ_QOS_COUNT][2];
+	uint32_t requests[WORKQ_QOS_COUNT][WORKQ_COOPERATIVE + 1];
 	struct workq_kqueue_request *kqueue_requests;
 	struct workq_kqueue_request **kqueue_requests_tail;
 	uint32_t idle;
@@ -181,6 +194,10 @@ sys_bsdthread_register(user_addr_t threadstart, user_addr_t wqthread,
 	registration.pthread_size = pthread_size;
 	registration.tsd_offset = d->tsd_offset;
 	registration.mach_thread_self_offset = d->mach_thread_self_offset;
+	if (data_size >= offsetof(struct pthread_registration_data, main_qos)
+					+ sizeof(d->main_qos)) {
+		d->main_qos = MAIN_THREAD_PRIORITY;
+	}
 
 	return PTHREAD_FEATURE_DISPATCHFUNC | PTHREAD_FEATURE_FINEPRIO
 			| PTHREAD_FEATURE_BSDTHREADCTL | PTHREAD_FEATURE_SETSELF
@@ -269,14 +286,19 @@ sys_workq_kernreturn(int options, user_addr_t item, int affinity, int prio)
 			(void *)(intptr_t)affinity, (void *)(intptr_t)prio);
 #endif
 	switch (options) {
-	case WQOPS_QUEUE_REQTHREADS: {
+	case WQOPS_QUEUE_REQTHREADS:
+	case WQOPS_QUEUE_REQTHREADS2: {
 		uint32_t classes
 				= ((uint32_t)prio & PTHREAD_PRIORITY_QOS_CLASS_MASK)
 				>> PTHREAD_PRIORITY_QOS_CLASS_SHIFT;
-		bool overcommit = (uint32_t)prio
-				& PTHREAD_PRIORITY_OVERCOMMIT_FLAG;
+		uint32_t kind = WORKQ_CONSTRAINED;
+		if ((uint32_t)prio & PTHREAD_PRIORITY_OVERCOMMIT_FLAG) {
+			kind = WORKQ_OVERCOMMIT;
+		} else if ((uint32_t)prio & PTHREAD_PRIORITY_COOPERATIVE_FLAG) {
+			kind = WORKQ_COOPERATIVE;
+		}
 		pthread_mutex_lock(&workq.lock);
-		workq.requests[ffs(classes)][overcommit] += affinity;
+		workq.requests[ffs(classes)][kind] += affinity;
 		workq_schedule();
 		pthread_mutex_unlock(&workq.lock);
 		return 0;
@@ -323,8 +345,9 @@ workq_pending(void)
 		pending++;
 	}
 	for (uint32_t qos = 0; qos < WORKQ_QOS_COUNT; qos++) {
-		pending += workq.requests[qos][false]
-				+ workq.requests[qos][true];
+		pending += workq.requests[qos][WORKQ_CONSTRAINED]
+				+ workq.requests[qos][WORKQ_OVERCOMMIT]
+				+ workq.requests[qos][WORKQ_COOPERATIVE];
 	}
 	return pending;
 }
@@ -346,18 +369,29 @@ workq_claim(struct workq_request *request)
 	bool constrained_allowed
 			= workq.constrained < sysconf(_SC_NPROCESSORS_ONLN);
 	for (int32_t qos = WORKQ_QOS_COUNT - 1; qos >= 0; qos--) {
-		if (workq.requests[qos][true] > 0) {
-			workq.requests[qos][true]--;
+		if (workq.requests[qos][WORKQ_OVERCOMMIT] > 0) {
+			workq.requests[qos][WORKQ_OVERCOMMIT]--;
 			*request = (struct workq_request){
 					.qos = qos,
 					.overcommit = true,
 			};
 			return true;
 		}
-		if (constrained_allowed && workq.requests[qos][false] > 0) {
-			workq.requests[qos][false]--;
+		if (constrained_allowed
+				&& workq.requests[qos][WORKQ_CONSTRAINED] > 0) {
+			workq.requests[qos][WORKQ_CONSTRAINED]--;
 			workq.constrained++;
 			*request = (struct workq_request){.qos = qos};
+			return true;
+		}
+		if (constrained_allowed
+				&& workq.requests[qos][WORKQ_COOPERATIVE] > 0) {
+			workq.requests[qos][WORKQ_COOPERATIVE]--;
+			workq.constrained++;
+			*request = (struct workq_request){
+					.qos = qos,
+					.cooperative = true,
+			};
 			return true;
 		}
 	}
@@ -470,6 +504,9 @@ workq_flags(const struct workq_request *request)
 	}
 	if (request->overcommit) {
 		flags |= WQ_FLAG_THREAD_OVERCOMMIT;
+	}
+	if (request->cooperative) {
+		flags |= WQ_FLAG_THREAD_COOPERATIVE;
 	}
 	if (request->kq != NULL) {
 		flags |= WQ_FLAG_THREAD_KEVENT;

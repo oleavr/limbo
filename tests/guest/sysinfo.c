@@ -37,6 +37,14 @@
 
 #include "check.h"
 
+#ifdef __arm64__
+#define HOST_CPU_TYPE CPU_TYPE_ARM64
+#define HOST_MACHINE  "arm64"
+#else
+#define HOST_CPU_TYPE CPU_TYPE_X86_64
+#define HOST_MACHINE  "x86_64"
+#endif
+
 int
 main(void)
 {
@@ -52,6 +60,19 @@ main(void)
 	size = sizeof(memsize);
 	CHECK(sysctlbyname("hw.memsize", &memsize, &size, NULL, 0) == 0);
 	CHECK(memsize > 0);
+	cpu_type_t cputype;
+	size = sizeof(cputype);
+	CHECK(sysctlbyname("hw.cputype", &cputype, &size, NULL, 0) == 0);
+	CHECK(cputype == HOST_CPU_TYPE);
+	char machine[32];
+	size = sizeof(machine);
+	CHECK(sysctlbyname("hw.machine", machine, &size, NULL, 0) == 0);
+	CHECK(strcmp(machine, HOST_MACHINE) == 0);
+#ifdef __arm64__
+	char target[32];
+	size = sizeof(target);
+	CHECK(sysctlbyname("hw.target", target, &size, NULL, 0) == 0);
+#endif
 
 	struct kinfo_proc info;
 	size = sizeof(info);
@@ -91,7 +112,7 @@ main(void)
 	CHECK(host_info(mach_host_self(), HOST_BASIC_INFO, (host_info_t)&basic,
 			      &count)
 			== KERN_SUCCESS);
-	CHECK(basic.cpu_type == CPU_TYPE_X86_64 && basic.avail_cpus > 0);
+	CHECK(basic.cpu_type == HOST_CPU_TYPE && basic.avail_cpus > 0);
 
 	CHECK(labs(time(NULL) - info.kp_proc.p_starttime.tv_sec) < 60);
 	return 0;

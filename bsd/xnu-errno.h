@@ -157,6 +157,8 @@ err_map(int err)
 		return _EIO;
 	case ENXIO:
 		return _ENXIO;
+	case E2BIG:
+		return _E2BIG;
 	case ENOEXEC:
 		return _ENOEXEC;
 	case EBADF:

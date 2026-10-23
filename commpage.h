@@ -86,3 +86,5 @@ static const size_t _COMM_PAGE_AREA_LENGTH = 0x4000;
 
 int commpage_mmap(void);
 uint64_t commpage_absolute_time(void);
+void commpage_timebase(uint32_t *numer, uint32_t *denom);
+uint64_t commpage_absolute_to_nanoseconds(uint64_t absolute);

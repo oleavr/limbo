@@ -42,7 +42,11 @@ mach_port_names(ipc_space_t task, mach_port_name_array_t *names,
 			(void *)names, (void *)namesCnt, (void *)types,
 			(void *)typesCnt);
 #endif
-	unimplemented();
+	uint32_t count;
+	kern_return_t kr = ipc_port_names(names, types, &count);
+	*namesCnt = count;
+	*typesCnt = count;
+	return kr;
 }
 
 kern_return_t
@@ -220,7 +224,7 @@ mach_port_extract_right(ipc_space_t task, mach_port_name_t name,
 			(void *)task, (void *)name, (void *)msgt_name,
 			(void *)poly, (void *)polyPoly);
 #endif
-	unimplemented();
+	return ipc_port_extract_right(name, msgt_name, poly, polyPoly);
 }
 
 kern_return_t
@@ -385,7 +389,7 @@ mach_port_insert_member(
 	fprintf(stderr, "mach_port_insert_member(%p, %p, %p)\n", (void *)task,
 			(void *)name, (void *)pset);
 #endif
-	return ipc_port_move_member(name, pset);
+	return ipc_port_insert_member(name, pset);
 }
 
 kern_return_t
@@ -396,7 +400,7 @@ mach_port_extract_member(
 	fprintf(stderr, "mach_port_extract_member(%p, %p, %p)\n", (void *)task,
 			(void *)name, (void *)pset);
 #endif
-	return ipc_port_move_member(name, MACH_PORT_NULL);
+	return ipc_port_extract_member(name, pset);
 }
 
 kern_return_t

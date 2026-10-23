@@ -72,6 +72,13 @@ commpage_absolute_time(void)
 			+ *(uint64_t *)_COMM_PAGE_NT_NS_BASE;
 }
 
+void
+commpage_timebase(uint32_t *numer, uint32_t *denom)
+{
+	*numer = 1;
+	*denom = 1;
+}
+
 static void
 init_nanotime(void)
 {
@@ -183,8 +190,33 @@ map_fixed_page(uintptr_t address, size_t length, uint8_t **page)
 uint64_t
 commpage_absolute_time(void)
 {
-	struct timespec now;
-	clock_gettime(CLOCK_MONOTONIC, &now);
-	return now.tv_sec * 1000000000ULL + now.tv_nsec;
+	uint64_t ticks;
+	asm volatile("isb\n"
+		     "mrs %0, cntvct_el0"
+			: "=r"(ticks));
+	return ticks;
+}
+
+void
+commpage_timebase(uint32_t *numer, uint32_t *denom)
+{
+	uint64_t frequency;
+	asm("mrs %0, cntfrq_el0" : "=r"(frequency));
+	uint64_t a = 1000000000, b = frequency;
+	while (b != 0) {
+		uint64_t r = a % b;
+		a = b;
+		b = r;
+	}
+	*numer = 1000000000 / a;
+	*denom = frequency / a;
 }
 #endif
+
+uint64_t
+commpage_absolute_to_nanoseconds(uint64_t absolute)
+{
+	uint32_t numer, denom;
+	commpage_timebase(&numer, &denom);
+	return (unsigned __int128)absolute * numer / denom;
+}

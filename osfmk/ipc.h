@@ -62,6 +62,7 @@ typedef enum {
 	IPC_KOBJECT_SEMAPHORE,
 	IPC_KOBJECT_BOOTSTRAP,
 	IPC_KOBJECT_LIBINFO,
+	IPC_KOBJECT_MEMORY_ENTRY,
 } ipc_kobject_type_t;
 
 mach_port_name_t ipc_task_self(void);
@@ -102,13 +103,22 @@ kern_return_t ipc_port_mod_refs(mach_port_name_t name, mach_port_right_t right,
 		mach_port_delta_t delta);
 kern_return_t ipc_port_insert_right(mach_port_name_t name,
 		mach_port_name_t poly, mach_msg_type_name_t poly_poly);
+kern_return_t ipc_port_extract_right(mach_port_name_t name,
+		mach_msg_type_name_t msgt_name, mach_port_name_t *poly,
+		mach_msg_type_name_t *poly_poly);
 kern_return_t ipc_port_type(mach_port_name_t name, mach_port_type_t *type);
+kern_return_t ipc_port_names(mach_port_name_t **names,
+		mach_port_type_t **types, uint32_t *count);
 kern_return_t ipc_port_get_refs(mach_port_name_t name, mach_port_right_t right,
 		mach_port_urefs_t *refs);
 kern_return_t ipc_port_get_context(
 		mach_port_name_t name, mach_port_context_t *context);
 kern_return_t ipc_port_set_context(
 		mach_port_name_t name, mach_port_context_t context);
+kern_return_t ipc_port_insert_member(
+		mach_port_name_t member, mach_port_name_t pset);
+kern_return_t ipc_port_extract_member(
+		mach_port_name_t member, mach_port_name_t pset);
 kern_return_t ipc_port_move_member(
 		mach_port_name_t member, mach_port_name_t pset);
 kern_return_t ipc_port_get_status(

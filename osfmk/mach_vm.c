@@ -26,14 +26,27 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <errno.h>
 #include <mach/mach_types.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
+#include "ipc.h"
 #include "mach_vm.h"
+
+struct memory_entry {
+	int fd;
+	mach_vm_size_t size;
+	mach_vm_offset_t data_offset;
+};
 
 #define VM_FLAGS_ANYWHERE  0x0001
 #define VM_FLAGS_OVERWRITE 0x4000
@@ -44,10 +57,23 @@ static kern_return_t map_anonymous(mach_vm_address_t *address,
 		vm_prot_t protection);
 static void *map_aligned(mach_vm_size_t size, mach_vm_offset_t mask,
 		vm_prot_t protection);
+static kern_return_t remap_share(mach_vm_address_t *target_address,
+		mach_vm_size_t size, mach_vm_offset_t mask, int flags,
+		mach_vm_address_t src_address, vm_prot_t protection);
+static int share_in_place(mach_vm_address_t address, mach_vm_size_t size,
+		vm_prot_t protection);
+static int copy_range(mach_vm_address_t address, mach_vm_size_t size);
 static kern_return_t remap_copy(mach_vm_address_t *target_address,
 		mach_vm_size_t size, mach_vm_offset_t mask, int flags,
 		mach_vm_address_t src_address, vm_prot_t *protection);
 static vm_prot_t region_protection(mach_vm_address_t address);
+static bool region_find(mach_vm_address_t address, mach_vm_address_t *start,
+		mach_vm_size_t *size, vm_prot_t *protection, bool *shared,
+		uint64_t *offset);
+static kern_return_t map_entry(mach_vm_address_t *address, mach_vm_size_t size,
+		mach_vm_offset_t mask, int flags,
+		const struct memory_entry *entry, memory_object_offset_t offset,
+		boolean_t copy, vm_prot_t protection);
 
 kern_return_t
 _kernelrpc_mach_vm_allocate(vm_task_entry_t target, mach_vm_address_t *address,
@@ -278,11 +304,48 @@ _kernelrpc_mach_vm_map(vm_task_entry_t target_task, mach_vm_address_t *address,
 			(void *)offset, (void *)copy, (void *)cur_protection,
 			(void *)max_protection, (void *)inheritance);
 #endif
+	cur_protection &= VM_PROT_ALL;
 	if (object != MACH_PORT_NULL) {
-		unimplemented();
+		struct memory_entry *entry = ipc_kobject_lookup(
+				object, IPC_KOBJECT_MEMORY_ENTRY);
+		if (entry == NULL) {
+			unimplemented();
+		}
+		kern_return_t kr = map_entry(address, size, mask, flags, entry,
+				offset, copy, cur_protection);
+		if (kr == KERN_SUCCESS && (flags & VM_FLAGS_RETURN_DATA_ADDR)) {
+			*address += entry->data_offset;
+		}
+		return kr;
 	}
 
 	return map_anonymous(address, size, mask, flags, cur_protection);
+}
+
+static kern_return_t
+map_entry(mach_vm_address_t *address, mach_vm_size_t size,
+		mach_vm_offset_t mask, int flags,
+		const struct memory_entry *entry, memory_object_offset_t offset,
+		boolean_t copy, vm_prot_t protection)
+{
+	size = (size + PAGE_MASK) & ~PAGE_MASK;
+	if (offset + size > entry->size) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	kern_return_t kr = map_anonymous(
+			address, size, mask, flags, VM_PROT_NONE);
+	if (kr != KERN_SUCCESS) {
+		return kr;
+	}
+	void *base = mmap((void *)*address, size, protection,
+			(copy ? MAP_PRIVATE : MAP_SHARED) | MAP_FIXED,
+			entry->fd, offset);
+	if (base == MAP_FAILED) {
+		munmap((void *)*address, size);
+		return KERN_NO_SPACE;
+	}
+	return KERN_SUCCESS;
 }
 
 kern_return_t
@@ -316,14 +379,49 @@ _kernelrpc_mach_vm_remap(vm_map_t target_task,
 			(void *)cur_protection, (void *)max_protection,
 			(void *)inheritance);
 #endif
-	if (!copy) {
-		unimplemented();
-	}
-
 	*cur_protection = region_protection(src_address);
 	*max_protection = VM_PROT_ALL;
+	if (!copy) {
+		return remap_share(target_address, size, mask, flags,
+				src_address, *cur_protection);
+	}
 	return remap_copy(target_address, size, mask, flags, src_address,
 			cur_protection);
+}
+
+static kern_return_t
+remap_share(mach_vm_address_t *target_address, mach_vm_size_t size,
+		mach_vm_offset_t mask, int flags, mach_vm_address_t src_address,
+		vm_prot_t protection)
+{
+	size = (size + PAGE_MASK) & ~PAGE_MASK;
+	struct memory_entry entry = {
+			.fd = share_in_place(src_address, size, protection),
+			.size = size,
+	};
+	if (entry.fd == -1) {
+		return KERN_NO_SPACE;
+	}
+
+	kern_return_t kr = map_entry(target_address, size, mask, flags, &entry,
+			0, false, protection);
+	close(entry.fd);
+	return kr;
+}
+
+static int
+share_in_place(mach_vm_address_t address, mach_vm_size_t size,
+		vm_prot_t protection)
+{
+	int fd = copy_range(address, size);
+	if (fd != -1
+			&& mmap((void *)address, size, protection,
+					   MAP_SHARED | MAP_FIXED, fd, 0)
+					== MAP_FAILED) {
+		close(fd);
+		return -1;
+	}
+	return fd;
 }
 
 static kern_return_t
@@ -345,7 +443,7 @@ remap_copy(mach_vm_address_t *target_address, mach_vm_size_t size,
 static vm_prot_t
 region_protection(mach_vm_address_t address)
 {
-	FILE *maps = fopen("/proc/self/maps", "r");
+	FILE *maps = fopen("/proc/thread-self/maps", "r");
 	char line[512];
 	vm_prot_t protection = VM_PROT_NONE;
 	while (fgets(line, sizeof(line), maps) != NULL) {
@@ -387,7 +485,28 @@ mach_vm_region_recurse(vm_map_read_t target_task, mach_vm_address_t *address,
 			(void *)target_task, (void *)address, (void *)size,
 			(void *)nesting_depth, (void *)info, (void *)infoCnt);
 #endif
-	unimplemented();
+	if (*infoCnt < VM_REGION_SUBMAP_INFO_COUNT_64) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	vm_prot_t protection;
+	bool shared;
+	uint64_t offset;
+	if (!region_find(*address, address, size, &protection, &shared,
+			    &offset)) {
+		return KERN_INVALID_ADDRESS;
+	}
+	vm_region_submap_info_data_64_t *submap = (void *)info;
+	*submap = (vm_region_submap_info_data_64_t){
+			.protection = protection,
+			.max_protection = VM_PROT_ALL,
+			.inheritance = VM_INHERIT_COPY,
+			.offset = offset,
+			.share_mode = shared ? SM_SHARED : SM_PRIVATE,
+			.user_tag = 0,
+	};
+	*nesting_depth = 0;
+	*infoCnt = VM_REGION_SUBMAP_INFO_COUNT_64;
+	return KERN_SUCCESS;
 }
 
 kern_return_t
@@ -402,7 +521,60 @@ mach_vm_region(vm_map_read_t target_task, mach_vm_address_t *address,
 			(void *)flavor, (void *)info, (void *)infoCnt,
 			(void *)object_name);
 #endif
-	unimplemented();
+	if (flavor != VM_REGION_BASIC_INFO_64
+			|| *infoCnt < VM_REGION_BASIC_INFO_COUNT_64) {
+		unimplemented();
+	}
+	vm_prot_t protection;
+	bool shared;
+	uint64_t offset;
+	if (!region_find(*address, address, size, &protection, &shared,
+			    &offset)) {
+		return KERN_INVALID_ADDRESS;
+	}
+	vm_region_basic_info_data_64_t *basic = (void *)info;
+	*basic = (vm_region_basic_info_data_64_t){
+			.protection = protection,
+			.max_protection = VM_PROT_ALL,
+			.inheritance = VM_INHERIT_COPY,
+			.shared = shared,
+			.offset = offset,
+	};
+	*infoCnt = VM_REGION_BASIC_INFO_COUNT_64;
+	*object_name = MACH_PORT_NULL;
+	return KERN_SUCCESS;
+}
+
+static bool
+region_find(mach_vm_address_t address, mach_vm_address_t *start,
+		mach_vm_size_t *size, vm_prot_t *protection, bool *shared,
+		uint64_t *offset)
+{
+	FILE *maps = fopen("/proc/thread-self/maps", "r");
+	char line[512];
+	bool found = false;
+	while (fgets(line, sizeof(line), maps) != NULL) {
+		unsigned long low, high, file_offset;
+		char perms[5];
+		if (sscanf(line, "%lx-%lx %4s %lx", &low, &high, perms,
+				    &file_offset)
+						== 4
+				&& high > address) {
+			*start = low;
+			*size = high - low;
+			*protection = ((perms[0] == 'r') ? VM_PROT_READ : 0)
+					| ((perms[1] == 'w') ? VM_PROT_WRITE
+							     : 0)
+					| ((perms[2] == 'x') ? VM_PROT_EXECUTE
+							     : 0);
+			*shared = perms[3] == 's';
+			*offset = file_offset;
+			found = true;
+			break;
+		}
+	}
+	fclose(maps);
+	return found;
 }
 
 kern_return_t
@@ -416,7 +588,51 @@ mach_make_memory_entry(vm_map_t target_task, memory_object_size_t *size,
 			(void *)permission, (void *)object_handle,
 			(void *)parent_handle);
 #endif
-	unimplemented();
+	if (parent_handle != MACH_PORT_NULL
+			|| !(permission
+					& (MAP_MEM_VM_SHARE
+							| MAP_MEM_VM_COPY))) {
+		unimplemented();
+	}
+
+	mach_vm_address_t start = offset & ~(mach_vm_address_t)PAGE_MASK;
+	mach_vm_address_t end = (offset + *size + PAGE_MASK) & ~PAGE_MASK;
+	int fd = (permission & MAP_MEM_VM_SHARE)
+			? share_in_place(start, end - start,
+					  region_protection(start))
+			: copy_range(start, end - start);
+	if (fd == -1) {
+		return KERN_INVALID_ADDRESS;
+	}
+
+	struct memory_entry *entry = malloc(sizeof(*entry));
+	*entry = (struct memory_entry){
+			.fd = fd,
+			.size = end - start,
+			.data_offset = (permission & MAP_MEM_USE_DATA_ADDR)
+					? offset - start
+					: 0,
+	};
+	if (!(permission & MAP_MEM_USE_DATA_ADDR)) {
+		*size = end - start;
+	}
+	*object_handle = ipc_kobject_alloc(IPC_KOBJECT_MEMORY_ENTRY, entry);
+	return KERN_SUCCESS;
+}
+
+static int
+copy_range(mach_vm_address_t address, mach_vm_size_t size)
+{
+	int fd = memfd_create("memory entry", MFD_CLOEXEC);
+	if (fd == -1 || ftruncate(fd, size) == -1
+			|| pwrite(fd, (void *)address, size, 0)
+					!= (ssize_t)size) {
+		if (fd != -1) {
+			close(fd);
+		}
+		return -1;
+	}
+	return fd;
 }
 
 kern_return_t
@@ -428,7 +644,8 @@ _kernelrpc_mach_vm_purgable_control(vm_map_t target_task,
 			(void *)target_task, (void *)address, (void *)control,
 			(void *)state);
 #endif
-	unimplemented();
+	*state = VM_PURGABLE_NONVOLATILE;
+	return KERN_SUCCESS;
 }
 
 kern_return_t
@@ -585,5 +802,16 @@ _kernelrpc_mach_vm_reallocate(vm_map_t target_task, mach_vm_address_t src,
 			(void *)dst, (void *)dst_size, (void *)align_mask,
 			(void *)options, (void *)flags);
 #endif
-	unimplemented();
+	kern_return_t kr = map_anonymous(dst, dst_size, align_mask,
+			flags | VM_FLAGS_ANYWHERE,
+			VM_PROT_READ | VM_PROT_WRITE);
+	if (kr != KERN_SUCCESS) {
+		return kr;
+	}
+	memcpy((void *)*dst, (void *)src,
+			src_size < dst_size ? src_size : dst_size);
+	mach_vm_address_t start = src & ~(mach_vm_address_t)PAGE_MASK;
+	mach_vm_address_t end = (src + src_size + PAGE_MASK) & ~PAGE_MASK;
+	munmap((void *)start, end - start);
+	return KERN_SUCCESS;
 }

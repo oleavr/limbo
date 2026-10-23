@@ -312,3 +312,237 @@ sys_psynch_cvclrprepost(user_addr_t cv, uint32_t cvgen, uint32_t cvugen,
 	pthread_mutex_unlock(&lock);
 	return 0;
 }
+
+#define PTHRW_COUNT_SHIFT 8
+#define PTH_RWL_KBIT      0x01
+#define PTH_RWL_EBIT      0x02
+#define PTH_RWL_WBIT      0x04
+#define PTH_RWL_MBIT      0x40
+#define PTH_RWS_WSVBIT    0x04
+
+struct rw_waiter {
+	struct rw_waiter *next;
+	user_addr_t rwlock;
+	uint32_t seq;
+	bool write;
+	bool granted;
+	uint32_t update;
+	pthread_cond_t wakeup;
+};
+
+struct rw_prepost {
+	struct rw_prepost *next;
+	user_addr_t rwlock;
+	bool pending;
+	uint32_t lseq;
+	uint32_t sseq;
+	bool overlap;
+	uint32_t overlap_sseq;
+	uint32_t granted_sseq;
+};
+
+static struct rw_waiter *rw_waiters;
+static struct rw_prepost *rw_preposts;
+
+static int rw_lock(user_addr_t rwlock, uint32_t lgenval, bool write);
+static bool rw_all_arrived(user_addr_t rwlock, uint32_t sseq, uint32_t lseq);
+static void rw_grant(user_addr_t rwlock, uint32_t sseq);
+static struct rw_waiter *rw_waiter_at(user_addr_t rwlock, uint32_t seq);
+static void rw_wake(struct rw_waiter *waiter, uint32_t update);
+static struct rw_prepost **rw_prepost_find(user_addr_t rwlock);
+static struct rw_prepost *rw_state(user_addr_t rwlock);
+
+int
+sys_psynch_rw_rdlock(user_addr_t rwlock, uint32_t lgenval, uint32_t ugenval,
+		uint32_t rw_wc, int flags)
+{
+#ifdef ENABLE_STRACE
+	fprintf(stderr, "psynch_rw_rdlock(%p, %#x, %#x, %#x, %#x)\n", rwlock,
+			lgenval, ugenval, rw_wc, flags);
+#endif
+	pthread_mutex_lock(&lock);
+	struct rw_prepost *state = *rw_prepost_find(rwlock);
+	uint32_t sseq = rw_wc & PTHRW_COUNT_MASK;
+	if (state != NULL && state->overlap && !(rw_wc & PTH_RWS_WSVBIT)
+			&& !(lgenval & PTH_RWL_WBIT)
+			&& ((int32_t)(state->granted_sseq - sseq) >= 0
+					|| (int32_t)(sseq - state->overlap_sseq)
+							<= 0)) {
+		state->granted_sseq += PTHRW_INC;
+		pthread_mutex_unlock(&lock);
+		return PTHRW_INC | PTH_RWL_MBIT;
+	}
+	pthread_mutex_unlock(&lock);
+	return rw_lock(rwlock, lgenval, false);
+}
+
+int
+sys_psynch_rw_wrlock(user_addr_t rwlock, uint32_t lgenval, uint32_t ugenval,
+		uint32_t rw_wc, int flags)
+{
+#ifdef ENABLE_STRACE
+	fprintf(stderr, "psynch_rw_wrlock(%p, %#x, %#x, %#x, %#x)\n", rwlock,
+			lgenval, ugenval, rw_wc, flags);
+#endif
+	return rw_lock(rwlock, lgenval, true);
+}
+
+int
+sys_psynch_rw_unlock(user_addr_t rwlock, uint32_t lgenval, uint32_t ugenval,
+		uint32_t rw_wc, int flags)
+{
+#ifdef ENABLE_STRACE
+	fprintf(stderr, "psynch_rw_unlock(%p, %#x, %#x, %#x, %#x)\n", rwlock,
+			lgenval, ugenval, rw_wc, flags);
+#endif
+	uint32_t lseq = lgenval & PTHRW_COUNT_MASK;
+	uint32_t sseq = rw_wc & PTHRW_COUNT_MASK;
+
+	pthread_mutex_lock(&lock);
+	struct rw_prepost *state = rw_state(rwlock);
+	state->overlap = false;
+	state->overlap_sseq = sseq;
+	if (rw_all_arrived(rwlock, sseq, lseq)) {
+		rw_grant(rwlock, sseq);
+	} else {
+		state->pending = true;
+		state->lseq = lseq;
+		state->sseq = sseq;
+	}
+	pthread_mutex_unlock(&lock);
+	return 0;
+}
+
+static int
+rw_lock(user_addr_t rwlock, uint32_t lgenval, bool write)
+{
+	struct rw_waiter waiter = {
+			.rwlock = rwlock,
+			.seq = lgenval & PTHRW_COUNT_MASK,
+			.write = write,
+	};
+	pthread_cond_init(&waiter.wakeup, NULL);
+
+	pthread_mutex_lock(&lock);
+	waiter.next = rw_waiters;
+	rw_waiters = &waiter;
+
+	struct rw_prepost *prepost = *rw_prepost_find(rwlock);
+	if (prepost != NULL && prepost->pending
+			&& rw_all_arrived(
+					rwlock, prepost->sseq, prepost->lseq)) {
+		prepost->pending = false;
+		rw_grant(rwlock, prepost->sseq);
+	}
+
+	while (!waiter.granted) {
+		pthread_cond_wait(&waiter.wakeup, &lock);
+	}
+	pthread_mutex_unlock(&lock);
+
+	pthread_cond_destroy(&waiter.wakeup);
+	return (int)waiter.update;
+}
+
+static bool
+rw_all_arrived(user_addr_t rwlock, uint32_t sseq, uint32_t lseq)
+{
+	for (uint32_t seq = sseq + PTHRW_INC; (int32_t)(lseq - seq) >= 0;
+			seq += PTHRW_INC) {
+		if (rw_waiter_at(rwlock, seq) == NULL) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static void
+rw_grant(user_addr_t rwlock, uint32_t sseq)
+{
+	uint32_t next = sseq + PTHRW_INC;
+	struct rw_waiter *first = rw_waiter_at(rwlock, next);
+	if (first == NULL) {
+		return;
+	}
+
+	bool writers = false;
+	for (struct rw_waiter *w = rw_waiters; w != NULL; w = w->next) {
+		if (w->rwlock == rwlock && w->write && w != first) {
+			writers = true;
+		}
+	}
+
+	if (first->write) {
+		uint32_t update = PTHRW_INC | PTH_RWL_KBIT | PTH_RWL_EBIT;
+		rw_wake(first, writers ? update | PTH_RWL_WBIT : update);
+		return;
+	}
+
+	uint32_t count = 0;
+	for (uint32_t seq = next;; seq += PTHRW_INC) {
+		struct rw_waiter *w = rw_waiter_at(rwlock, seq);
+		if (w == NULL || w->write) {
+			break;
+		}
+		count++;
+	}
+	uint32_t update = count << PTHRW_COUNT_SHIFT;
+	if (writers) {
+		update |= PTH_RWL_WBIT | PTH_RWL_KBIT;
+	} else {
+		struct rw_prepost *state = rw_state(rwlock);
+		state->overlap = true;
+		state->granted_sseq = sseq + count * PTHRW_INC;
+	}
+	for (uint32_t i = 0; i < count; i++) {
+		rw_wake(rw_waiter_at(rwlock, next + i * PTHRW_INC), update);
+	}
+}
+
+static struct rw_waiter *
+rw_waiter_at(user_addr_t rwlock, uint32_t seq)
+{
+	for (struct rw_waiter *w = rw_waiters; w != NULL; w = w->next) {
+		if (w->rwlock == rwlock && w->seq == seq) {
+			return w;
+		}
+	}
+	return NULL;
+}
+
+static void
+rw_wake(struct rw_waiter *waiter, uint32_t update)
+{
+	for (struct rw_waiter **p = &rw_waiters; *p != NULL; p = &(*p)->next) {
+		if (*p == waiter) {
+			*p = waiter->next;
+			break;
+		}
+	}
+	waiter->granted = true;
+	waiter->update = update;
+	pthread_cond_signal(&waiter->wakeup);
+}
+
+static struct rw_prepost *
+rw_state(user_addr_t rwlock)
+{
+	struct rw_prepost *state = *rw_prepost_find(rwlock);
+	if (state == NULL) {
+		state = calloc(1, sizeof(*state));
+		state->rwlock = rwlock;
+		state->next = rw_preposts;
+		rw_preposts = state;
+	}
+	return state;
+}
+
+static struct rw_prepost **
+rw_prepost_find(user_addr_t rwlock)
+{
+	struct rw_prepost **link = &rw_preposts;
+	while (*link != NULL && (*link)->rwlock != rwlock) {
+		link = &(*link)->next;
+	}
+	return link;
+}

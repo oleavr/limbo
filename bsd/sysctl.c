@@ -30,6 +30,7 @@
 #define _GNU_SOURCE
 #endif
 
+#include <ctype.h>
 #include <mach/mach.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -41,6 +42,16 @@
 #include "process.h"
 #include "shared_cache.h"
 #include "xnu-errno.h"
+
+#ifdef __arm64__
+#define HOST_CPU_TYPE CPU_TYPE_ARM64
+#define HOST_MACHINE  "arm64"
+#define HOST_MODEL    "Mac17,2"
+#else
+#define HOST_CPU_TYPE CPU_TYPE_X86_64
+#define HOST_MACHINE  "x86_64"
+#define HOST_MODEL    "MacPro7,1"
+#endif
 
 #define CTL_UNSPEC 0
 #define CTL_KERN   1
@@ -133,6 +144,7 @@ struct __darwin_kinfo_proc {
 
 static int read_hostname(void *old, size_t *oldlenp);
 static int read_boottime(void *old, size_t *oldlenp);
+static int read_bootsessionuuid(void *old, size_t *oldlenp);
 static int read_ncpu(void *old, size_t *oldlenp);
 static int read_memsize(void *old, size_t *oldlenp);
 static int read_cpusubtype(void *old, size_t *oldlenp);
@@ -162,13 +174,19 @@ static const struct sysctl_node nodes[] = {
 		{"kern.osversion", {CTL_KERN, KERN_OSVERSION}, SYSCTL_STRING,
 				.string = "26A428"},
 		{"kern.bootargs", {0, 0}, SYSCTL_STRING, .string = ""},
+		{"kern.bootsessionuuid", {0, 0}, SYSCTL_READER,
+				.reader = read_bootsessionuuid},
 		{"kern.osproductversion", {0, 0}, SYSCTL_STRING,
 				.string = "27.0"},
 		{"kern.secure_kernel", {0, 0}, SYSCTL_INT, .number = 0},
 		{"hw.machine", {CTL_HW, HW_MACHINE}, SYSCTL_STRING,
-				.string = "x86_64"},
+				.string = HOST_MACHINE},
 		{"hw.model", {CTL_HW, HW_MODEL}, SYSCTL_STRING,
-				.string = "MacPro7,1"},
+				.string = HOST_MODEL},
+#ifdef __arm64__
+		{"hw.product", {0, 0}, SYSCTL_STRING, .string = HOST_MODEL},
+		{"hw.target", {0, 0}, SYSCTL_STRING, .string = "J704AP"},
+#endif
 		{"hw.ncpu", {CTL_HW, HW_NCPU}, SYSCTL_READER,
 				.reader = read_ncpu},
 		{"hw.byteorder", {CTL_HW, HW_BYTEORDER}, SYSCTL_INT,
@@ -187,7 +205,7 @@ static const struct sysctl_node nodes[] = {
 		{"hw.physicalcpu_max", {0, 0}, SYSCTL_READER,
 				.reader = read_ncpu},
 		{"hw.cachelinesize", {0, 0}, SYSCTL_QUAD, .number = 64},
-		{"hw.cputype", {0, 0}, SYSCTL_INT, .number = CPU_TYPE_X86_64},
+		{"hw.cputype", {0, 0}, SYSCTL_INT, .number = HOST_CPU_TYPE},
 		{"hw.cpusubtype", {0, 0}, SYSCTL_READER,
 				.reader = read_cpusubtype},
 		{"hw.cpu64bit_capable", {0, 0}, SYSCTL_INT, .number = 1},
@@ -222,7 +240,13 @@ sys_sysctl(int *name, uint32_t namelen, void *old, size_t *oldlenp, void *new,
 	}
 
 	if (new != NULL) {
-		unimplemented();
+#ifdef ENABLE_STRACE
+		fprintf(stderr, "  sysctl: setting {%d, %d} ignored\n", name[0],
+				namelen > 1 ? name[1] : 0);
+#endif
+		if (old == NULL) {
+			return 0;
+		}
 	}
 
 	if (namelen == 4 && name[0] == CTL_KERN && name[1] == KERN_PROC
@@ -318,7 +342,13 @@ sys_sys_sysctlbyname(const char *name, size_t namelen, void *old,
 			(void *)oldlenp, (void *)new, (void *)newlen);
 #endif
 	if (new != NULL) {
-		unimplemented();
+#ifdef ENABLE_STRACE
+		fprintf(stderr, "  sysctl: setting %.*s ignored\n", (int)namelen,
+				name);
+#endif
+		if (old == NULL) {
+			return 0;
+		}
 	}
 
 	const struct sysctl_node *node = lookup_name(name, namelen);
@@ -379,6 +409,23 @@ read_hostname(void *old, size_t *oldlenp)
 	char hostname[256];
 	gethostname(hostname, sizeof(hostname));
 	return read_bytes(hostname, strlen(hostname) + 1, old, oldlenp);
+}
+
+static int
+read_bootsessionuuid(void *old, size_t *oldlenp)
+{
+	char uuid[40] = "00000000-0000-0000-0000-000000000000";
+	FILE *boot_id = fopen("/proc/sys/kernel/random/boot_id", "r");
+	if (boot_id != NULL) {
+		if (fgets(uuid, sizeof(uuid), boot_id) != NULL) {
+			uuid[strcspn(uuid, "\n")] = '\0';
+		}
+		fclose(boot_id);
+	}
+	for (char *c = uuid; *c != '\0'; c++) {
+		*c = (char)toupper((unsigned char)*c);
+	}
+	return read_bytes(uuid, strlen(uuid) + 1, old, oldlenp);
 }
 
 static int

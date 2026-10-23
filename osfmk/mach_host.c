@@ -35,6 +35,12 @@
 #include "ipc.h"
 #include "shared_cache.h"
 
+#ifdef __arm64__
+#define HOST_CPU_TYPE CPU_TYPE_ARM64
+#else
+#define HOST_CPU_TYPE CPU_TYPE_X86_64
+#endif
+
 kern_return_t
 host_info(host_t host, host_flavor_t flavor, host_info_t host_info_out,
 		mach_msg_type_number_t *host_info_outCnt)
@@ -56,7 +62,7 @@ host_info(host_t host, host_flavor_t flavor, host_info_t host_info_out,
 		basic_info->memory_size = (memory_size > UINT32_MAX)
 				? UINT32_MAX
 				: memory_size;
-		basic_info->cpu_type = CPU_TYPE_X86_64;
+		basic_info->cpu_type = HOST_CPU_TYPE;
 		basic_info->cpu_subtype = shared_cache_cpu_subtype;
 		basic_info->cpu_threadtype = CPU_THREADTYPE_NONE;
 		basic_info->physical_cpu = cpus;
@@ -73,10 +79,16 @@ host_info(host_t host, host_flavor_t flavor, host_info_t host_info_out,
 		/* TODO: This struct should be non-zero */
 		*host_info_outCnt = HOST_PRIORITY_INFO_COUNT;
 	} break;
+	case HOST_SCHED_INFO: {
+		host_sched_info_t sched_info = (host_sched_info_t)host_info_out;
+		sched_info->min_timeout = 1;
+		sched_info->min_quantum = 1;
+		*host_info_outCnt = HOST_SCHED_INFO_COUNT;
+	} break;
 	case HOST_PREFERRED_USER_ARCH: {
 		host_preferred_user_arch_t preferred_arch
 				= (host_preferred_user_arch_t)host_info_out;
-		preferred_arch->cpu_type = CPU_TYPE_X86_64;
+		preferred_arch->cpu_type = HOST_CPU_TYPE;
 		preferred_arch->cpu_subtype = shared_cache_cpu_subtype;
 		*host_info_outCnt = HOST_PREFERRED_USER_ARCH_COUNT;
 	} break;

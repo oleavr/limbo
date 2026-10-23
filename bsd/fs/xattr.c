@@ -40,6 +40,7 @@
 #include <sys/xattr.h>
 
 #include "bsd/xnu-errno.h"
+#include "bsd_flags.h"
 #include "sysroot.h"
 
 typedef void *user_addr_t;
@@ -210,7 +211,8 @@ list_result(ssize_t result, const char *names, char *namebuf, size_t bufsize)
 	size_t used = 0;
 	for (const char *name = names; name < names + result;
 			name += strlen(name) + 1) {
-		if (strncmp(name, LINUX_NAMESPACE, prefix_length) != 0) {
+		if (strncmp(name, LINUX_NAMESPACE, prefix_length) != 0
+				|| strcmp(name, BSD_FLAGS_XATTR) == 0) {
 			continue;
 		}
 

@@ -8,6 +8,9 @@
 
 /* Module mach_vm */
 
+#undef __MigTypeCheck
+#define __MigTypeCheck 1
+
 #define	__MIG_check__Request__mach_vm_subsystem__ 1
 
 #include <string.h>
