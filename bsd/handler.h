@@ -43,6 +43,7 @@ uint64_t sys_bsd(unsigned long syscall, uint64_t arg1, uint64_t arg2,
 int open_flags(int flags);
 const char *exec_path(const char *path, char **argv, char *buffer,
 		char ***script_argv);
+char **exec_environment(char **envp);
 
 int sys_nosys(void);
 int __attribute__((noreturn)) sys_exit(int rval);
