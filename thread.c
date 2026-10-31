@@ -43,6 +43,7 @@
 #include <ucontext.h>
 #include <unistd.h>
 
+#include "bsd/credentials.h"
 #include "osfmk/ipc.h"
 #include "syscall.h"
 #include "thread.h"
@@ -124,6 +125,7 @@ thread_main(void *arg)
 		sigdelset(&others, SIGTRAP);
 		sigdelset(&others, SIGFPE);
 		sigdelset(&others, thread_suspend_signal());
+		sigdelset(&others, credentials_signal());
 		pthread_sigmask(SIG_BLOCK, &others, NULL);
 	}
 	thread->tid = gettid();

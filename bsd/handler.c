@@ -33,6 +33,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sys/fsuid.h>
 #include <sys/socket.h>
 #ifdef __x86_64__
 #include <asm/prctl.h>
@@ -76,6 +77,7 @@
 #include <ucontext.h>
 #include <unistd.h>
 
+#include "bsd/credentials.h"
 #include "bsd/hostuuid.h"
 #include "commpage.h"
 #include "persona.h"
@@ -479,7 +481,7 @@ sys_setuid(void *uid)
 #ifdef ENABLE_STRACE
 	fprintf(stderr, "setuid(%p)\n", (void *)uid);
 #endif
-	return 0;
+	return credentials_setuid((uid_t)(uintptr_t)uid);
 }
 
 int
@@ -1170,7 +1172,17 @@ sys_getgroups(uint32_t gidsetsize, void *gidset)
 	fprintf(stderr, "getgroups(%p, %p)\n", (void *)gidsetsize,
 			(void *)gidset);
 #endif
-	unimplemented();
+	gid_t groups[NGROUPS_MAX];
+	int count = getgroups(gidsetsize > NGROUPS_MAX ? NGROUPS_MAX
+						       : (int)gidsetsize,
+			groups);
+	if (count < 0) {
+		return errno_map(count);
+	}
+	for (int i = 0; i != count && gidsetsize != 0; i++) {
+		((uint32_t *)gidset)[i] = groups[i];
+	}
+	return count;
 }
 
 int
@@ -1180,7 +1192,7 @@ sys_setgroups(uint32_t gidsetsize, void *gidset)
 	fprintf(stderr, "setgroups(%p, %p)\n", (void *)gidsetsize,
 			(void *)gidset);
 #endif
-	return 0;
+	return credentials_setgroups(gidsetsize, gidset);
 }
 
 int
@@ -1788,7 +1800,8 @@ sys_setreuid(void *ruid, void *euid)
 #ifdef ENABLE_STRACE
 	fprintf(stderr, "setreuid(%p, %p)\n", (void *)ruid, (void *)euid);
 #endif
-	return 0;
+	return credentials_setreuid(
+			(uid_t)(uintptr_t)ruid, (uid_t)(uintptr_t)euid);
 }
 
 int
@@ -1797,7 +1810,8 @@ sys_setregid(void *rgid, void *egid)
 #ifdef ENABLE_STRACE
 	fprintf(stderr, "setregid(%p, %p)\n", (void *)rgid, (void *)egid);
 #endif
-	return 0;
+	return credentials_setregid(
+			(gid_t)(uintptr_t)rgid, (gid_t)(uintptr_t)egid);
 }
 
 int
@@ -2154,7 +2168,7 @@ sys_setgid(void *gid)
 #ifdef ENABLE_STRACE
 	fprintf(stderr, "setgid(%p)\n", (void *)gid);
 #endif
-	return 0;
+	return credentials_setgid((gid_t)(uintptr_t)gid);
 }
 
 int
@@ -2163,7 +2177,7 @@ sys_setegid(void *egid)
 #ifdef ENABLE_STRACE
 	fprintf(stderr, "setegid(%p)\n", (void *)egid);
 #endif
-	return 0;
+	return credentials_setegid((gid_t)(uintptr_t)egid);
 }
 
 int
@@ -2172,7 +2186,7 @@ sys_seteuid(void *euid)
 #ifdef ENABLE_STRACE
 	fprintf(stderr, "seteuid(%p)\n", (void *)euid);
 #endif
-	return 0;
+	return credentials_seteuid((uid_t)(uintptr_t)euid);
 }
 
 int
@@ -2620,7 +2634,7 @@ sys_initgroups(uint32_t gidsetsize, void *gidset, int gmuid)
 	fprintf(stderr, "initgroups(%p, %p, %p)\n", (void *)gidsetsize,
 			(void *)gidset, (void *)gmuid);
 #endif
-	return 0;
+	return credentials_setgroups(gidsetsize, gidset);
 }
 
 int
@@ -3024,6 +3038,10 @@ sys_access_extended(user_addr_t entries, size_t size, user_addr_t results,
 	return 0;
 }
 
+static __thread bool thread_identity;
+static __thread uid_t thread_uid;
+static __thread gid_t thread_gid;
+
 int
 sys_settid(void *uid, void *gid)
 {
@@ -3039,8 +3057,12 @@ sys_gettid(void *uidp, void *gidp)
 #ifdef ENABLE_STRACE
 	fprintf(stderr, "gettid(%p, %p)\n", (void *)uidp, (void *)gidp);
 #endif
-	/* TODO: From what I can see, these uidp and gidp don't exist */
-	return gettid();
+	if (!thread_identity) {
+		return _ESRCH;
+	}
+	*(uint32_t *)uidp = thread_uid;
+	*(uint32_t *)gidp = thread_gid;
+	return 0;
 }
 
 int
@@ -3298,8 +3320,7 @@ sys_issetugid(void)
 #ifdef ENABLE_STRACE
 	fprintf(stderr, "issetugid()\n");
 #endif
-	/* TODO: Not sure what the Linux equivalent is */
-	return 0;
+	return credentials_issetugid() ? 1 : 0;
 }
 
 int

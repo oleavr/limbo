@@ -16,6 +16,7 @@ runner = files('run-guest.py')
 
 guest_tests = [
   'corefoundation.c',
+  'credentials.c',
   'cxx.cpp',
   'dispatch.c',
   'filesystem.c',

@@ -53,6 +53,7 @@
 #include <ucontext.h>
 #include <unistd.h>
 
+#include "bsd/credentials.h"
 #include "bsd/handler.h"
 #include "bsd/signals.h"
 #include "bsd/xnu-errno.h"
@@ -161,6 +162,7 @@ syscall_handler_install(void)
 	sigaction(thread_suspend_signal(), &suspend, NULL);
 #endif
 #ifdef __x86_64__
+
 	find_limbo_text();
 	signals_init();
 	struct sigaction suspend = {0};
@@ -168,6 +170,7 @@ syscall_handler_install(void)
 	suspend.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART;
 	sigaction(thread_suspend_signal(), &suspend, NULL);
 #endif
+	credentials_init();
 	return 0;
 }
 
