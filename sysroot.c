@@ -29,9 +29,12 @@
 #define _GNU_SOURCE
 #endif
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <linux/openat2.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,12 +44,17 @@
 
 #include "sysroot.h"
 
+#define NOFOLLOW_PREFIX "/.nofollow"
+
+#define RESOLVE_PREFIX       "/.resolve/"
+#define RESOLVE_NOFOLLOW_ANY 0x1
+
 static char root[PATH_MAX];
 static dev_t root_dev;
 static ino_t root_ino;
 static size_t root_length;
 
-static int open_in_root(const char *path, int flags);
+static int open_in_root(const char *path, int flags, uint64_t resolve);
 static ssize_t read_fd_path(int fd, char *buffer);
 
 int
@@ -78,10 +86,35 @@ sysroot_host_path(const char *path, int flags, char *buffer)
 		return path;
 	}
 
-	int fd = open_in_root(path, flags);
+	uint64_t resolve = 0;
+	if (strncmp(path, NOFOLLOW_PREFIX, strlen(NOFOLLOW_PREFIX)) == 0
+			&& (path[strlen(NOFOLLOW_PREFIX)] == '/'
+					|| path[strlen(NOFOLLOW_PREFIX)]
+							== '\0')) {
+		path += strlen(NOFOLLOW_PREFIX);
+		if (path[0] == '\0') {
+			path = "/";
+		}
+		resolve = RESOLVE_NO_SYMLINKS;
+	}
+
+	if (strncmp(path, RESOLVE_PREFIX, strlen(RESOLVE_PREFIX)) == 0) {
+		const char *flags = path + strlen(RESOLVE_PREFIX);
+		char *end;
+		unsigned long value = strtoul(flags, &end, 10);
+		if (end != flags && (*end == '/' || *end == '\0')) {
+			path = (*end == '\0') ? "/" : end;
+			if (value & RESOLVE_NOFOLLOW_ANY) {
+				resolve = RESOLVE_NO_SYMLINKS;
+			}
+		}
+	}
+
+	int fd = open_in_root(path, flags, resolve);
 	if (fd != -1) {
 		return (read_fd_path(fd, buffer) != -1) ? buffer : path;
 	}
+
 	if (errno != ENOENT
 			|| faccessat(AT_FDCWD, path, F_OK, AT_SYMLINK_NOFOLLOW)
 					== 0) {
@@ -104,7 +137,7 @@ sysroot_host_path(const char *path, int flags, char *buffer)
 
 	char parent[PATH_MAX];
 	snprintf(parent, sizeof(parent), "%.*s", (int)(name - path), path);
-	fd = open_in_root(parent, 0);
+	fd = open_in_root(parent, 0, resolve);
 	if (fd == -1) {
 		return path;
 	}
@@ -136,7 +169,7 @@ sysroot_guest_path(const char *path)
 }
 
 static int
-open_in_root(const char *path, int flags)
+open_in_root(const char *path, int flags, uint64_t resolve)
 {
 	int root_fd = open(root, O_PATH | O_DIRECTORY | O_CLOEXEC);
 	if (root_fd == -1) {
@@ -145,7 +178,8 @@ open_in_root(const char *path, int flags)
 
 	struct open_how how = {
 			.flags = O_PATH | O_CLOEXEC,
-			.resolve = RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS,
+			.resolve
+			= RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS | resolve,
 	};
 	if (flags & AT_SYMLINK_NOFOLLOW) {
 		how.flags |= O_NOFOLLOW;
