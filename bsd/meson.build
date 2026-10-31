@@ -1,6 +1,7 @@
 bsd_lib = static_library('bsd',
   sources: [
     'handler.c',
+    'necp.c',
     'fsevents.c',
     'icmp.c',
     'route.c',

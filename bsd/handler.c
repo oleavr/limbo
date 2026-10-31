@@ -86,6 +86,7 @@
 #include "fsevents.h"
 #include "icmp.h"
 #include "kctl.h"
+#include "necp.h"
 #include "net.h"
 #include "persona.h"
 #include "persona.h"
@@ -170,6 +171,49 @@ sys_identitysvc(int opcode, void *message)
 		}
 		return _EINTR;
 	}
+}
+
+int
+sys_necp_open(int flags)
+{
+#ifdef ENABLE_STRACE
+	fprintf(stderr, "necp_open(%p)\n", (void *)flags);
+#endif
+	return necp_open(flags);
+}
+
+int
+sys_necp_session_open(int flags)
+{
+#ifdef ENABLE_STRACE
+	fprintf(stderr, "necp_session_open(%p)\n", (void *)flags);
+#endif
+	return necp_session_open(flags);
+}
+
+long
+sys_necp_session_action(int fd, uint32_t action, uint8_t *in, size_t in_length,
+		uint8_t *out, size_t out_length)
+{
+#ifdef ENABLE_STRACE
+	fprintf(stderr, "necp_session_action(%p, %u, %p, %p, %p, %p)\n",
+			(void *)fd, action, (void *)in, (void *)in_length,
+			(void *)out, (void *)out_length);
+#endif
+	return necp_session_action(fd, action, in, in_length, out, out_length);
+}
+
+long
+sys_necp_client_action(int fd, uint32_t action, uint8_t *client_id,
+		size_t client_id_len, uint8_t *buffer, size_t buffer_size)
+{
+#ifdef ENABLE_STRACE
+	fprintf(stderr, "necp_client_action(%p, %u, %p, %p, %p, %p)\n",
+			(void *)fd, action, client_id, (void *)client_id_len,
+			buffer, (void *)buffer_size);
+#endif
+	return necp_client_action(fd, action, client_id, client_id_len, buffer,
+			buffer_size);
 }
 
 int
@@ -368,6 +412,7 @@ sys_sys_close(int fd)
 	kctl_close(fd);
 	icmp_close(fd);
 	fsevents_close(fd);
+	necp_close(fd);
 	return errno_map(close(fd));
 }
 
@@ -6218,9 +6263,10 @@ sys_bsd(unsigned long syscall, uint64_t arg1, uint64_t arg2, uint64_t arg3,
 	case 0x1f4:
 		return sys_getentropy((void *)arg1, arg2);
 	case 0x1f5:
-		return sys_enosys();
+		return sys_necp_open(arg1);
 	case 0x1f6:
-		return sys_enosys();
+		return sys_necp_client_action(arg1, arg2, (void *)arg3, arg4,
+				(void *)arg5, arg6);
 	case 0x1f7:
 		return sys_enosys();
 	case 0x1f8:
@@ -6263,9 +6309,10 @@ sys_bsd(unsigned long syscall, uint64_t arg1, uint64_t arg2, uint64_t arg3,
 		return sys_abort_with_payload(arg1, arg2, (void *)arg3, arg4,
 				(void *)arg5, arg6);
 	case 0x20a:
-		return sys_enosys();
+		return sys_necp_session_open(arg1);
 	case 0x20b:
-		return sys_enosys();
+		return sys_necp_session_action(arg1, arg2, (void *)arg3, arg4,
+				(void *)arg5, arg6);
 	case 0x20c:
 		return sys_setattrlistat(arg1, (void *)arg2, (void *)arg3,
 				(void *)arg4, arg5, arg6);

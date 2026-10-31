@@ -25,6 +25,7 @@ guest_tests = [
   'kqueue.c',
   'kqueue_dispatch2.c',
   'mach.c',
+  'necp.c',
   'paths.c',
   'persona.c',
   'route.c',
