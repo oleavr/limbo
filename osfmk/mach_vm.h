@@ -28,6 +28,7 @@
 #pragma once
 
 #include <mach/mach_types.h>
+#include <stdbool.h>
 
 kern_return_t _kernelrpc_mach_vm_allocate(vm_task_entry_t target,
 		mach_vm_address_t *address, mach_vm_size_t size, int flags);
@@ -36,6 +37,17 @@ kern_return_t _kernelrpc_mach_vm_deallocate(vm_task_entry_t target,
 kern_return_t _kernelrpc_mach_vm_protect(vm_task_entry_t target_task,
 		mach_vm_address_t address, mach_vm_size_t size,
 		boolean_t set_maximum, vm_prot_t new_protection);
+mach_port_name_t memory_entry_create(mach_vm_size_t size, void **contents);
+mach_port_name_t memory_entry_share(int fd, mach_vm_size_t size);
+bool memory_entry_describe(const void *kobject, int *fd, mach_vm_size_t *size,
+		mach_vm_offset_t *data_offset);
+void memory_entry_destroy(void *kobject);
+void *memory_entry_adopt(
+		int fd, mach_vm_size_t size, mach_vm_offset_t data_offset);
+kern_return_t mach_vm_allocate_anywhere(
+		mach_vm_address_t *address, mach_vm_size_t size);
+kern_return_t mach_vm_map_fd(int fd, mach_vm_size_t size, vm_prot_t protection,
+		mach_vm_address_t *address);
 kern_return_t _kernelrpc_mach_vm_purgable_control(vm_map_t target_task,
 		mach_vm_address_t address, vm_purgable_t control, int *state);
 kern_return_t _kernelrpc_mach_vm_map(vm_task_entry_t target_task,
