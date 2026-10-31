@@ -1549,6 +1549,9 @@ sys_sys_dup2(uint32_t from, uint32_t to)
 	return errno_map(dup2(from, to));
 }
 
+static int select_guest(int nd, uint32_t *in, uint32_t *ou, uint32_t *ex,
+		const struct timespec *timeout, const uint32_t *mask);
+
 int
 sys_select(int nd, uint32_t *in, uint32_t *ou, uint32_t *ex, void *tv)
 {
@@ -1556,6 +1559,23 @@ sys_select(int nd, uint32_t *in, uint32_t *ou, uint32_t *ex, void *tv)
 	fprintf(stderr, "select(%p, %p, %p, %p, %p)\n", (void *)nd, (void *)in,
 			(void *)ou, (void *)ex, (void *)tv);
 #endif
+	struct {
+		int64_t tv_sec;
+		int32_t tv_usec;
+	} *guest_timeout = tv;
+	struct timespec timeout;
+	if (guest_timeout != NULL) {
+		timeout.tv_sec = guest_timeout->tv_sec;
+		timeout.tv_nsec = (long)guest_timeout->tv_usec * 1000;
+	}
+	return select_guest(nd, in, ou, ex,
+			guest_timeout != NULL ? &timeout : NULL, NULL);
+}
+
+static int
+select_guest(int nd, uint32_t *in, uint32_t *ou, uint32_t *ex,
+		const struct timespec *timeout, const uint32_t *mask)
+{
 	if (nd < 0 || nd > FD_SETSIZE) {
 		return _EINVAL;
 	}
@@ -1568,18 +1588,26 @@ sys_select(int nd, uint32_t *in, uint32_t *ou, uint32_t *ex, void *tv)
 			memcpy(&sets[i], guest_sets[i], bytes);
 		}
 	}
-	struct {
-		int64_t tv_sec;
-		int32_t tv_usec;
-	} *guest_timeout = tv;
-	struct timeval timeout;
-	if (guest_timeout != NULL) {
-		timeout.tv_sec = guest_timeout->tv_sec;
-		timeout.tv_usec = guest_timeout->tv_usec;
+	fd_set *host_sets[3] = {in != NULL ? &sets[0] : NULL,
+			ou != NULL ? &sets[1] : NULL,
+			ex != NULL ? &sets[2] : NULL};
+	int result;
+	if (mask == NULL) {
+		result = pselect(nd, host_sets[0], host_sets[1], host_sets[2],
+				timeout, NULL);
+	} else {
+		sigset_t previous, set;
+		if (signals_wait_begin(*mask, &previous, &set)) {
+			result = pselect(nd, host_sets[0], host_sets[1],
+					host_sets[2], timeout, &set);
+		} else {
+			result = -1;
+			errno = EINTR;
+		}
+		int error = errno;
+		pthread_sigmask(SIG_SETMASK, &previous, NULL);
+		errno = error;
 	}
-	int result = select(nd, in != NULL ? &sets[0] : NULL,
-			ou != NULL ? &sets[1] : NULL, ex != NULL ? &sets[2] : NULL,
-			guest_timeout != NULL ? &timeout : NULL);
 	if (result == -1) {
 		return err_map(errno);
 	}
@@ -1971,10 +1999,7 @@ sys_sigsuspend(uint32_t mask)
 #ifdef ENABLE_STRACE
 	fprintf(stderr, "sigsuspend(%p)\n", (void *)(uintptr_t)mask);
 #endif
-	sigset_t set;
-	sigset_to_linux(mask, &set);
-	sigdelset(&set, SIGSYS);
-	return errno_map(sigsuspend(&set));
+	return signals_suspend(mask);
 }
 
 int
@@ -4027,8 +4052,7 @@ sys_pselect(int nd, uint32_t *in, uint32_t *ou, uint32_t *ex, void *ts,
 			(void *)in, (void *)ou, (void *)ex, (void *)ts,
 			(void *)mask);
 #endif
-	/* TODO */
-	return 0;
+	return select_guest(nd, in, ou, ex, ts, mask);
 }
 
 int

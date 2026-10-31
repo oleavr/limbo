@@ -29,20 +29,23 @@
 #pragma once
 
 #include <signal.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <ucontext.h>
 
 int syscall_handler_install(void);
 int syscall_dispatch_enable(void);
 void syscall_set_rdx(uint64_t value);
-void syscall_signal_handler(int sig, siginfo_t *info, void *ucontext);
-void syscall_report_fault(int sig, siginfo_t *info, void *context);
 void syscall_print_guest_chain(const mcontext_t *mc);
 void syscall_print_trap_chain(void);
+void syscall_signal_handler(int sig, siginfo_t *info, void *ucontext);
 ucontext_t *syscall_trap_context(void);
+bool syscall_entering(const ucontext_t *uc);
 void syscall_trap_reset(void);
 void syscall_keep_context(void);
-#ifndef __x86_64__
+#ifdef __x86_64__
+void syscall_report_fault(int sig, siginfo_t *info, void *context);
+#else
 void syscall_set_guest_thread_pointer(uint64_t pointer);
 void limbo_rt_sigreturn(void);
 #endif

@@ -99,6 +99,18 @@ thread_start(struct thread *thread, const struct thread_state *state)
 	return error;
 }
 
+int
+thread_create_own(pthread_t *handle, const pthread_attr_t *attr,
+		void *(*start)(void *), void *arg)
+{
+	sigset_t all, previous;
+	sigfillset(&all);
+	pthread_sigmask(SIG_SETMASK, &all, &previous);
+	int error = pthread_create(handle, attr, start, arg);
+	pthread_sigmask(SIG_SETMASK, &previous, NULL);
+	return error;
+}
+
 static void *
 thread_main(void *arg)
 {
@@ -134,22 +146,31 @@ thread_main(void *arg)
 		abort();
 	}
 
+	bool parked = false;
 	if (sigsetjmp(thread->kernel, 1) != 0) {
 		thread->continuation_pending = true;
+		syscall_trap_reset();
+		pthread_mutex_lock(&thread->suspend_lock);
 		thread->trap_context = NULL;
-#ifndef __x86_64__
-		syscall_trap_reset();
-#endif
-#ifndef __x86_64__
-		syscall_trap_reset();
-#endif
+		thread->stopped_context = thread->parked_context;
+		pthread_mutex_unlock(&thread->suspend_lock);
+		parked = true;
 	}
 
 	if (thread->continuation_pending) {
 		thread->continuation_pending = false;
-		if (thread->terminating
-				|| !thread->continuation(
-						thread, &thread->state)) {
+		bool resumed = !thread->terminating
+				&& thread->continuation(thread, &thread->state);
+		if (parked) {
+			pthread_mutex_lock(&thread->suspend_lock);
+			while (resumed && thread->suspend_count != 0) {
+				pthread_cond_wait(&thread->resumed,
+						&thread->suspend_lock);
+			}
+			thread->stopped_context = NULL;
+			pthread_mutex_unlock(&thread->suspend_lock);
+		}
+		if (!resumed) {
 			thread_destroy(thread);
 			return NULL;
 		}
@@ -277,6 +298,12 @@ thread_suspend_other(struct thread *thread)
 		usleep(2000);
 		pthread_mutex_lock(&thread->suspend_lock);
 	}
+#ifdef ENABLE_STRACE
+	if (thread->stopped_context == NULL && thread->trap_context == NULL) {
+		fprintf(stderr, "thread_suspend: thread %d did not stop\n",
+				thread->tid);
+	}
+#endif
 	pthread_mutex_unlock(&thread->suspend_lock);
 	return KERN_SUCCESS;
 }

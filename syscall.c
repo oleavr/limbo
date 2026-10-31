@@ -33,7 +33,6 @@
 #ifdef __x86_64__
 #include <asm/processor-flags.h>
 #endif
-#include <dlfcn.h>
 #include <elf.h>
 #include <errno.h>
 #ifndef __x86_64__
@@ -41,14 +40,16 @@
 #include <linux/seccomp.h>
 #include <stddef.h>
 #endif
+#include <dlfcn.h>
+#include <execinfo.h>
 #include <pthread.h>
-#include <sys/mman.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/auxv.h>
+#include <sys/mman.h>
 #include <sys/prctl.h>
 #include <ucontext.h>
 #include <unistd.h>
@@ -76,26 +77,6 @@ static int filter_install(const Elf64_Phdr *phdrs, unsigned long e_phnum);
 static bool filter_installed;
 #endif
 
-#ifdef __x86_64__
-static void set_bsd_result(greg_t *regs, int64_t result);
-
-static __thread bool guest_thread;
-static __thread bool rdx_pending;
-static __thread uint64_t rdx_value;
-#else
-#define PSTATE_C (1u << 29)
-#define MRS_OPCODE 0xd53
-static void emulate_system_register(int sig, siginfo_t *info, void *ucontext);
-static void dispatch_syscall(mcontext_t *mc);
-static void set_bsd_result(mcontext_t *mc, int64_t result);
-static __thread uint64_t guest_thread_pointer;
-static __thread bool x1_pending;
-static __thread uint64_t x1_value;
-#endif
-
-static __thread ucontext_t *trap_context;
-static __thread bool context_kept;
-
 #define SIGNAL_STACK_SIZE (1UL << 20)
 
 struct signal_stack {
@@ -105,6 +86,26 @@ struct signal_stack {
 static pthread_key_t signal_stack_key;
 static pthread_once_t signal_stack_once = PTHREAD_ONCE_INIT;
 
+#ifdef __x86_64__
+static void set_bsd_result(greg_t *regs, int64_t result);
+
+static __thread bool rdx_pending;
+static __thread uint64_t rdx_value;
+static __thread ucontext_t *trap_context;
+static __thread bool context_kept;
+static __thread bool guest_thread;
+#else
+#define PSTATE_C (1u << 29)
+#define MRS_OPCODE 0xd53
+static void emulate_system_register(int sig, siginfo_t *info, void *ucontext);
+static void dispatch_syscall(mcontext_t *mc);
+static void set_bsd_result(mcontext_t *mc, int64_t result);
+static __thread uint64_t guest_thread_pointer;
+static __thread bool x1_pending;
+static __thread uint64_t x1_value;
+static __thread ucontext_t *trap_context;
+static __thread bool context_kept;
+#endif
 static uintptr_t limbo_text_start, limbo_text_end;
 static uintptr_t vdso_start, vdso_end;
 static void find_limbo_text(void);
@@ -122,6 +123,92 @@ asm(".text\n"
     "limbo_rt_sigreturn:\n"
     "	mov x8, #139\n" /* __NR_rt_sigreturn */
     "	svc #0\n");
+#endif
+
+#ifdef __x86_64__
+void
+syscall_report_fault(int sig, siginfo_t *info, void *context)
+{
+	const greg_t *gregs = ((ucontext_t *)context)->uc_mcontext.gregs;
+	fprintf(stderr,
+			"limbo: fatal signal %d (code %d) at %llx, address "
+			"%p\n",
+			sig, info->si_code, (unsigned long long)gregs[REG_RIP],
+			info->si_addr);
+	fprintf(stderr, "  thread %d, sp %llx (%llx), bp %llx\n", (int)gettid(),
+			(unsigned long long)gregs[REG_RSP],
+			(unsigned long long)*(const uint64_t *)gregs[REG_RSP],
+			(unsigned long long)gregs[REG_RBP]);
+	FILE *maps = fopen("/proc/self/maps", "re");
+	char line[256], previous[256] = "";
+	uint64_t near[] = {(uint64_t)info->si_addr, (uint64_t)gregs[REG_RSP]};
+	while (maps != NULL && fgets(line, sizeof(line), maps) != NULL) {
+		unsigned long long start, end;
+		if (sscanf(line, "%llx-%llx", &start, &end) != 2) {
+			continue;
+		}
+		for (int i = 0; i != 2; i++) {
+			if (near[i] >= start && near[i] < end) {
+				fprintf(stderr, "  map before: %s  map %s: %s",
+						previous, i ? "sp" : "address",
+						line);
+			}
+		}
+		snprintf(previous, sizeof(previous), "%s", line);
+	}
+	if (maps != NULL) {
+		fclose(maps);
+	}
+	uint64_t address = (uint64_t)gregs[REG_RIP];
+	const uint64_t *frame = (const uint64_t *)gregs[REG_RBP];
+	for (int i = 0; i < 64 && address != 0; i++) {
+		Dl_info found;
+		if (dladdr((void *)address, &found)
+				&& found.dli_sname != NULL) {
+			fprintf(stderr, "  %llx %s+%#llx\n",
+					(unsigned long long)address,
+					found.dli_sname,
+					(unsigned long long)(address
+							- (uint64_t)found
+									.dli_saddr));
+		} else {
+			fprintf(stderr, "  %llx\n",
+					(unsigned long long)address);
+		}
+		if (frame == NULL || ((uintptr_t)frame & 7) != 0) {
+			break;
+		}
+		address = frame[1];
+		frame = (const uint64_t *)frame[0];
+	}
+	signal(sig, SIG_DFL);
+	if (info->si_code <= 0 || sig == SIGTRAP) {
+		raise(sig);
+	}
+}
+
+void
+syscall_signal_handler(int sig, siginfo_t *info, void *ucontext)
+{
+	ucontext_t *uc = ucontext;
+	if (!guest_thread) {
+		signals_handle(sig, info, uc, SIGNAL_ON_LIMBO_THREAD);
+		return;
+	}
+	signals_handle(sig, info, uc,
+			in_limbo(uc->uc_mcontext.gregs[REG_RIP])
+					? SIGNAL_IN_LIMBO
+					: SIGNAL_IN_GUEST);
+}
+
+static void
+handle_suspend(int sig, siginfo_t *info, void *ucontext)
+{
+	ucontext_t *uc = ucontext;
+	if (!in_limbo(uc->uc_mcontext.gregs[REG_RIP])) {
+		thread_stop_if_suspended(uc);
+	}
+}
 #endif
 
 int
@@ -237,6 +324,9 @@ handle_suspend(int sig, siginfo_t *info, void *ucontext)
 }
 #endif
 
+#ifndef __x86_64__
+#endif
+
 static void
 find_limbo_text(void)
 {
@@ -306,102 +396,24 @@ in_limbo(uint64_t pc)
 
 #ifdef __x86_64__
 /*
- * A fault that ends the process, one the guest doesn't catch or one in
- * limbo: where it happened, on which thread and stack, and the return
- * addresses along the frame pointers, limbo's by name. Then the fault happens
- * again, or the signal is sent again, with the default action
+ * The guest's return addresses, from its frame pointers, for a guest that
+ * aborts: a system call's stub makes no frame, so its caller's address is
+ * the one at the stack pointer
  */
 void
-syscall_report_fault(int sig, siginfo_t *info, void *context)
+syscall_print_guest_chain(const mcontext_t *mc)
 {
-	const greg_t *gregs = ((ucontext_t *)context)->uc_mcontext.gregs;
-	fprintf(stderr, "limbo: fatal signal %d (code %d) at %llx, address %p\n",
-			sig, info->si_code, (unsigned long long)gregs[REG_RIP],
-			info->si_addr);
-	/* A leaf function makes no frame: its caller is the word at sp */
-	fprintf(stderr, "  thread %d, sp %llx (%llx), bp %llx\n", (int)gettid(),
-			(unsigned long long)gregs[REG_RSP],
-			(unsigned long long)*(const uint64_t *)gregs[REG_RSP],
-			(unsigned long long)gregs[REG_RBP]);
-	FILE *maps = fopen("/proc/self/maps", "re");
-	char line[256], previous[256] = "";
-	uint64_t near[] = {(uint64_t)info->si_addr, (uint64_t)gregs[REG_RSP]};
-	while (maps != NULL && fgets(line, sizeof(line), maps) != NULL) {
-		unsigned long long start, end;
-		if (sscanf(line, "%llx-%llx", &start, &end) != 2) {
-			continue;
-		}
-		for (int i = 0; i != 2; i++) {
-			if (near[i] >= start && near[i] < end) {
-				fprintf(stderr, "  map before: %s  map %s: %s",
-						previous, i ? "sp" : "address",
-						line);
-			}
-		}
-		snprintf(previous, sizeof(previous), "%s", line);
-	}
-	if (maps != NULL) {
-		fclose(maps);
-	}
-	uint64_t address = (uint64_t)gregs[REG_RIP];
-	const uint64_t *frame = (const uint64_t *)gregs[REG_RBP];
-	for (int i = 0; i < 64 && address != 0; i++) {
-		Dl_info found;
-		if (dladdr((void *)address, &found) && found.dli_sname != NULL) {
-			fprintf(stderr, "  %llx %s+%#llx\n",
-					(unsigned long long)address,
-					found.dli_sname,
-					(unsigned long long)(address
-							- (uint64_t)found.dli_saddr));
-		} else {
-			fprintf(stderr, "  %llx\n", (unsigned long long)address);
-		}
-		if (frame == NULL || ((uintptr_t)frame & 7) != 0) {
-			break;
-		}
-		address = frame[1];
+	const uint64_t *sp = (const uint64_t *)mc->gregs[REG_RSP];
+	fprintf(stderr, "  guest chain: %llx %llx",
+			(unsigned long long)mc->gregs[REG_RIP],
+			(unsigned long long)sp[0]);
+	const uint64_t *frame = (const uint64_t *)mc->gregs[REG_RBP];
+	for (int i = 0; i < 64 && frame != NULL && ((uintptr_t)frame & 7) == 0;
+			i++) {
+		fprintf(stderr, " %llx", (unsigned long long)frame[1]);
 		frame = (const uint64_t *)frame[0];
 	}
-	signal(sig, SIG_DFL);
-	/* One sent rather than raised by a fault doesn't happen again, nor
-	 * does int3's, which leaves rip past it */
-	if (info->si_code <= 0 || sig == SIGTRAP) {
-		raise(sig);
-	}
-}
-
-/*
- * The host's handler for the signals the guest catches. On x86_64 it runs on
- * the stack it interrupted, with limbo's thread pointer, which the guest
- * leaves alone
- */
-void
-syscall_signal_handler(int sig, siginfo_t *info, void *ucontext)
-{
-	ucontext_t *uc = ucontext;
-	if (!guest_thread) {
-		signals_handle(sig, info, uc, SIGNAL_ON_LIMBO_THREAD);
-		return;
-	}
-	signals_handle(sig, info, uc,
-			in_limbo(uc->uc_mcontext.gregs[REG_RIP])
-					? SIGNAL_IN_LIMBO
-					: SIGNAL_IN_GUEST);
-}
-
-/*
- * Another thread suspends this one: it stops here if it was running the
- * guest's code, and otherwise as its system call returns. The handler runs
- * on the guest's stack, with limbo's thread pointer, which the guest leaves
- * alone on x86_64
- */
-static void
-handle_suspend(int sig, siginfo_t *info, void *ucontext)
-{
-	ucontext_t *uc = ucontext;
-	if (!in_limbo(uc->uc_mcontext.gregs[REG_RIP])) {
-		thread_stop_if_suspended(uc);
-	}
+	fprintf(stderr, "\n");
 }
 
 static void
@@ -428,11 +440,16 @@ handle_syscall(int sig, siginfo_t *info, void *ucontext)
 	uint64_t *sp = (uint64_t *)regs[REG_RSP];
 	ucontext_t *outer_context = trap_context;
 	trap_context = context;
+	asm volatile("limbo_syscall_entered:" ::: "memory");
 	void *outer_trap;
 	thread_enter_trap(context, &outer_trap);
 
 	unsigned long syscall = info->si_syscall;
-	if (syscall >= SYSCALL_CLASS_MACH && syscall < SYSCALL_CLASS_UNIX) {
+	if (signals_trap_enter(context)) {
+		regs[REG_RIP] -= 2;
+		regs[REG_RAX] = (greg_t)syscall;
+	} else if (syscall >= SYSCALL_CLASS_MACH
+			&& syscall < SYSCALL_CLASS_UNIX) {
 		regs[REG_RAX] = sys_osfmk(syscall - SYSCALL_CLASS_MACH, arg1,
 				arg2, arg3, arg4, arg5, arg6, sp);
 	} else if (syscall >= SYSCALL_CLASS_UNIX
@@ -448,7 +465,14 @@ handle_syscall(int sig, siginfo_t *info, void *ucontext)
 		if (context_kept) {
 			context_kept = false;
 			rdx_pending = false;
-		} else if (returns_raw_result(syscall - SYSCALL_CLASS_UNIX, arg1)) {
+		} else if (result == _EINTR
+				&& signals_restart(
+						syscall - SYSCALL_CLASS_UNIX)) {
+			regs[REG_RIP] -= 2;
+			regs[REG_RAX] = (greg_t)syscall;
+			rdx_pending = false;
+		} else if (returns_raw_result(syscall - SYSCALL_CLASS_UNIX,
+					   arg1)) {
 			regs[REG_EFL] &= ~X86_EFLAGS_CF;
 			regs[REG_RAX] = result;
 		} else {
@@ -471,51 +495,6 @@ handle_syscall(int sig, siginfo_t *info, void *ucontext)
 	trap_context = outer_context;
 }
 
-#endif
-
-/*
- * The guest's return addresses, from its frame pointers, for a guest that
- * aborts or faults. The addresses carry no pointer authentication codes, so
- * that doc/arm64-native/slide.c can name them
- */
-#ifdef __x86_64__
-/*
- * The guest's return addresses, from its frame pointers, for a guest that
- * aborts: a system call's stub makes no frame, so its caller's address is
- * the one at the stack pointer
- */
-void
-syscall_print_guest_chain(const mcontext_t *mc)
-{
-	const uint64_t *sp = (const uint64_t *)mc->gregs[REG_RSP];
-	fprintf(stderr, "  guest chain: %llx %llx",
-			(unsigned long long)mc->gregs[REG_RIP],
-			(unsigned long long)sp[0]);
-	const uint64_t *frame = (const uint64_t *)mc->gregs[REG_RBP];
-	for (int i = 0; i < 64 && frame != NULL && ((uintptr_t)frame & 7) == 0;
-			i++) {
-		fprintf(stderr, " %llx", (unsigned long long)frame[1]);
-		frame = (const uint64_t *)frame[0];
-	}
-	fprintf(stderr, "\n");
-}
-#else
-void
-syscall_print_guest_chain(const mcontext_t *mc)
-{
-	fprintf(stderr, "  guest chain: %llx %llx", mc->pc & 0x7fffffffffULL,
-			mc->regs[30] & 0x7fffffffffULL);
-	const uint64_t *frame = (const uint64_t *)mc->regs[29];
-	for (int i = 0; i < 64 && frame != NULL && ((uintptr_t)frame & 7) == 0;
-			i++) {
-		fprintf(stderr, " %llx",
-				(unsigned long long)(frame[1] & 0x7fffffffffULL));
-		frame = (const uint64_t *)frame[0];
-	}
-	fprintf(stderr, "\n");
-}
-#endif
-
 ucontext_t *
 syscall_trap_context(void)
 {
@@ -536,8 +515,7 @@ syscall_keep_context(void)
 {
 	context_kept = true;
 }
-
-#ifndef __x86_64__
+#else
 __attribute__((no_stack_protector)) static void
 handle_syscall(int sig, siginfo_t *info, void *ucontext)
 {
@@ -558,10 +536,15 @@ handle_syscall(int sig, siginfo_t *info, void *ucontext)
 	guest_thread_pointer = entry_pointer;
 	ucontext_t *outer_context = trap_context;
 	trap_context = ucontext;
+	asm volatile("limbo_syscall_entered:" ::: "memory");
 	void *outer_trap;
 	thread_enter_trap(ucontext, &outer_trap);
 
-	dispatch_syscall(mc);
+	if (signals_trap_enter(ucontext)) {
+		mc->pc -= 4;
+	} else {
+		dispatch_syscall(mc);
+	}
 	signals_trap_exit(ucontext);
 	thread_leave_trap(ucontext, outer_trap);
 
@@ -575,6 +558,40 @@ void
 syscall_set_guest_thread_pointer(uint64_t pointer)
 {
 	guest_thread_pointer = pointer;
+}
+
+ucontext_t *
+syscall_trap_context(void)
+{
+	return trap_context;
+}
+
+void
+syscall_trap_reset(void)
+{
+	trap_context = NULL;
+}
+
+void
+syscall_keep_context(void)
+{
+	context_kept = true;
+}
+
+void
+syscall_print_guest_chain(const mcontext_t *mc)
+{
+	fprintf(stderr, "  guest chain: %llx %llx", mc->pc & 0x7fffffffffULL,
+			mc->regs[30] & 0x7fffffffffULL);
+	const uint64_t *frame = (const uint64_t *)mc->regs[29];
+	for (int i = 0; i < 64 && frame != NULL && ((uintptr_t)frame & 7) == 0;
+			i++) {
+		fprintf(stderr, " %llx",
+				(unsigned long long)(frame[1]
+						& 0x7fffffffffULL));
+		frame = (const uint64_t *)frame[0];
+	}
+	fprintf(stderr, "\n");
 }
 
 static void
@@ -615,6 +632,12 @@ dispatch_syscall(mcontext_t *mc)
 		if (context_kept) {
 			context_kept = false;
 			x1_pending = false;
+		} else if (result == _EINTR
+				&& signals_restart((unsigned long)number)) {
+			regs[0] = arg1;
+			regs[1] = arg2;
+			mc->pc -= 4;
+			x1_pending = false;
 		} else if (returns_raw_result((unsigned long)number, arg1)) {
 			mc->pstate &= ~PSTATE_C;
 			regs[0] = result;
@@ -628,6 +651,19 @@ dispatch_syscall(mcontext_t *mc)
 	}
 }
 #endif
+
+bool
+syscall_entering(const ucontext_t *uc)
+{
+	extern const char limbo_syscall_entered[];
+#ifdef __x86_64__
+	uintptr_t pc = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+#else
+	uintptr_t pc = (uintptr_t)uc->uc_mcontext.pc;
+#endif
+	return pc >= (uintptr_t)handle_syscall
+			&& pc < (uintptr_t)limbo_syscall_entered;
+}
 
 /* The guest's call chain into the system call the thread is in, which
  * names the code that wanted what limbo lacks */
@@ -695,14 +731,17 @@ syscall_set_rdx(uint64_t value)
 int
 syscall_dispatch_enable(void)
 {
+#ifndef __x86_64__
 	if (signal_stack_install()) {
 		return 1;
 	}
-#ifndef __x86_64__
 	if (filter_installed) {
 		return 0;
 	}
 #else
+	if (signal_stack_install()) {
+		return 1;
+	}
 	guest_thread = true;
 #endif
 
@@ -813,7 +852,11 @@ signal_stack_install(void)
 			.ss_sp = base + sizeof(*stack),
 			.ss_size = SIGNAL_STACK_SIZE - sizeof(*stack),
 	};
-	sigaltstack(&ss, NULL);
+	if (sigaltstack(&ss, NULL) == -1) {
+		perror("sigaltstack");
+		munmap(base, SIGNAL_STACK_SIZE);
+		return 1;
+	}
 
 	pthread_once(&signal_stack_once, signal_stack_create_key);
 	pthread_setspecific(signal_stack_key, base);

@@ -26,6 +26,7 @@
  */
 
 #include <dispatch/dispatch.h>
+#include <mach/mach_time.h>
 #include <pthread.h>
 #include <setjmp.h>
 #include <signal.h>
@@ -38,6 +39,7 @@
 static volatile sig_atomic_t got;
 static volatile sig_atomic_t got_pid;
 static volatile sig_atomic_t children;
+static int self_pipe[2];
 static volatile sig_atomic_t fault_on_altstack;
 static volatile sig_atomic_t fault_address_ok;
 static sigjmp_buf fault_jump;
@@ -68,8 +70,10 @@ on_fault(int sig, siginfo_t *info, void *context)
 static void
 on_trap(int sig, siginfo_t *info, void *context)
 {
+#ifdef __arm64__
 	ucontext_t *uc = context;
 	uc->uc_mcontext->__ss.__pc += 4;
+#endif
 	got = sig;
 }
 
@@ -88,6 +92,29 @@ static void
 on_child(int sig)
 {
 	children++;
+}
+
+static void
+on_child_pipe(int sig)
+{
+	char byte = 1;
+	write(self_pipe[1], &byte, 1);
+}
+
+static void
+on_blocked(int sig)
+{
+	static const char message[] = "a SIGCHLD never came to a read\n";
+	write(STDERR_FILENO, message, sizeof(message) - 1);
+	_exit(1);
+}
+
+static void
+on_stuck(int sig)
+{
+	static const char message[] = "a SIGCHLD never woke sigsuspend\n";
+	write(STDERR_FILENO, message, sizeof(message) - 1);
+	_exit(1);
 }
 
 static void
@@ -197,6 +224,99 @@ check_child(void)
 }
 
 static void
+check_children(void)
+{
+	signal(SIGCHLD, on_child);
+	signal(SIGALRM, on_stuck);
+	sigset_t set, old;
+	sigemptyset(&set);
+	sigaddset(&set, SIGCHLD);
+	sigprocmask(SIG_BLOCK, &set, &old);
+	sigset_t wait_mask = old;
+	sigdelset(&wait_mask, SIGCHLD);
+	mach_timebase_info_data_t timebase;
+	mach_timebase_info(&timebase);
+	alarm(60);
+	for (int i = 0; i < 4000; i++) {
+		children = 0;
+		sigprocmask(SIG_UNBLOCK, &set, NULL);
+		pid_t pid = fork();
+		CHECK(pid >= 0);
+		if (pid == 0) {
+			_exit(0);
+		}
+		uint64_t until = mach_absolute_time()
+				+ (uint64_t)(i % 1000) * 1000 * timebase.denom
+						/ timebase.numer;
+		while (mach_absolute_time() < until) {
+		}
+		sigprocmask(SIG_BLOCK, &set, NULL);
+		while (children == 0) {
+			sigsuspend(&wait_mask);
+		}
+		int status;
+		CHECK(waitpid(pid, &status, 0) == pid);
+	}
+	alarm(0);
+	sigprocmask(SIG_SETMASK, &old, NULL);
+	signal(SIGCHLD, SIG_DFL);
+}
+
+static void
+on_alarm_pipe(int sig)
+{
+	char byte = 1;
+	write(self_pipe[1], &byte, 1);
+}
+
+static void
+check_restart(void)
+{
+	CHECK(pipe(self_pipe) == 0);
+	struct sigaction action
+			= {.sa_handler = on_alarm_pipe, .sa_flags = SA_RESTART};
+	sigemptyset(&action.sa_mask);
+	CHECK(sigaction(SIGALRM, &action, NULL) == 0);
+	alarm(1);
+	char byte;
+	CHECK(read(self_pipe[0], &byte, 1) == 1 && byte == 1);
+	signal(SIGALRM, SIG_DFL);
+	close(self_pipe[0]);
+	close(self_pipe[1]);
+}
+
+static void
+check_self_pipe(void)
+{
+	CHECK(pipe(self_pipe) == 0);
+	signal(SIGCHLD, on_child_pipe);
+	signal(SIGALRM, on_blocked);
+	mach_timebase_info_data_t timebase;
+	mach_timebase_info(&timebase);
+	alarm(60);
+	for (int i = 0; i < 4000; i++) {
+		pid_t pid = fork();
+		CHECK(pid >= 0);
+		if (pid == 0) {
+			_exit(0);
+		}
+		uint64_t until = mach_absolute_time()
+				+ (uint64_t)(i % 1000) * 1000 * timebase.denom
+						/ timebase.numer;
+		while (mach_absolute_time() < until) {
+		}
+		char byte;
+		CHECK(read(self_pipe[0], &byte, 1) == 1);
+		int status;
+		CHECK(waitpid(pid, &status, 0) == pid);
+	}
+	alarm(0);
+	signal(SIGCHLD, SIG_DFL);
+	close(self_pipe[0]);
+	close(self_pipe[1]);
+}
+
+static void
 check_source(void)
 {
 	signal(SIGTERM, SIG_IGN);
@@ -224,6 +344,9 @@ main(void)
 	check_faults();
 	check_alarm();
 	check_child();
+	check_children();
+	check_restart();
+	check_self_pipe();
 	check_source();
 	return 0;
 }

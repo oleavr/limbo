@@ -52,11 +52,18 @@ static pthread_rwlock_t rwlock = PTHREAD_RWLOCK_INITIALIZER;
 static atomic_int holders;
 static int written;
 
+static pthread_cond_t handoff = PTHREAD_COND_INITIALIZER;
+static pthread_t main_thread;
+static int turn;
+static bool by_name;
+
 static void *increment(void *arg);
 static void initialize(void);
 static void *produce(void *arg);
 static void *read_and_write(void *arg);
 static void *change_directory(void *arg);
+static void *take_turns(void *arg);
+static void hand_over(pthread_t to);
 
 extern int __pthread_fchdir(int fd);
 
@@ -97,14 +104,22 @@ main(void)
 	}
 	CHECK(written == THREADS / 2 * ITERATIONS / 10);
 
-	uint64_t start = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID);
-	CHECK(start != 0);
-	volatile uint64_t sum = 0;
-	for (int i = 0; i != 10000000; i++) {
-		sum += i;
+	main_thread = pthread_self();
+	for (int round = 0; round < 2; round++) {
+		by_name = round == 0;
+		pthread_t partner;
+		CHECK(pthread_create(&partner, NULL, take_turns, NULL) == 0);
+		pthread_mutex_lock(&lock);
+		for (int i = 0; i < ITERATIONS; i++) {
+			turn = 1;
+			hand_over(partner);
+			while (turn != 0) {
+				pthread_cond_wait(&handoff, &lock);
+			}
+		}
+		pthread_mutex_unlock(&lock);
+		CHECK(pthread_join(partner, NULL) == 0);
 	}
-	CHECK(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) > start);
-	CHECK(qos_class_main() != QOS_CLASS_UNSPECIFIED);
 
 	char before[PATH_MAX], after[PATH_MAX];
 	CHECK(getcwd(before, sizeof(before)) != NULL);
@@ -113,6 +128,16 @@ main(void)
 	CHECK(pthread_join(changer, NULL) == 0);
 	CHECK(getcwd(after, sizeof(after)) != NULL);
 	CHECK(strcmp(before, after) == 0);
+
+	uint64_t start = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID);
+	CHECK(start != 0);
+	volatile uint64_t sum = 0;
+	for (int i = 0; i != 10000000; i++) {
+		sum += i;
+	}
+	CHECK(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) > start);
+
+	CHECK(qos_class_main() != QOS_CLASS_UNSPECIFIED);
 
 	char name[32];
 	CHECK(pthread_setname_np("limbo-main") == 0);
@@ -176,6 +201,32 @@ read_and_write(void *arg)
 		CHECK(pthread_rwlock_unlock(&rwlock) == 0);
 	}
 	return NULL;
+}
+
+static void *
+take_turns(void *arg)
+{
+	(void)arg;
+	pthread_mutex_lock(&lock);
+	for (int i = 0; i < ITERATIONS; i++) {
+		while (turn != 1) {
+			pthread_cond_wait(&handoff, &lock);
+		}
+		turn = 0;
+		hand_over(main_thread);
+	}
+	pthread_mutex_unlock(&lock);
+	return NULL;
+}
+
+static void
+hand_over(pthread_t to)
+{
+	if (by_name) {
+		CHECK(pthread_cond_signal_thread_np(&handoff, to) == 0);
+	} else {
+		CHECK(pthread_cond_broadcast(&handoff) == 0);
+	}
 }
 
 static void *

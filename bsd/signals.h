@@ -44,7 +44,12 @@ enum signal_context {
 void signals_init(void);
 void signals_handle(int sig, siginfo_t *info, ucontext_t *uc,
 		enum signal_context context);
+bool signals_trap_enter(ucontext_t *uc);
+bool signals_restart(unsigned long number);
 void signals_trap_exit(ucontext_t *uc);
 void signals_fork_child(void);
+int signals_kick_signal(void);
 int signals_mask(int how, const uint32_t *set, uint32_t *oset);
+int signals_suspend(uint32_t mask);
+bool signals_wait_begin(uint32_t mask, sigset_t *previous, sigset_t *set);
 void signals_watch(int sig, bool watch);
