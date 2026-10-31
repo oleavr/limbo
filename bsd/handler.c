@@ -83,6 +83,7 @@
 #include "bsd/credentials.h"
 #include "bsd/hostuuid.h"
 #include "commpage.h"
+#include "icmp.h"
 #include "kctl.h"
 #include "net.h"
 #include "persona.h"
@@ -357,6 +358,7 @@ sys_sys_close(int fd)
 	net_close(fd);
 	route_close(fd);
 	kctl_close(fd);
+	icmp_close(fd);
 	return errno_map(close(fd));
 }
 
@@ -625,6 +627,28 @@ sys_recvmsg(int s, void *msg, int flags)
 #endif
 	struct xnu_msghdr *guest = msg;
 	struct sockaddr_storage address;
+	if (icmp_is_socket(s)) {
+		bool truncated;
+		ssize_t received = icmp_receive(s, guest->msg_iov,
+				guest->msg_iovlen, translate_msg_flags(flags),
+				(struct sockaddr_in *)&address, &truncated);
+		if (received < 0) {
+			return err_map(errno);
+		}
+		if (guest->msg_name != NULL) {
+			translate_to_guest_sockaddr(
+					&address, sizeof(struct sockaddr_in));
+			uint32_t length = guest->msg_namelen < sizeof(
+							  struct sockaddr_in)
+					? guest->msg_namelen
+					: sizeof(struct sockaddr_in);
+			memcpy(guest->msg_name, &address, length);
+			guest->msg_namelen = sizeof(struct sockaddr_in);
+		}
+		guest->msg_flags = truncated ? xnu_MSG_TRUNC : 0;
+		guest->msg_controllen = 0;
+		return (int)received;
+	}
 	uint8_t control[CMSG_SPACE(253 * sizeof(int))]
 			__attribute__((aligned(8)));
 	struct msghdr host = {
@@ -673,6 +697,9 @@ sys_sendmsg(int s, void *msg, int flags)
 	if (route_is_socket(s)) {
 		return (int)route_writev(s, guest->msg_iov, guest->msg_iovlen);
 	}
+	if (icmp_is_socket(s)) {
+		icmp_sending(s, guest->msg_iov, guest->msg_iovlen);
+	}
 	struct sockaddr_storage address;
 	uint8_t control[CMSG_SPACE(253 * sizeof(int))]
 			__attribute__((aligned(8)));
@@ -705,9 +732,18 @@ sys_recvfrom(int s, void *buf, size_t len, int flags, void *from,
 #endif
 	struct sockaddr_storage host;
 	socklen_t host_len = sizeof(host);
-	ssize_t received = recvfrom(s, buf, len, translate_msg_flags(flags),
-			from != NULL ? (struct sockaddr *)&host : NULL,
-			from != NULL ? &host_len : NULL);
+	ssize_t received;
+	if (icmp_is_socket(s)) {
+		struct iovec iov = {buf, len};
+		bool truncated;
+		received = icmp_receive(s, &iov, 1, translate_msg_flags(flags),
+				(struct sockaddr_in *)&host, &truncated);
+		host_len = sizeof(struct sockaddr_in);
+	} else {
+		received = recvfrom(s, buf, len, translate_msg_flags(flags),
+				from != NULL ? (struct sockaddr *)&host : NULL,
+				from != NULL ? &host_len : NULL);
+	}
 	if (received >= 0 && from != NULL && fromlenaddr != NULL) {
 		translate_to_guest_sockaddr(&host, host_len);
 		uint32_t guest_len = *(uint32_t *)fromlenaddr;
@@ -1598,6 +1634,10 @@ sys_socket(int domain, int type, int protocol)
 	if (domain == xnu_PF_SYSTEM) {
 		return _EAFNOSUPPORT;
 	}
+	if (domain == AF_INET && type == SOCK_DGRAM
+			&& protocol == IPPROTO_ICMP) {
+		return icmp_socket();
+	}
 	int host_domain = translate_domain(domain);
 	if (host_domain == -1) {
 		unimplemented();
@@ -1949,6 +1989,10 @@ sys_sendto(int s, void *buf, size_t len, int flags, void *to, void *tolen)
 #endif
 	if (route_is_socket(s)) {
 		return route_write(s, buf, len);
+	}
+	if (icmp_is_socket(s)) {
+		struct iovec iov = {buf, len};
+		icmp_sending(s, &iov, 1);
 	}
 	struct sockaddr_storage host;
 	struct sockaddr *dest = NULL;
