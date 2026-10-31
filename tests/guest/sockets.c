@@ -25,7 +25,12 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <arpa/inet.h>
 #include <errno.h>
+#include <netinet/in.h>
+#include <netinet/in_systm.h>
+#include <netinet/ip.h>
+#include <netinet/ip_icmp.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -35,6 +40,7 @@
 #include <unistd.h>
 
 #include "check.h"
+static void check_icmp(void);
 
 int
 main(void)
@@ -83,5 +89,50 @@ main(void)
 	CHECK(errno == EADDRINUSE);
 	CHECK(close(s) == 0);
 	CHECK(unlink(path) == 0);
+	check_icmp();
 	return 0;
+}
+
+static void
+check_icmp(void)
+{
+	int s = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP);
+	if (s == -1 && (errno == EACCES || errno == EPERM)) {
+		printf("skipping ICMP: no ICMP sockets for this group\n");
+		return;
+	}
+	CHECK(s != -1);
+	struct sockaddr_in to = {
+			.sin_len = sizeof(to),
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+	};
+	uint8_t request[ICMP_MINLEN + 8] = {0};
+	struct icmp *echo = (struct icmp *)request;
+	echo->icmp_type = ICMP_ECHO;
+	echo->icmp_id = htons(0x4c42);
+	echo->icmp_seq = htons(7);
+	memcpy(request + ICMP_MINLEN, "limbo!!!", 8);
+	CHECK(sendto(s, request, sizeof(request), 0, (struct sockaddr *)&to,
+			      sizeof(to))
+			== (ssize_t)sizeof(request));
+
+	uint8_t reply[256];
+	struct sockaddr_in from;
+	socklen_t from_len = sizeof(from);
+	ssize_t n = recvfrom(s, reply, sizeof(reply), 0,
+			(struct sockaddr *)&from, &from_len);
+	const struct ip *header = (const struct ip *)reply;
+	CHECK(n == (ssize_t)(sizeof(struct ip) + sizeof(request)));
+	CHECK(header->ip_v == 4 && header->ip_hl == 5);
+	CHECK(header->ip_p == IPPROTO_ICMP && header->ip_ttl > 0);
+	CHECK(header->ip_src.s_addr == htonl(INADDR_LOOPBACK));
+	CHECK(from.sin_addr.s_addr == htonl(INADDR_LOOPBACK));
+	const struct icmp *answer
+			= (const struct icmp *)(reply + sizeof(*header));
+	CHECK(answer->icmp_type == ICMP_ECHOREPLY);
+	CHECK(answer->icmp_id == htons(0x4c42) && answer->icmp_seq == htons(7));
+	CHECK(memcmp(reply + sizeof(*header) + ICMP_MINLEN, "limbo!!!", 8)
+			== 0);
+	CHECK(close(s) == 0);
 }
