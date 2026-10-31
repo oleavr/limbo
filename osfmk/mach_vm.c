@@ -237,7 +237,19 @@ _kernelrpc_mach_vm_read(vm_map_read_t target_task, mach_vm_address_t address,
 	if (size > 64 * 1024 * 1024) {
 		return KERN_INVALID_ARGUMENT;
 	}
-	memcpy(data, (const void *)address, size);
+	if (size == 0) {
+		*data = 0;
+		*dataCnt = 0;
+		return KERN_SUCCESS;
+	}
+	mach_vm_address_t buf = 0;
+	kern_return_t kr = _kernelrpc_mach_vm_allocate(
+			MACH_PORT_NULL, &buf, size, VM_FLAGS_ANYWHERE);
+	if (kr != KERN_SUCCESS) {
+		return kr;
+	}
+	memcpy((void *)buf, (const void *)address, size);
+	*data = (vm_offset_t)buf;
 	*dataCnt = size;
 	return KERN_SUCCESS;
 }
