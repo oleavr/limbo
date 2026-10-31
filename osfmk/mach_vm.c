@@ -29,6 +29,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include <dirent.h>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -40,6 +41,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 
 #include "ipc.h"
@@ -67,7 +69,7 @@ static int share_in_place(mach_vm_address_t address, mach_vm_size_t size,
 		vm_prot_t protection);
 static int shared_range_fd(mach_vm_address_t start);
 static void shared_range_add(mach_vm_address_t start, int fd);
-static bool region_inode(mach_vm_address_t start, ino_t *inode);
+static bool region_inode(mach_vm_address_t start, dev_t *device, ino_t *inode);
 static int copy_range(mach_vm_address_t address, mach_vm_size_t size);
 static kern_return_t remap_copy(mach_vm_address_t *target_address,
 		mach_vm_size_t size, mach_vm_offset_t mask, int flags,
@@ -526,8 +528,9 @@ static pthread_mutex_t shared_ranges_lock = PTHREAD_MUTEX_INITIALIZER;
 static int
 shared_range_fd(mach_vm_address_t start)
 {
+	dev_t device;
 	ino_t inode;
-	bool mapped = region_inode(start, &inode);
+	bool mapped = region_inode(start, &device, &inode);
 	int fd = -1;
 	pthread_mutex_lock(&shared_ranges_lock);
 	struct shared_range **link = &shared_ranges;
@@ -539,6 +542,7 @@ shared_range_fd(mach_vm_address_t start)
 			continue;
 		}
 		if (mapped && fstat(range->fd, &status) == 0
+				&& status.st_dev == device
 				&& status.st_ino == inode) {
 			fd = fcntl(range->fd, F_DUPFD_CLOEXEC, 0);
 			break;
@@ -570,17 +574,20 @@ shared_range_add(mach_vm_address_t start, int fd)
 
 /* The inode of the file the mapping that starts at START maps */
 static bool
-region_inode(mach_vm_address_t start, ino_t *inode)
+region_inode(mach_vm_address_t start, dev_t *device, ino_t *inode)
 {
 	FILE *maps = fopen("/proc/thread-self/maps", "r");
 	char line[512];
 	bool found = false;
 	while (maps != NULL && fgets(line, sizeof(line), maps) != NULL) {
 		unsigned long low;
+		unsigned int major, minor;
 		unsigned long long number;
-		if (sscanf(line, "%lx-%*x %*s %*x %*s %llu", &low, &number)
-						== 2
+		if (sscanf(line, "%lx-%*x %*s %*x %x:%x %llu", &low, &major,
+				    &minor,
+				    &number) == 4
 				&& low == start) {
+			*device = makedev(major, minor);
 			*inode = (ino_t)number;
 			found = true;
 			break;
@@ -709,7 +716,9 @@ mach_vm_region(vm_map_read_t target_task, mach_vm_address_t *address,
 			.offset = offset,
 	};
 	*infoCnt = VM_REGION_BASIC_INFO_COUNT_64;
-	*object_name = MACH_PORT_NULL;
+	if (object_name != NULL) {
+		*object_name = MACH_PORT_NULL;
+	}
 	return KERN_SUCCESS;
 }
 
