@@ -38,6 +38,7 @@
 #include <sys/eventfd.h>
 #include <sys/random.h>
 #include <sys/syscall.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "bsd/handler.h"
@@ -108,8 +109,6 @@
 #define FXSAVE_MXCSR_MASK 28
 
 #define X86_FLAGS_USER 0xcd5
-
-#define HANDLER_STACK_ROOM (16 * 1024)
 
 struct darwin_sigaction_in {
 	uint64_t handler;
@@ -258,10 +257,20 @@ static _Atomic int64_t sent_counts[DARWIN_NSIG];
 static int relay_fd = -1;
 
 static __thread uint32_t thread_pending;
+struct kick {
+	int timer;
+	int count;
+	bool armed;
+};
+static __thread struct kick kick_state;
+#define KICKS_MAX 100
 static __thread siginfo_t signal_info[DARWIN_NSIG];
 static __thread struct darwin_stack guest_altstack = {.ss_flags = _SS_DISABLE};
 
 static void install_host_action(int sig);
+static void handle_kick(int sig, siginfo_t *info, void *context);
+static bool interrupted_host_call(const ucontext_t *uc);
+static void kick(void);
 static bool default_ignores(int sig);
 static void *relay_main(void *arg);
 static bool deliver(ucontext_t *uc, int sig, const siginfo_t *info);
@@ -295,6 +304,19 @@ signals_init(void)
 		}
 	}
 	getrandom(&token_key, sizeof(token_key), 0);
+
+	struct sigaction act;
+	memset(&act, 0, sizeof(act));
+	act.sa_sigaction = handle_kick;
+	sigfillset(&act.sa_mask);
+#ifdef __x86_64__
+	act.sa_flags = SA_SIGINFO | SA_ONSTACK;
+#else
+	act.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTORER;
+	act.sa_restorer = limbo_rt_sigreturn;
+#endif
+	sigaction(signals_kick_signal(), &act, NULL);
+
 	install_host_action(_SIGTRAP);
 	install_host_action(_SIGSEGV);
 	install_host_action(_SIGBUS);
@@ -369,15 +391,11 @@ install_host_action(int sig)
 	if (action->handler > _SIG_HOLD || watched || report) {
 		act.sa_sigaction = syscall_signal_handler;
 #ifdef __x86_64__
-
-		act.sa_flags = SA_SIGINFO;
+		act.sa_flags = SA_SIGINFO | SA_ONSTACK;
 #else
 		act.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTORER;
 		act.sa_restorer = limbo_rt_sigreturn;
 #endif
-		if (action->flags & _SA_RESTART) {
-			act.sa_flags |= SA_RESTART;
-		}
 		sigfillset(&act.sa_mask);
 		sigdelset(&act.sa_mask, SIGSYS);
 		sigdelset(&act.sa_mask, SIGILL);
@@ -499,13 +517,10 @@ signals_handle(int sig, siginfo_t *info, ucontext_t *uc,
 		}
 	}
 	if (!caught) {
-#ifdef ENABLE_STRACE
-
 		if (is_fault(sig) && action->handler == _SIG_DFL) {
 			signal(sig, SIG_DFL);
 			syscall(SYS_tgkill, getpid(), gettid(), sig);
 		}
-#endif
 		return;
 	}
 
@@ -515,17 +530,100 @@ signals_handle(int sig, siginfo_t *info, ucontext_t *uc,
 		deliver(uc, darwin, info);
 		break;
 	case SIGNAL_IN_LIMBO:
-		if (syscall_trap_context() != NULL || info->si_code == SI_TKILL) {
+		if (syscall_trap_context() != NULL || info->si_code == SI_TKILL
+				|| syscall_entering(uc)) {
 			signal_info[darwin] = *info;
 			thread_pending |= bit;
+			if (syscall_trap_context() != NULL
+					&& !interrupted_host_call(uc)) {
+				kick();
+			}
 			break;
 		}
-
+		__attribute__((fallthrough));
 	case SIGNAL_ON_LIMBO_THREAD:
 		process_info[darwin] = *info;
 		atomic_fetch_or(&process_pending, bit);
 		break;
 	}
+}
+
+bool
+signals_trap_enter(ucontext_t *uc)
+{
+	if (!atomic_load_explicit(&catching, memory_order_relaxed)) {
+		return false;
+	}
+	uint32_t waiting = atomic_load_explicit(
+			&process_pending, memory_order_relaxed);
+	if (waiting != 0) {
+		waiting &= ~guest_mask(uc);
+	}
+	for (int sig = 1; waiting != 0 && sig < DARWIN_NSIG; sig++) {
+		uint32_t bit = 1u << (sig - 1);
+		if ((waiting & bit)
+				&& (atomic_fetch_and(&process_pending, ~bit)
+						& bit)) {
+			signal_info[sig] = process_info[sig];
+			thread_pending |= bit;
+		}
+	}
+	return thread_pending != 0;
+}
+
+bool
+signals_restart(unsigned long number)
+{
+	switch (number) {
+	case 3:
+	case 4:
+	case 5:
+	case 7:
+	case 27:
+	case 28:
+	case 29:
+	case 30:
+	case 54:
+	case 92:
+	case 120:
+	case 121:
+	case 131:
+	case 133:
+	case 153:
+	case 154:
+	case 173:
+	case 396:
+	case 397:
+	case 398:
+	case 400:
+	case 401:
+	case 402:
+	case 403:
+	case 404:
+	case 406:
+	case 411:
+	case 412:
+	case 413:
+	case 414:
+	case 415:
+	case 416:
+	case 463:
+	case 464:
+		break;
+	default:
+		return false;
+	}
+	uint32_t pending = thread_pending;
+	if (pending == 0) {
+		return false;
+	}
+	for (int sig = 1; sig < DARWIN_NSIG; sig++) {
+		if ((pending & (1u << (sig - 1)))
+				&& !(actions[sig].flags & _SA_RESTART)) {
+			return false;
+		}
+	}
+	return true;
 }
 
 void
@@ -544,6 +642,10 @@ signals_trap_exit(ucontext_t *uc)
 	sigdelset(&all, SIGTRAP);
 	sigdelset(&all, SIGFPE);
 	pthread_sigmask(SIG_BLOCK, &all, NULL);
+	if (kick_state.armed) {
+		kick_state.armed = false;
+		syscall(SYS_timer_delete, kick_state.timer);
+	}
 
 	uint32_t pending = thread_pending;
 	thread_pending = 0;
@@ -566,11 +668,122 @@ signals_trap_exit(ucontext_t *uc)
 	}
 }
 
+int
+signals_suspend(uint32_t mask)
+{
+	sigset_t previous, set;
+	if (signals_wait_begin(mask, &previous, &set)) {
+		sigsuspend(&set);
+	}
+	pthread_sigmask(SIG_SETMASK, &previous, NULL);
+	return _EINTR;
+}
+
+bool
+signals_wait_begin(uint32_t mask, sigset_t *previous, sigset_t *set)
+{
+	sigset_t all;
+	sigfillset(&all);
+	sigdelset(&all, SIGSYS);
+	sigdelset(&all, SIGILL);
+	sigdelset(&all, SIGSEGV);
+	sigdelset(&all, SIGBUS);
+	sigdelset(&all, SIGTRAP);
+	sigdelset(&all, SIGFPE);
+	pthread_sigmask(SIG_BLOCK, &all, previous);
+
+	uint32_t waiting = atomic_load(&process_pending) & ~mask;
+	for (int sig = 1; waiting != 0 && sig < DARWIN_NSIG; sig++) {
+		uint32_t bit = 1u << (sig - 1);
+		if ((waiting & bit)
+				&& (atomic_fetch_and(&process_pending, ~bit)
+						& bit)) {
+			signal_info[sig] = process_info[sig];
+			thread_pending |= bit;
+		}
+	}
+	if (thread_pending != 0) {
+		return false;
+	}
+	sigset_to_linux(mask, set);
+	sigdelset(set, SIGSYS);
+	return true;
+}
+
 void
 signals_fork_child(void)
 {
 	thread_pending = 0;
+	kick_state.armed = false;
 	atomic_store(&process_pending, 0);
+}
+
+int
+signals_kick_signal(void)
+{
+	return SIGRTMIN + 6;
+}
+
+__attribute__((no_stack_protector)) static void
+handle_kick(int sig, siginfo_t *info, void *context)
+{
+	(void)sig;
+	(void)context;
+	struct kick *state = info->si_value.sival_ptr;
+	if (state == NULL || !state->armed || ++state->count < KICKS_MAX) {
+		return;
+	}
+	state->armed = false;
+#ifdef __x86_64__
+	long result;
+	__asm__ volatile("syscall"
+			: "=a"(result)
+			: "a"((long)SYS_timer_delete), "D"((long)state->timer)
+			: "rcx", "r11", "memory");
+#else
+	register long x8 __asm__("x8") = SYS_timer_delete;
+	register long x0 __asm__("x0") = state->timer;
+	__asm__ volatile("svc #0" : "+r"(x0) : "r"(x8) : "memory");
+#endif
+}
+
+static bool
+interrupted_host_call(const ucontext_t *uc)
+{
+#ifdef __x86_64__
+	const uint8_t *rip = (const uint8_t *)uc->uc_mcontext.gregs[REG_RIP];
+	return rip[-2] == 0x0f && rip[-1] == 0x05
+			&& uc->uc_mcontext.gregs[REG_RAX] == -EINTR;
+#else
+	return ((const uint32_t *)uc->uc_mcontext.pc)[-1] == 0xd4000001
+			&& (int64_t)uc->uc_mcontext.regs[0] == -EINTR;
+#endif
+}
+
+static void
+kick(void)
+{
+	if (kick_state.armed) {
+		return;
+	}
+	struct sigevent event;
+	memset(&event, 0, sizeof(event));
+	event.sigev_notify = SIGEV_THREAD_ID;
+	event.sigev_signo = signals_kick_signal();
+	event.sigev_value.sival_ptr = &kick_state;
+	event._sigev_un._tid = (pid_t)syscall(SYS_gettid);
+	if (syscall(SYS_timer_create, CLOCK_MONOTONIC, &event,
+			    &kick_state.timer)
+			!= 0) {
+		return;
+	}
+	kick_state.count = 0;
+	kick_state.armed = true;
+	struct itimerspec every = {
+			.it_interval = {.tv_nsec = 1000000},
+			.it_value = {.tv_nsec = 1000000},
+	};
+	syscall(SYS_timer_settime, kick_state.timer, 0, &every, NULL);
 }
 
 static bool
@@ -588,14 +801,6 @@ deliver(ucontext_t *uc, int sig, const siginfo_t *info)
 	uint64_t sp = use_altstack
 			? guest_altstack.ss_sp + guest_altstack.ss_size
 			: context_sp(uc) - C_64_REDZONE_LEN;
-#ifdef __x86_64__
-
-	uint64_t here = (uint64_t)__builtin_frame_address(0)
-			- HANDLER_STACK_ROOM;
-	if (!use_altstack && here < sp) {
-		sp = here;
-	}
-#endif
 	sp = (sp - sizeof(struct darwin_sigframe)) & ~(uint64_t)15;
 
 	struct darwin_sigframe *frame = (void *)sp;

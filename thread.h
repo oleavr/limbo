@@ -84,6 +84,8 @@ struct thread {
 struct thread *thread_current(void);
 struct thread *thread_new(thread_continuation_t continuation, void *context);
 int thread_start(struct thread *thread, const struct thread_state *state);
+int thread_create_own(pthread_t *handle, const pthread_attr_t *attr,
+		void *(*start)(void *), void *arg);
 void __attribute__((noreturn)) thread_enter(const struct thread_state *state);
 void __attribute__((noreturn)) thread_block(void);
 void thread_suspend_self(void);
