@@ -26,10 +26,30 @@
  */
 
 #include <mach/mach.h>
+#include <stdbool.h>
 #include <mach/host_special_ports.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "ipc.h"
+#include "mach_vm.h"
+
+#define kOSReturnSuccess         0
+#define kOSKextReturnUnsupported 0xdc008009
+
+static const struct {
+	const char *predicate;
+	const char *response;
+	kern_return_t result;
+} kext_requests[] = {
+		{"Get Kexts in Collection", "<dict></dict>", kOSReturnSuccess},
+		{"DaemonReady", NULL, kOSReturnSuccess},
+		{"Get Kernel Requests", "<array></array>", kOSReturnSuccess},
+		{"LoadCodelessKext", NULL, kOSKextReturnUnsupported},
+};
+
+static bool request_predicate_is(
+		const char *request, size_t size, const char *predicate);
 
 kern_return_t
 host_get_boot_info(host_priv_t host_priv, kernel_boot_info_t boot_info)
@@ -314,6 +334,50 @@ kext_request(host_priv_t host_priv, uint32_t user_log_flags,
 			(void *)response_data, (void *)response_dataCnt,
 			(void *)log_data, (void *)log_dataCnt,
 			(void *)op_result);
+	fprintf(stderr, "  kext_request: %.*s\n", (int)request_dataCnt,
+			(const char *)request_data);
 #endif
+	for (size_t i = 0; i < sizeof(kext_requests) / sizeof(kext_requests[0]);
+			i++) {
+		if (!request_predicate_is((const char *)request_data,
+				    request_dataCnt,
+				    kext_requests[i].predicate)) {
+			continue;
+		}
+		const char *response = kext_requests[i].response;
+		*response_data = 0;
+		*response_dataCnt = 0;
+		if (response != NULL) {
+			size_t size = strlen(response) + 1;
+			mach_vm_address_t address = 0;
+			if (_kernelrpc_mach_vm_allocate(0, &address, size,
+					    VM_FLAGS_ANYWHERE)
+					!= KERN_SUCCESS) {
+				return KERN_RESOURCE_SHORTAGE;
+			}
+			memcpy((void *)address, response, size);
+			*response_data = (vm_offset_t)address;
+			*response_dataCnt = (mach_msg_type_number_t)size;
+		}
+		*log_data = 0;
+		*log_dataCnt = 0;
+		*op_result = kext_requests[i].result;
+		return KERN_SUCCESS;
+	}
 	unimplemented();
+}
+
+static bool
+request_predicate_is(const char *request, size_t size, const char *predicate)
+{
+	static const char key[] = "<key>Kext Request Predicate</key><string>";
+	const char *found = memmem(request, size, key, sizeof(key) - 1);
+	if (found == NULL) {
+		return false;
+	}
+	const char *value = found + sizeof(key) - 1;
+	size_t length = strlen(predicate);
+	return (size_t)(request + size - value) > length
+			&& memcmp(value, predicate, length) == 0
+			&& value[length] == '<';
 }
