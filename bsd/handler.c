@@ -114,6 +114,8 @@
 static __thread unsigned long current_syscall;
 
 static sem_t *semaphore(void *handle);
+static int host_unix_address(const void *name, socklen_t length,
+		struct sockaddr_un *linux_address, int *directory);
 
 int
 sys_nosys(void)
@@ -1553,6 +1555,12 @@ sys_socket(int domain, int type, int protocol)
 	return errno_map(socket(host_domain, type, protocol));
 }
 
+struct xnu_sockaddr_un {
+	uint8_t sun_len;
+	uint8_t sun_family;
+	char sun_path[104];
+};
+
 int
 sys_connect(int s, void *name, void *namelen)
 {
@@ -1560,10 +1568,70 @@ sys_connect(int s, void *name, void *namelen)
 	fprintf(stderr, "connect(%p, %p, %p)\n", (void *)s, (void *)name,
 			(void *)namelen);
 #endif
+	socklen_t length = (socklen_t)(uintptr_t)namelen;
+	if (length >= 2 && ((const uint8_t *)name)[1] == xnu_PF_UNIX) {
+		struct sockaddr_un linux_address;
+		int directory;
+		int error = host_unix_address(
+				name, length, &linux_address, &directory);
+		if (error != 0) {
+			return error;
+		}
+		int result = connect(s, (struct sockaddr *)&linux_address,
+				sizeof(linux_address));
+		error = errno;
+		if (directory != -1) {
+			close(directory);
+		}
+		return result == -1 ? err_map(error) : 0;
+	}
 	struct sockaddr_storage host;
-	socklen_t len = translate_to_host_sockaddr(
-			name, (socklen_t)(uintptr_t)namelen, &host);
+	socklen_t len = translate_to_host_sockaddr(name, length, &host);
 	return errno_map(connect(s, (struct sockaddr *)&host, len));
+}
+
+static int
+host_unix_address(const void *name, socklen_t length,
+		struct sockaddr_un *linux_address, int *directory)
+{
+	const struct xnu_sockaddr_un *address = name;
+	char path[sizeof(address->sun_path) + 1] = {0};
+	size_t path_length = length - 2;
+	if (path_length > sizeof(address->sun_path)) {
+		path_length = sizeof(address->sun_path);
+	}
+	memcpy(path, address->sun_path, path_length);
+
+	char buffer[PATH_MAX];
+	const char *host_path
+			= sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer);
+	*linux_address = (struct sockaddr_un){.sun_family = AF_UNIX};
+	*directory = -1;
+	if (strlen(host_path) < sizeof(linux_address->sun_path)) {
+		strcpy(linux_address->sun_path, host_path);
+		return 0;
+	}
+	char parent[PATH_MAX];
+	snprintf(parent, sizeof(parent), "%s", host_path);
+	char *slash = strrchr(parent, '/');
+	if (slash == NULL) {
+		return _ENAMETOOLONG;
+	}
+	*slash = '\0';
+	*directory = open(parent[0] != '\0' ? parent : "/",
+			O_PATH | O_DIRECTORY | O_CLOEXEC);
+	if (*directory == -1) {
+		return err_map(errno);
+	}
+	if ((size_t)snprintf(linux_address->sun_path,
+			    sizeof(linux_address->sun_path),
+			    "/proc/thread-self/fd/%d/%s", *directory, slash + 1)
+			>= sizeof(linux_address->sun_path)) {
+		close(*directory);
+		*directory = -1;
+		return _ENAMETOOLONG;
+	}
+	return 0;
 }
 
 int
@@ -1582,12 +1650,6 @@ sys_getpriority(int which, void *who)
 	}
 	return priority;
 }
-
-struct xnu_sockaddr_un {
-	uint8_t sun_len;
-	uint8_t sun_family;
-	char sun_path[104];
-};
 
 int
 sys_bind(int s, void *name, void *namelen)
@@ -1608,41 +1670,15 @@ sys_bind(int s, void *name, void *namelen)
 		return errno_map(
 				bind(s, (struct sockaddr *)&host, host_length));
 	}
-	char path[sizeof(address->sun_path) + 1] = {0};
-	size_t path_length = length - 2;
-	if (path_length > sizeof(address->sun_path)) {
-		path_length = sizeof(address->sun_path);
-	}
-	memcpy(path, address->sun_path, path_length);
-
-	char buffer[PATH_MAX];
-	const char *host_path = sysroot_host_path(path, AT_SYMLINK_NOFOLLOW,
-			buffer);
-	struct sockaddr_un linux_address = {.sun_family = AF_UNIX};
-	int directory = -1;
-	if (strlen(host_path) < sizeof(linux_address.sun_path)) {
-		strcpy(linux_address.sun_path, host_path);
-	} else {
-		char parent[PATH_MAX];
-		snprintf(parent, sizeof(parent), "%s", host_path);
-		char *slash = strrchr(parent, '/');
-		*slash = '\0';
-		directory = open(parent, O_PATH | O_DIRECTORY | O_CLOEXEC);
-		if (directory == -1) {
-			return err_map(errno);
-		}
-		if ((size_t)snprintf(linux_address.sun_path,
-				    sizeof(linux_address.sun_path),
-				    "/proc/thread-self/fd/%d/%s", directory,
-				    slash + 1)
-				>= sizeof(linux_address.sun_path)) {
-			close(directory);
-			return _ENAMETOOLONG;
-		}
+	struct sockaddr_un linux_address;
+	int directory;
+	int error = host_unix_address(name, length, &linux_address, &directory);
+	if (error != 0) {
+		return error;
 	}
 	int result = bind(s, (struct sockaddr *)&linux_address,
 			sizeof(linux_address));
-	int error = errno;
+	error = errno;
 	if (directory != -1) {
 		close(directory);
 	}
