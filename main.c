@@ -30,6 +30,7 @@
 #define _GNU_SOURCE
 #endif
 
+#include <fcntl.h>
 #include <mach/mach.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,6 +54,9 @@
 static char dyld_ls[0x1000];
 
 static int run(int argc, char *argv[], char *envp[]);
+#ifdef __arm64__
+static void reserve_high_address_space(void);
+#endif
 static uintptr_t build_stack(uint8_t *exe_base, const char *path, int argc,
 		char *argv[], char *envp[]);
 static int restart_without_aslr(char *argv[], char *envp[]);
@@ -85,6 +89,55 @@ raise_file_limit(void)
 	}
 }
 
+#ifdef __arm64__
+#define GUEST_ADDRESS_LIMIT (1ULL << 45)
+#define STACK_HEADROOM      (256ULL << 20)
+
+static void
+reserve_high_address_space(void)
+{
+	static char maps[0x4000];
+	int f = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
+	if (f == -1) {
+		return;
+	}
+	ssize_t length = 0, n;
+	while (length < (ssize_t)sizeof(maps) - 1
+			&& (n = read(f, maps + length,
+					    sizeof(maps) - 1 - length))
+					> 0) {
+		length += n;
+	}
+	close(f);
+	maps[length] = '\0';
+
+	uint64_t cursor = GUEST_ADDRESS_LIMIT;
+	for (char *line = maps; *line != '\0';) {
+		char *next = strchrnul(line, '\n');
+		unsigned long start, end;
+		if (sscanf(line, "%lx-%lx", &start, &end) == 2
+				&& end > cursor) {
+			uint64_t gap_end = start;
+			if (memmem(line, next - line, "[stack]", 7) != NULL) {
+				gap_end = start > STACK_HEADROOM
+						? start - STACK_HEADROOM
+						: 0;
+			}
+			if (gap_end > cursor) {
+				mmap((void *)cursor, gap_end - cursor,
+						PROT_NONE,
+						MAP_PRIVATE | MAP_ANON
+								| MAP_NORESERVE
+								| MAP_FIXED_NOREPLACE,
+						-1, 0);
+			}
+			cursor = end;
+		}
+		line = *next == '\n' ? next + 1 : next;
+	}
+}
+#endif
+
 static int
 restart_without_aslr(char *argv[], char *envp[])
 {
@@ -106,6 +159,9 @@ run(int argc, char *argv[], char *envp[])
 		return 1;
 	}
 
+#ifdef __arm64__
+	reserve_high_address_space();
+#endif
 	if (sysroot_open() || syscall_handler_install()) {
 		goto error;
 	}
