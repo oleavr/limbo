@@ -32,6 +32,7 @@
 
 #include <arpa/inet.h>
 #include <ifaddrs.h>
+#include <linux/netlink.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -86,6 +87,7 @@
 #include "net.h"
 #include "persona.h"
 #include "persona.h"
+#include "route.h"
 #include "signals.h"
 #include "tty.h"
 #include "fs/at.h"
@@ -227,6 +229,9 @@ sys_write(int fd, user_addr_t cbuf, user_size_t nbyte)
 				(void *)nbyte);
 	}
 #endif
+	if (route_is_socket(fd)) {
+		return route_write(fd, cbuf, nbyte);
+	}
 	return errno_map(write(fd, cbuf, nbyte));
 }
 
@@ -350,6 +355,7 @@ sys_sys_close(int fd)
 #endif
 	kevent_close(fd);
 	net_close(fd);
+	route_close(fd);
 	kctl_close(fd);
 	return errno_map(close(fd));
 }
@@ -664,6 +670,9 @@ sys_sendmsg(int s, void *msg, int flags)
 			(void *)flags);
 #endif
 	const struct xnu_msghdr *guest = msg;
+	if (route_is_socket(s)) {
+		return (int)route_writev(s, guest->msg_iov, guest->msg_iovlen);
+	}
 	struct sockaddr_storage address;
 	uint8_t control[CMSG_SPACE(253 * sizeof(int))]
 			__attribute__((aligned(8)));
@@ -996,7 +1005,11 @@ sys_ioctl(int fd, uint64_t com, void *data)
 	fprintf(stderr, "ioctl(%p, %p, %p)\n", (void *)fd, (void *)com,
 			(void *)data);
 #endif
-	int result = kctl_ioctl(fd, com, data);
+	int result = route_ioctl(fd, com, data);
+	if (result != 1) {
+		return result;
+	}
+	result = kctl_ioctl(fd, com, data);
 	if (result != 1) {
 		return result;
 	}
@@ -1407,6 +1420,7 @@ sys_setpriority(int which, void *who, int prio)
 #define xnu_AF_INET    2
 #define xnu_PF_ROUTE   17
 #define xnu_PF_SYSTEM  32
+#define xnu_SYSPROTO_EVENT   1
 #define xnu_SYSPROTO_CONTROL 2
 #define xnu_AF_INET6   30
 #define xnu_SOCK_STREAM 1
@@ -1572,6 +1586,12 @@ sys_socket(int domain, int type, int protocol)
 	fprintf(stderr, "socket(%p, %p, %p)\n", (void *)domain, (void *)type,
 			(void *)protocol);
 #endif
+	if (domain == xnu_PF_SYSTEM && protocol == xnu_SYSPROTO_EVENT) {
+		return route_socket(true, 0);
+	}
+	if (domain == xnu_PF_ROUTE) {
+		return route_socket(false, protocol);
+	}
 	if (domain == xnu_PF_SYSTEM && protocol == xnu_SYSPROTO_CONTROL) {
 		return kctl_socket(type);
 	}
@@ -1832,6 +1852,9 @@ sys_writev(int fd, void *iovp, uint32_t iovcnt)
 	fprintf(stderr, "writev(%p, %p, %p)\n", (void *)fd, (void *)iovp,
 			(void *)iovcnt);
 #endif
+	if (route_is_socket(fd)) {
+		return route_writev(fd, iovp, iovcnt);
+	}
 	return errno_map(writev(fd, iovp, iovcnt));
 }
 
@@ -1924,6 +1947,9 @@ sys_sendto(int s, void *buf, size_t len, int flags, void *to, void *tolen)
 			(void *)buf, (void *)len, (void *)flags, (void *)to,
 			(void *)tolen);
 #endif
+	if (route_is_socket(s)) {
+		return route_write(s, buf, len);
+	}
 	struct sockaddr_storage host;
 	struct sockaddr *dest = NULL;
 	socklen_t dest_len = 0;
