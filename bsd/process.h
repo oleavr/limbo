@@ -36,6 +36,8 @@ struct process {
 	int32_t ppid;
 	int32_t pgid;
 	int32_t tpgid;
+	int32_t session;
+	uint32_t tty;
 	int32_t nice;
 	uint64_t start_ticks;
 	uint64_t user_ticks;
@@ -49,6 +51,7 @@ struct process {
 };
 
 int process_lookup(int32_t pid, struct process *process);
+int32_t process_terminal(const struct process *process);
 void process_start_time(
 		const struct process *process, uint64_t *sec, uint64_t *usec);
 
@@ -58,3 +61,6 @@ bool process_executable_path(int32_t pid, char *path);
 
 /* The process's arguments, NUL-separated, as /proc has them */
 ssize_t process_cmdline(int32_t pid, char *buffer, size_t size);
+
+bool process_environment_value(
+		int32_t pid, const char *name, char *value, size_t size);
