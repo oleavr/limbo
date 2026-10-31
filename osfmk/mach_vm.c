@@ -34,6 +34,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <signal.h>
 #include <mach/mach_types.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -43,6 +44,7 @@
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <unistd.h>
+#include "commpage.h"
 
 #include "ipc.h"
 #include "mach_vm.h"
@@ -88,6 +90,9 @@ static kern_return_t map_entry(mach_vm_address_t *address, mach_vm_size_t size,
 		mach_vm_offset_t mask, int flags,
 		const struct memory_entry *entry, memory_object_offset_t offset,
 		boolean_t copy, vm_prot_t protection);
+static uint64_t *reclaim_index(size_t offset);
+static uint64_t absolute_per_second(void);
+static uint64_t reclaim_next_deadline(void);
 
 kern_return_t
 _kernelrpc_mach_vm_allocate(vm_task_entry_t target, mach_vm_address_t *address,
@@ -1131,6 +1136,156 @@ _kernelrpc_mach_vm_remap_new(vm_map_t target_task,
 			cur_protection);
 }
 
+#define RECLAIM_LEN_OFFSET       0x10
+#define RECLAIM_BYTES_OFFSET     0x48
+#define RECLAIM_MIN_BYTES_OFFSET 0x50
+#define RECLAIM_HEAD_OFFSET      0x58
+#define RECLAIM_BUSY_OFFSET      0x60
+#define RECLAIM_TAIL_OFFSET      0x68
+#define RECLAIM_ENTRIES_OFFSET   0x80
+#define RECLAIM_CHUNK            512
+#define RECLAIM_TRIM_THRESHOLD   (1 << 20)
+
+enum {
+	RECLAIM_FREE = 1,
+	RECLAIM_DEALLOCATE = 2,
+};
+
+struct reclaim_entry {
+	uint64_t address;
+	uint32_t size;
+	uint8_t action;
+	uint8_t unused[3];
+};
+
+_Static_assert(sizeof(struct reclaim_entry) == 16, "mach_vm_reclaim_entry_s");
+
+#define RECLAIM_ABANDONED_SECONDS 10
+
+static uint8_t *reclaim_ring;
+static mach_vm_size_t reclaim_ring_size;
+static uint32_t reclaim_len;
+static pthread_mutex_t reclaim_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t reclaim_last_update;
+static uint64_t reclaim_unreported;
+
+static uint64_t reclaim(uint64_t count, uint64_t limit);
+
+static uint64_t
+reclaim_take_unreported(void)
+{
+	return __atomic_exchange_n(&reclaim_unreported, 0, __ATOMIC_RELAXED);
+}
+
+static void *
+reclaim_abandoned(void *unused)
+{
+	(void)unused;
+	uint64_t frequency = absolute_per_second();
+	for (;;) {
+		sleep(RECLAIM_ABANDONED_SECONDS / 2);
+		uint64_t last = __atomic_load_n(
+				&reclaim_last_update, __ATOMIC_RELAXED);
+		if (commpage_absolute_time() - last
+				< RECLAIM_ABANDONED_SECONDS * frequency) {
+			continue;
+		}
+		uint64_t bytes = reclaim(UINT64_MAX, UINT64_MAX);
+		__atomic_fetch_add(
+				&reclaim_unreported, bytes, __ATOMIC_RELAXED);
+		__atomic_store_n(&reclaim_last_update, commpage_absolute_time(),
+				__ATOMIC_RELAXED);
+	}
+	return NULL;
+}
+
+static uint64_t
+absolute_per_second(void)
+{
+	uint32_t numer, denom;
+	commpage_timebase(&numer, &denom);
+	return 1000000000ull * denom / numer;
+}
+
+static uint64_t
+reclaim(uint64_t count, uint64_t limit)
+{
+	uint64_t total = 0;
+	pthread_mutex_lock(&reclaim_lock);
+	while (reclaim_ring != NULL && count != 0 && total < limit) {
+		uint64_t head = __atomic_load_n(
+				reclaim_index(RECLAIM_HEAD_OFFSET),
+				__ATOMIC_SEQ_CST);
+		uint64_t tail = __atomic_load_n(
+				reclaim_index(RECLAIM_TAIL_OFFSET),
+				__ATOMIC_SEQ_CST);
+		if (tail <= head) {
+			break;
+		}
+		uint64_t take = tail - head;
+		uint64_t busy;
+		for (;;) {
+			take = take < count ? take : count;
+			take = take < RECLAIM_CHUNK ? take : RECLAIM_CHUNK;
+			busy = head + take;
+			__atomic_store_n(reclaim_index(RECLAIM_BUSY_OFFSET),
+					busy, __ATOMIC_SEQ_CST);
+			tail = __atomic_load_n(
+					reclaim_index(RECLAIM_TAIL_OFFSET),
+					__ATOMIC_SEQ_CST);
+			if (tail >= busy) {
+				break;
+			}
+			take = tail > head ? tail - head : 0;
+			if (take == 0) {
+				break;
+			}
+		}
+		if (take == 0) {
+			__atomic_store_n(reclaim_index(RECLAIM_BUSY_OFFSET),
+					head, __ATOMIC_SEQ_CST);
+			break;
+		}
+		struct reclaim_entry *entries
+				= (struct reclaim_entry *)(reclaim_ring
+						+ RECLAIM_ENTRIES_OFFSET);
+		uint64_t done = 0;
+		for (; done < take && total < limit; done++) {
+			struct reclaim_entry entry
+					= entries[(head + done) % reclaim_len];
+			if (entry.address == 0 || entry.size == 0) {
+				continue;
+			}
+			mach_vm_address_t start = entry.address & ~PAGE_MASK;
+			mach_vm_address_t end = (entry.address + entry.size
+								+ PAGE_MASK)
+					& ~PAGE_MASK;
+			if (entry.action == RECLAIM_DEALLOCATE) {
+				munmap((void *)start, end - start);
+			} else {
+				madvise((void *)start, end - start, MADV_FREE);
+			}
+			total += entry.size;
+		}
+		__atomic_store_n(reclaim_index(RECLAIM_HEAD_OFFSET),
+				head + done, __ATOMIC_SEQ_CST);
+		__atomic_store_n(reclaim_index(RECLAIM_BUSY_OFFSET),
+				head + done, __ATOMIC_SEQ_CST);
+		count -= done;
+		if (done < take) {
+			break;
+		}
+	}
+	pthread_mutex_unlock(&reclaim_lock);
+	return total;
+}
+
+static uint64_t *
+reclaim_index(size_t offset)
+{
+	return (uint64_t *)(reclaim_ring + offset);
+}
+
 kern_return_t
 mach_vm_deferred_reclamation_buffer_allocate(task_t target_task,
 		mach_vm_address_t *address, uint64_t *next_deadline,
@@ -1143,7 +1298,48 @@ mach_vm_deferred_reclamation_buffer_allocate(task_t target_task,
 			(void *)target_task, (void *)address,
 			(void *)next_deadline, (void *)len, (void *)max_len);
 #endif
-	return KERN_NOT_SUPPORTED;
+	if (len == 0 || max_len < len) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	pthread_mutex_lock(&reclaim_lock);
+	if (reclaim_ring != NULL) {
+		pthread_mutex_unlock(&reclaim_lock);
+		return KERN_NO_SPACE;
+	}
+	mach_vm_address_t ring = 0;
+	mach_vm_size_t size
+			= (RECLAIM_ENTRIES_OFFSET
+					  + (mach_vm_size_t)max_len
+							  * sizeof(struct reclaim_entry)
+					  + PAGE_MASK)
+			& ~PAGE_MASK;
+	kern_return_t kr = map_anonymous(&ring, size, 0, VM_FLAGS_ANYWHERE,
+			VM_PROT_READ | VM_PROT_WRITE);
+	if (kr == KERN_SUCCESS) {
+		reclaim_ring = (uint8_t *)ring;
+		reclaim_ring_size = size;
+		reclaim_len = len;
+		*address = ring;
+		*next_deadline = reclaim_next_deadline();
+		reclaim_last_update = commpage_absolute_time();
+		sigset_t all, previous;
+		sigfillset(&all);
+		pthread_sigmask(SIG_SETMASK, &all, &previous);
+		pthread_t thread;
+		if (pthread_create(&thread, NULL, reclaim_abandoned, NULL)
+				== 0) {
+			pthread_detach(thread);
+		}
+		pthread_sigmask(SIG_SETMASK, &previous, NULL);
+	}
+	pthread_mutex_unlock(&reclaim_lock);
+	return kr;
+}
+
+static uint64_t
+reclaim_next_deadline(void)
+{
+	return commpage_absolute_time() + absolute_per_second();
 }
 
 kern_return_t
@@ -1158,7 +1354,50 @@ mach_vm_deferred_reclamation_buffer_flush(task_t target_task,
 			(void *)target_task, (void *)num_entries_to_reclaim,
 			(void *)bytes_reclaimed, (void *)next_deadline);
 #endif
-	unimplemented();
+	if (reclaim_ring == NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	*bytes_reclaimed = reclaim(num_entries_to_reclaim, UINT64_MAX)
+			+ reclaim_take_unreported();
+	*next_deadline = reclaim_next_deadline();
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+mach_vm_reclaim_update_kernel_accounting(
+		uint64_t *bytes_reclaimed, uint64_t *next_deadline)
+{
+	if (reclaim_ring == NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	uint64_t unneeded = __atomic_load_n(
+			reclaim_index(RECLAIM_MIN_BYTES_OFFSET),
+			__ATOMIC_RELAXED);
+	uint64_t current = __atomic_load_n(
+			reclaim_index(RECLAIM_BYTES_OFFSET), __ATOMIC_RELAXED);
+	__atomic_store_n(reclaim_index(RECLAIM_MIN_BYTES_OFFSET), current,
+			__ATOMIC_RELAXED);
+	__atomic_store_n(&reclaim_last_update, commpage_absolute_time(),
+			__ATOMIC_RELAXED);
+	*bytes_reclaimed
+			= (unneeded >= RECLAIM_TRIM_THRESHOLD
+							  ? reclaim(UINT64_MAX,
+									    unneeded)
+							  : 0)
+			+ reclaim_take_unreported();
+	*next_deadline = reclaim_next_deadline();
+#ifdef ENABLE_STRACE
+	fprintf(stderr,
+			"mach_vm_reclaim_update_kernel_accounting: %llu of "
+			"%llu "
+			"bytes, head %llu, tail %llu\n",
+			(unsigned long long)*bytes_reclaimed,
+			(unsigned long long)unneeded,
+			(unsigned long long)*reclaim_index(RECLAIM_HEAD_OFFSET),
+			(unsigned long long)*reclaim_index(
+					RECLAIM_TAIL_OFFSET));
+#endif
+	return KERN_SUCCESS;
 }
 
 kern_return_t
@@ -1185,7 +1424,20 @@ mach_vm_deferred_reclamation_buffer_resize(task_t target_task, uint32_t new_len,
 			(void *)target_task, (void *)new_len,
 			(void *)bytes_reclaimed, (void *)next_deadline);
 #endif
-	unimplemented();
+	if (reclaim_ring == NULL || new_len == 0
+			|| RECLAIM_ENTRIES_OFFSET
+							+ (mach_vm_size_t)new_len
+									* sizeof(struct reclaim_entry)
+					> reclaim_ring_size) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	*bytes_reclaimed = reclaim(UINT64_MAX, UINT64_MAX)
+			+ reclaim_take_unreported();
+	pthread_mutex_lock(&reclaim_lock);
+	reclaim_len = new_len;
+	pthread_mutex_unlock(&reclaim_lock);
+	*next_deadline = reclaim_next_deadline();
+	return KERN_SUCCESS;
 }
 
 kern_return_t
@@ -1216,7 +1468,9 @@ mach_vm_deferred_reclamation_buffer_query(task_read_t target,
 			"%p)\n",
 			(void *)target, (void *)addr, (void *)size);
 #endif
-	unimplemented();
+	*addr = (mach_vm_address_t)reclaim_ring;
+	*size = reclaim_ring_size;
+	return KERN_SUCCESS;
 }
 
 kern_return_t

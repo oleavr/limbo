@@ -1012,7 +1012,8 @@ sys_osfmk(unsigned long syscall, uint64_t arg1, uint64_t arg2, uint64_t arg3,
 		return sys_clock_sleep_trap(
 				arg1, arg2, arg3, arg4, (void *)arg5);
 	case 0x3f:
-		return sys_kern_invalid();
+		return mach_vm_reclaim_update_kernel_accounting(
+				(uint64_t *)arg2, (uint64_t *)arg3);
 	case 0x40:
 		return sys_kern_invalid();
 	case 0x41:
