@@ -39,8 +39,12 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "commpage.h"
+#include "cpuinfo.h"
 #include "handler.h"
+#include "net.h"
 #include "process.h"
+#include "route.h"
 #include "shared_cache.h"
 #include "sysroot.h"
 #include "xnu-errno.h"
@@ -63,6 +67,10 @@
 
 #define CTL_UNSPEC 0
 #define CTL_KERN   1
+#define CTL_NET        4
+#define xnu_PF_ROUTE   17
+#define NET_RT_IFLIST  3
+#define NET_RT_IFLIST2 6
 #define CTL_VM     2
 #define CTL_HW     6
 
@@ -99,7 +107,6 @@
 
 #define SRUN   2
 #define P_LP64 0x4
-#define NODEV  -1
 
 #define HW_MACHINE   1
 #define HW_MODEL     2
@@ -172,6 +179,12 @@ static int read_bootsessionuuid(void *old, size_t *oldlenp);
 static int read_sandbox_sentinel(void *old, size_t *oldlenp);
 static int read_ncpu(void *old, size_t *oldlenp);
 static int read_memsize(void *old, size_t *oldlenp);
+#ifdef __x86_64__
+static int read_cpu_brand(void *old, size_t *oldlenp);
+static int read_cpu_cores(void *old, size_t *oldlenp);
+static int read_cpu_packages(void *old, size_t *oldlenp);
+static int read_cpu_frequency(void *old, size_t *oldlenp);
+#endif
 static int read_cpusubtype(void *old, size_t *oldlenp);
 static int read_swapusage(void *old, size_t *oldlenp);
 
@@ -198,8 +211,8 @@ static const struct sysctl_node nodes[] = {
 				.number = 0},
 		{"kern.hostname", {CTL_KERN, KERN_HOSTNAME}, SYSCTL_READER,
 				.reader = read_hostname},
-
-		{"kern.hostid", {CTL_KERN, KERN_HOSTID}, SYSCTL_INT, .number = 0},
+		{"kern.hostid", {CTL_KERN, KERN_HOSTID}, SYSCTL_INT,
+				.number = 0},
 		{"kern.boottime", {CTL_KERN, KERN_BOOTTIME}, SYSCTL_READER,
 				.reader = read_boottime},
 		{"kern.usrstack64", {CTL_KERN, KERN_USRSTACK64}, SYSCTL_QUAD,
@@ -235,9 +248,11 @@ static const struct sysctl_node nodes[] = {
 				.string = HOST_MACHINE},
 		{"hw.model", {CTL_HW, HW_MODEL}, SYSCTL_STRING,
 				.string = HOST_MODEL},
-#ifdef __arm64__
 		{"hw.product", {0, 0}, SYSCTL_STRING, .string = HOST_MODEL},
+#ifdef __arm64__
 		{"hw.target", {0, 0}, SYSCTL_STRING, .string = "J704AP"},
+#else
+		{"hw.target", {0, 0}, SYSCTL_STRING, .string = ""},
 #endif
 		{"hw.ncpu", {CTL_HW, HW_NCPU}, SYSCTL_READER,
 				.reader = read_ncpu},
@@ -257,6 +272,18 @@ static const struct sysctl_node nodes[] = {
 		{"hw.physicalcpu_max", {0, 0}, SYSCTL_READER,
 				.reader = read_ncpu},
 		{"hw.cachelinesize", {0, 0}, SYSCTL_QUAD, .number = 64},
+#ifdef __x86_64__
+		{"machdep.cpu.brand_string", {0, 0}, SYSCTL_READER,
+				.reader = read_cpu_brand},
+		{"machdep.cpu.core_count", {0, 0}, SYSCTL_READER,
+				.reader = read_cpu_cores},
+		{"hw.packages", {0, 0}, SYSCTL_READER,
+				.reader = read_cpu_packages},
+		{"hw.cpufrequency", {0, 0}, SYSCTL_READER,
+				.reader = read_cpu_frequency},
+		{"hw.cpufrequency_max", {0, 0}, SYSCTL_READER,
+				.reader = read_cpu_frequency},
+#endif
 		{"hw.cputype", {0, 0}, SYSCTL_INT, .number = HOST_CPU_TYPE},
 		{"hw.cpusubtype", {0, 0}, SYSCTL_READER,
 				.reader = read_cpusubtype},
@@ -331,9 +358,6 @@ sys_sysctl(int *name, uint32_t namelen, void *old, size_t *oldlenp, void *new,
 		return read_bytes(node->name, strlen(node->name) + 1, old,
 				oldlenp);
 	}
-	if (namelen == 3 && name[0] == CTL_KERN && name[1] == KERN_PROCARGS2) {
-		return read_procargs2(name[2], old, oldlenp);
-	}
 
 	if (new != NULL) {
 #ifdef ENABLE_STRACE
@@ -348,6 +372,21 @@ sys_sysctl(int *name, uint32_t namelen, void *old, size_t *oldlenp, void *new,
 	if (namelen == 4 && name[0] == CTL_KERN && name[1] == KERN_PROC
 			&& name[2] == KERN_PROC_PID) {
 		return read_kinfo_proc(name[3], old, oldlenp);
+	}
+	if (namelen == 3 && name[0] == CTL_KERN && name[1] == KERN_PROCARGS2) {
+		return read_procargs2(name[2], old, oldlenp);
+	}
+
+	if (namelen == 6 && name[0] == CTL_NET && name[1] == xnu_PF_ROUTE
+			&& (name[4] == NET_RT_IFLIST
+					|| name[4] == NET_RT_IFLIST2)) {
+		return net_interface_list(
+				name[4], name[3], name[5], old, oldlenp);
+	}
+	if (namelen == 6 && name[0] == CTL_NET && name[1] == xnu_PF_ROUTE
+			&& name[2] == 0 && name[4] != NET_RT_IFLIST
+			&& name[4] != NET_RT_IFLIST2) {
+		return route_dump(name[4], name[3], name[5], old, oldlenp);
 	}
 
 	const struct sysctl_node *node = lookup_oid(name, namelen);
@@ -453,7 +492,7 @@ read_kinfo_proc(int32_t pid, void *old, size_t *oldlenp)
 			.cr_groups = {process.gid[1]},
 			.e_ppid = process.ppid,
 			.e_pgid = process.pgid,
-			.e_tdev = NODEV,
+			.e_tdev = process_terminal(&process),
 			.e_tpgid = process.tpgid,
 	};
 	uint64_t sec, usec;
@@ -553,8 +592,8 @@ sys_sys_sysctlbyname(const char *name, size_t namelen, void *old,
 #endif
 	if (new != NULL) {
 #ifdef ENABLE_STRACE
-		fprintf(stderr, "  sysctl: setting %.*s ignored\n", (int)namelen,
-				name);
+		fprintf(stderr, "  sysctl: setting {%d, %d} ignored\n", name[0],
+				namelen > 1 ? name[1] : 0);
 #endif
 		if (old == NULL) {
 			return 0;
@@ -599,6 +638,9 @@ node_oid(const struct sysctl_node *node, int oid[2])
 static int
 read_node(const struct sysctl_node *node, void *old, size_t *oldlenp)
 {
+#ifdef ENABLE_STRACE
+	fprintf(stderr, "  sysctl: %s\n", node->name);
+#endif
 	switch (node->kind) {
 	case SYSCTL_STRING:
 		return read_bytes(node->string, strlen(node->string) + 1, old,
@@ -657,12 +699,13 @@ read_sandbox_sentinel(void *old, size_t *oldlenp)
 static int
 read_boottime(void *old, size_t *oldlenp)
 {
-	struct timespec now, uptime;
+	struct timespec now, monotonic;
 	clock_gettime(CLOCK_REALTIME, &now);
-	clock_gettime(CLOCK_BOOTTIME, &uptime);
+	clock_gettime(CLOCK_MONOTONIC, &monotonic);
 
-	int64_t boot_ns = (now.tv_sec - uptime.tv_sec) * 1000000000LL
-			+ (now.tv_nsec - uptime.tv_nsec);
+	int64_t uptime_ns = monotonic.tv_sec * 1000000000LL + monotonic.tv_nsec
+			- (int64_t)commpage_boot_nanoseconds();
+	int64_t boot_ns = now.tv_sec * 1000000000LL + now.tv_nsec - uptime_ns;
 	struct __darwin_timeval tv = {
 			.tv_sec = boot_ns / 1000000000LL,
 			.tv_usec = (boot_ns % 1000000000LL) / 1000,
@@ -677,18 +720,43 @@ read_ncpu(void *old, size_t *oldlenp)
 			oldlenp);
 }
 
+#ifdef __x86_64__
 static int
-read_memsize(void *old, size_t *oldlenp)
+read_cpu_brand(void *old, size_t *oldlenp)
 {
-	int64_t memsize = (int64_t)sysconf(_SC_PHYS_PAGES) * PAGE_SIZE;
-	return read_number(memsize, sizeof(int64_t), old, oldlenp);
+	const char *brand = host_cpu()->brand;
+	return read_bytes(brand, strlen(brand) + 1, old, oldlenp);
 }
 
 static int
-read_cpusubtype(void *old, size_t *oldlenp)
+read_cpu_cores(void *old, size_t *oldlenp)
 {
-	return read_number(shared_cache_cpu_subtype, sizeof(int32_t), old,
+	uint32_t cores = host_cpu()->cores;
+	return read_number(cores != 0 ? cores : sysconf(_SC_NPROCESSORS_ONLN),
+			sizeof(int32_t), old, oldlenp);
+}
+
+static int
+read_cpu_packages(void *old, size_t *oldlenp)
+{
+	uint32_t packages = host_cpu()->packages;
+	return read_number(packages != 0 ? packages : 1, sizeof(int32_t), old,
 			oldlenp);
+}
+
+static int
+read_cpu_frequency(void *old, size_t *oldlenp)
+{
+	return read_number((int64_t)host_cpu()->frequency, sizeof(int64_t), old,
+			oldlenp);
+}
+#endif
+
+static int
+read_memsize(void *old, size_t *oldlenp)
+{
+	int64_t memsize = (int64_t)sysconf(_SC_PHYS_PAGES) * getpagesize();
+	return read_number(memsize, sizeof(int64_t), old, oldlenp);
 }
 
 static int
@@ -717,6 +785,13 @@ read_swapusage(void *old, size_t *oldlenp)
 	}
 	usage.used = usage.total - usage.avail;
 	return read_bytes(&usage, sizeof(usage), old, oldlenp);
+}
+
+static int
+read_cpusubtype(void *old, size_t *oldlenp)
+{
+	return read_number(shared_cache_cpu_subtype, sizeof(int32_t), old,
+			oldlenp);
 }
 
 static int
