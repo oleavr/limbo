@@ -55,3 +55,4 @@ struct boot_state {
 
 void *boot_state_begin(struct boot_state *state);
 void boot_state_end(struct boot_state *state, bool changed);
+void boot_state_close(struct boot_state *state);

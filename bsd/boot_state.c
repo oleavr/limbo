@@ -98,3 +98,14 @@ boot_state_end(struct boot_state *state, bool changed)
 	flock(state->fd, LOCK_UN);
 	pthread_mutex_unlock(&state->lock);
 }
+
+void
+boot_state_close(struct boot_state *state)
+{
+	pthread_mutex_lock(&state->lock);
+	if (state->fd != -1) {
+		close(state->fd);
+		state->fd = -1;
+	}
+	pthread_mutex_unlock(&state->lock);
+}
