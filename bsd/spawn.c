@@ -107,6 +107,8 @@ static void convert_attr(
 		const struct darwin_spawnattr *src, posix_spawnattr_t *dst);
 static void convert_file_actions(const struct darwin_file_actions *src,
 		bool cloexec_default, posix_spawn_file_actions_t *dst);
+static int apply_file_actions(const struct darwin_file_actions *actions,
+		bool cloexec_default);
 static void close_unlisted(const struct darwin_file_actions *src,
 		posix_spawn_file_actions_t *dst);
 static bool fd_listed(const struct darwin_file_actions *actions, int fd);
@@ -175,9 +177,13 @@ spawn_exec(const char *path, const struct darwin_spawnattr *attrp,
 		const struct darwin_file_actions *file_actions, char **argv,
 		char **envp)
 {
-	if ((file_actions != NULL && file_actions->count > 0)
-			|| (attrp->psa_flags & _POSIX_SPAWN_START_SUSPENDED)) {
+	if (attrp->psa_flags & _POSIX_SPAWN_START_SUSPENDED) {
 		unimplemented();
+	}
+	int result = apply_file_actions(file_actions,
+			attrp->psa_flags & _POSIX_SPAWN_CLOEXEC_DEFAULT);
+	if (result != 0) {
+		return result;
 	}
 	if ((attrp->psa_flags & _POSIX_SPAWN_SETSID) && setsid() == -1) {
 		return err_map(errno);
@@ -464,6 +470,94 @@ convert_file_actions(const struct darwin_file_actions *src,
 	if (cloexec_default) {
 		close_unlisted(src, dst);
 	}
+}
+
+static int
+apply_file_actions(
+		const struct darwin_file_actions *actions, bool cloexec_default)
+{
+	int count = (actions != NULL) ? actions->count : 0;
+	for (int i = 0; i < count; i++) {
+		const struct darwin_file_action *action = &actions->actions[i];
+		char buffer[PATH_MAX];
+		int fd;
+		switch (action->type) {
+		case PSFA_OPEN:
+			fd = open(sysroot_host_path(
+						  action->open.path, 0, buffer),
+					open_flags(action->open.oflag),
+					action->open.mode);
+			if (fd == -1) {
+				return err_map(errno);
+			}
+			if (fd != action->filedes) {
+				if (dup2(fd, action->filedes) == -1) {
+					int error = errno;
+					close(fd);
+					return err_map(error);
+				}
+				close(fd);
+			}
+			break;
+		case PSFA_CLOSE:
+			if (close(action->filedes) == -1) {
+				return err_map(errno);
+			}
+			break;
+		case PSFA_DUP2:
+			if (action->filedes == action->newfiledes) {
+				fd = fcntl(action->filedes, F_GETFD);
+				if (fd == -1
+						|| fcntl(action->filedes,
+								   F_SETFD,
+								   fd & ~FD_CLOEXEC)
+								== -1) {
+					return err_map(errno);
+				}
+			} else if (dup2(action->filedes, action->newfiledes)
+					== -1) {
+				return err_map(errno);
+			}
+			break;
+		case PSFA_INHERIT:
+			fd = fcntl(action->filedes, F_GETFD);
+			if (fd == -1
+					|| fcntl(action->filedes, F_SETFD,
+							   fd & ~FD_CLOEXEC)
+							== -1) {
+				return err_map(errno);
+			}
+			break;
+		case PSFA_CHDIR:
+			if (chdir(sysroot_host_path(action->path, 0, buffer))
+					== -1) {
+				return err_map(errno);
+			}
+			break;
+		case PSFA_FCHDIR:
+			if (fchdir(action->filedes) == -1) {
+				return err_map(errno);
+			}
+			break;
+		default:
+			unimplemented();
+		}
+	}
+	if (cloexec_default) {
+		DIR *fds = opendir("/proc/thread-self/fd");
+		struct dirent *entry;
+		while (fds != NULL && (entry = readdir(fds)) != NULL) {
+			int fd = atoi(entry->d_name);
+			if (entry->d_name[0] != '.' && fd != dirfd(fds)
+					&& !fd_listed(actions, fd)) {
+				fcntl(fd, F_SETFD, FD_CLOEXEC);
+			}
+		}
+		if (fds != NULL) {
+			closedir(fds);
+		}
+	}
+	return 0;
 }
 
 static void
