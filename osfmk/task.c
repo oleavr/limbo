@@ -150,6 +150,11 @@ task_info(task_name_t target_task, task_flavor_t flavor,
 	case TASK_AUDIT_TOKEN: {
 		audit_token_t *audit_token_p = (audit_token_t *)task_info_out;
 		memset(audit_token_p, 0, sizeof(audit_token_t));
+		audit_token_p->val[0] = getuid();
+		audit_token_p->val[1] = geteuid();
+		audit_token_p->val[2] = getegid();
+		audit_token_p->val[3] = getuid();
+		audit_token_p->val[4] = getgid();
 		audit_token_p->val[5] = getpid();
 		/* TODO: idversion_for_pid(getpid()); */
 		audit_token_p->val[7] = 10;
