@@ -41,6 +41,7 @@
 
 #include "check.h"
 static void check_icmp(void);
+static void check_connection_info(void);
 
 int
 main(void)
@@ -89,8 +90,61 @@ main(void)
 	CHECK(errno == EADDRINUSE);
 	CHECK(close(s) == 0);
 	CHECK(unlink(path) == 0);
+	check_connection_info();
 	check_icmp();
 	return 0;
+}
+
+struct so_cinforeq {
+	uint32_t cid;
+	uint32_t flags;
+	uint32_t ifindex;
+	int32_t error;
+	uint64_t src;
+	uint32_t src_len;
+	uint64_t dst;
+	uint32_t dst_len;
+	uint32_t aux_type;
+	uint64_t aux_data;
+	uint32_t aux_len;
+};
+#define SIOCGCONNINFO _IOWR('s', 152, struct so_cinforeq)
+
+static void
+check_connection_info(void)
+{
+	int listener = socket(AF_INET, SOCK_STREAM, 0);
+	struct sockaddr_in address = {
+			.sin_len = sizeof(address),
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+	};
+	socklen_t length = sizeof(address);
+	CHECK(bind(listener, (struct sockaddr *)&address, sizeof(address))
+			== 0);
+	CHECK(listen(listener, 1) == 0);
+	CHECK(getsockname(listener, (struct sockaddr *)&address, &length) == 0);
+	int client = socket(AF_INET, SOCK_STREAM, 0);
+	CHECK(connect(client, (struct sockaddr *)&address, sizeof(address))
+			== 0);
+
+	struct sockaddr_in source = {0}, destination = {0};
+	struct so_cinforeq request = {
+			.src = (uintptr_t)&source,
+			.src_len = sizeof(source),
+			.dst = (uintptr_t)&destination,
+			.dst_len = sizeof(destination),
+	};
+	CHECK(ioctl(client, SIOCGCONNINFO, &request) == 0);
+	CHECK(request.flags == 0x82);
+	CHECK(request.ifindex != 0);
+	CHECK(request.src_len == sizeof(source)
+			&& source.sin_family == AF_INET);
+	CHECK(source.sin_addr.s_addr == htonl(INADDR_LOOPBACK)
+			&& source.sin_port != 0);
+	CHECK(request.dst_len == sizeof(destination));
+	CHECK(destination.sin_port == address.sin_port);
+	CHECK(close(client) == 0 && close(listener) == 0);
 }
 
 static void
