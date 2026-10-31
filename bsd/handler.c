@@ -31,6 +31,8 @@
 #endif
 
 #include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/fsuid.h>
@@ -81,6 +83,7 @@
 #include "bsd/hostuuid.h"
 #include "commpage.h"
 #include "kctl.h"
+#include "net.h"
 #include "persona.h"
 #include "persona.h"
 #include "signals.h"
@@ -208,6 +211,9 @@ sys_read(int fd, user_addr_t cbuf, user_size_t nbyte)
 	fprintf(stderr, "read(%p, %p, %p)\n", (void *)fd, (void *)cbuf,
 			(void *)nbyte);
 #endif
+	if (net_is_bpf(fd)) {
+		return net_bpf_read(fd, cbuf, nbyte);
+	}
 	return errno_map(read(fd, cbuf, nbyte));
 }
 
@@ -278,6 +284,9 @@ sys_open(user_addr_t path, int flags, int mode)
 	if (path == NULL) {
 		return _EFAULT;
 	}
+	if (net_is_bpf_path(path)) {
+		return net_bpf_open(flags & _O_NONBLOCK, flags & _O_CLOEXEC);
+	}
 	char buffer[PATH_MAX];
 	return errno_map(open(
 			sysroot_host_path(path, open_follow(flags), buffer),
@@ -340,6 +349,7 @@ sys_sys_close(int fd)
 	fprintf(stderr, "sys_close(%p)\n", (void *)fd);
 #endif
 	kevent_close(fd);
+	net_close(fd);
 	kctl_close(fd);
 	return errno_map(close(fd));
 }
@@ -987,6 +997,10 @@ sys_ioctl(int fd, uint64_t com, void *data)
 			(void *)data);
 #endif
 	int result = kctl_ioctl(fd, com, data);
+	if (result != 1) {
+		return result;
+	}
+	result = net_ioctl(fd, com, data);
 	if (result != 1) {
 		return result;
 	}
