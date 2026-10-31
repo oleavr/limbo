@@ -122,6 +122,7 @@
 static __thread unsigned long current_syscall;
 
 static sem_t *semaphore(void *handle);
+static uint32_t interface_of(const struct sockaddr_storage *address);
 static int host_unix_address(const void *name, socklen_t length,
 		struct sockaddr_un *linux_address, int *directory);
 
@@ -1042,6 +1043,43 @@ sys_acct(char *path)
 	return errno_map(acct(path));
 }
 
+#define xnu_SIOCGCONNINFO 0xc0407398
+#define CIF_CONNECTED     0x2
+#define CIF_PREFERRED     0x80
+
+struct xnu_so_cinforeq {
+	uint32_t cid;
+	uint32_t flags;
+	uint32_t ifindex;
+	int32_t error;
+	uint64_t src;
+	uint32_t src_len;
+	uint32_t reserved1;
+	uint64_t dst;
+	uint32_t dst_len;
+	uint32_t aux_type;
+	uint64_t aux_data;
+	uint32_t aux_len;
+	uint32_t reserved2;
+};
+
+static int connection_info(int fd, struct xnu_so_cinforeq *request);
+
+static void translate_to_guest_sockaddr(
+		struct sockaddr_storage *addr, socklen_t len);
+
+static void
+copy_address(struct sockaddr_storage *address, socklen_t length, uint64_t to,
+		uint32_t *to_length)
+{
+	translate_to_guest_sockaddr(address, length);
+	if (to != 0 && *to_length != 0) {
+		memcpy((void *)(uintptr_t)to, address,
+				length < *to_length ? length : *to_length);
+	}
+	*to_length = length;
+}
+
 int
 sys_ioctl(int fd, uint64_t com, void *data)
 {
@@ -1049,6 +1087,9 @@ sys_ioctl(int fd, uint64_t com, void *data)
 	fprintf(stderr, "ioctl(%p, %p, %p)\n", (void *)fd, (void *)com,
 			(void *)data);
 #endif
+	if (com == xnu_SIOCGCONNINFO) {
+		return connection_info(fd, data);
+	}
 	int result = route_ioctl(fd, com, data);
 	if (result != 1) {
 		return result;
@@ -1090,6 +1131,69 @@ sys_ioctl(int fd, uint64_t com, void *data)
 	fprintf(stderr, "  ioctl: %#llx not done\n", (unsigned long long)com);
 #endif
 	return 0;
+}
+
+static int
+connection_info(int fd, struct xnu_so_cinforeq *request)
+{
+	struct sockaddr_storage local, peer;
+	socklen_t local_len = sizeof(local), peer_len = sizeof(peer);
+	if (getsockname(fd, (struct sockaddr *)&local, &local_len) != 0) {
+		return errno_map(-1);
+	}
+	if (local.ss_family != AF_INET && local.ss_family != AF_INET6) {
+		return _EINVAL;
+	}
+	bool connected = getpeername(fd, (struct sockaddr *)&peer, &peer_len)
+			== 0;
+	request->flags = connected ? CIF_CONNECTED | CIF_PREFERRED : 0;
+	request->error = 0;
+	request->ifindex = interface_of(&local);
+	copy_address(&local, local_len, request->src, &request->src_len);
+	if (connected) {
+		copy_address(&peer, peer_len, request->dst, &request->dst_len);
+	} else {
+		request->dst_len = 0;
+	}
+	request->aux_type = 0;
+	request->aux_len = 0;
+	return 0;
+}
+
+static uint32_t
+interface_of(const struct sockaddr_storage *address)
+{
+	struct ifaddrs *list;
+	if (getifaddrs(&list) != 0) {
+		return 0;
+	}
+	uint32_t index = 0;
+	for (struct ifaddrs *a = list; a != NULL && index == 0;
+			a = a->ifa_next) {
+		if (a->ifa_addr == NULL
+				|| a->ifa_addr->sa_family
+						!= address->ss_family) {
+			continue;
+		}
+		bool same = address->ss_family == AF_INET
+				? ((const struct sockaddr_in *)a->ifa_addr)
+								->sin_addr
+								.s_addr
+						== ((const struct sockaddr_in *)address)
+								   ->sin_addr
+								   .s_addr
+				: memcmp(&((const struct sockaddr_in6 *)a->ifa_addr)
+								  ->sin6_addr,
+						  &((const struct sockaddr_in6 *)address)
+								  ->sin6_addr,
+						  16)
+						== 0;
+		if (same) {
+			index = if_nametoindex(a->ifa_name);
+		}
+	}
+	freeifaddrs(list);
+	return index;
 }
 
 int
