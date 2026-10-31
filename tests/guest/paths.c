@@ -64,6 +64,20 @@ main(void)
 	CHECK(realpath("/usr/lib/../lib/./dyld", resolved) != NULL);
 	CHECK(strcmp(resolved, "/usr/lib/dyld") == 0);
 
+	CHECK(stat("/.nofollow/usr/lib/dyld", &st) == 0 && S_ISREG(st.st_mode));
+	fd = open("/.nofollow/usr/lib", O_RDONLY | O_DIRECTORY);
+	CHECK(fd != -1);
+	CHECK(close(fd) == 0);
+	CHECK(stat("/.resolve/33/usr/lib/dyld", &st) == 0
+			&& S_ISREG(st.st_mode));
+	CHECK(stat("/.resolve/0/usr/lib/dyld", &st) == 0
+			&& S_ISREG(st.st_mode));
+
+	CHECK(stat("/dev/null", &st) == 0 && S_ISCHR(st.st_mode));
+	fd = posix_openpt(O_RDWR | O_NOCTTY);
+	CHECK(fd != -1);
+	CHECK(close(fd) == 0);
+
 	char template[] = "/tmp/limbo-paths-XXXXXX";
 	CHECK(mkdtemp(template) != NULL);
 	CHECK(stat(template, &st) == 0 && S_ISDIR(st.st_mode));

@@ -68,6 +68,10 @@ main(void)
 	check_host_path("/absolute", AT_SYMLINK_NOFOLLOW, "/absolute");
 	check_host_path("/System/../System/Library", 0, "/System/Library");
 	check_host_path("/etc/new", 0, "/private/etc/new");
+	check_host_path("/.resolve/33/private/etc/new", 0, "/private/etc/new");
+	check_host_path("/.resolve/0/etc/new", 0, "/private/etc/new");
+	check_host_path("/.resolve/32/System/Library/file", 0,
+			"/System/Library/file");
 	check_host_path("/", 0, "");
 
 	char buffer[PATH_MAX];
