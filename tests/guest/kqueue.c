@@ -26,7 +26,9 @@
  */
 
 #include <pthread.h>
+#include <signal.h>
 #include <sys/event.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "check.h"
@@ -92,6 +94,45 @@ main(void)
 	CHECK(events[0].filter == EVFILT_USER);
 	CHECK(kevent(outer, NULL, 0, events, 4, &zero) == 0);
 	CHECK(close(outer) == 0 && close(inner) == 0);
+
+	enum { CHILDREN = 8 };
+	pid_t children[CHILDREN];
+	kq = kqueue();
+	CHECK(kq != -1);
+	for (int i = 0; i < CHILDREN; i++) {
+		children[i] = fork();
+		CHECK(children[i] != -1);
+		if (children[i] == 0) {
+			pause();
+			_exit(0);
+		}
+		EV_SET(&changes[0], children[i], EVFILT_PROC, EV_ADD, NOTE_EXIT,
+				0, NULL);
+		CHECK(kevent(kq, changes, 1, NULL, 0, NULL) == 0);
+	}
+	EV_SET(&changes[0], children[0], EVFILT_PROC, EV_DELETE, 0, 0, NULL);
+	CHECK(kevent(kq, changes, 1, NULL, 0, NULL) == 0);
+	CHECK(kevent(kq, NULL, 0, events, 4, &zero) == 0);
+	for (int i = 0; i < CHILDREN; i++) {
+		CHECK(kill(children[i], SIGKILL) == 0);
+	}
+	struct timespec second = {1, 0};
+	int told = 0;
+	while (told < CHILDREN - 1) {
+		int count = kevent(kq, NULL, 0, events, 4, &second);
+		CHECK(count > 0);
+		for (int i = 0; i < count; i++) {
+			CHECK(events[i].filter == EVFILT_PROC);
+			CHECK(events[i].fflags & NOTE_EXIT);
+			CHECK(events[i].ident != (uintptr_t)children[0]);
+		}
+		told += count;
+	}
+	CHECK(kevent(kq, NULL, 0, events, 4, &timeout) == 0);
+	for (int i = 0; i < CHILDREN; i++) {
+		CHECK(waitpid(children[i], NULL, 0) == children[i]);
+	}
+	CHECK(close(kq) == 0);
 	return 0;
 }
 

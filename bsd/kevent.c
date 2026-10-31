@@ -137,19 +137,13 @@ struct knote {
 	bool deleted;
 	bool in_flight;
 	bool defer_delete;
-
-	uint32_t sock_interest;
-	uint32_t sock_reported;
 	uint64_t deadline;
 	uint64_t interval;
 
 	uint32_t proc_fflags;
 	struct proc_watch *watch;
-};
-
-struct proc_watch {
-	struct knote *kn;
-	int pidfd;
+	uint32_t sock_interest;
+	uint32_t sock_reported;
 };
 
 #define NOTE_CONNRESET    0x00000001
@@ -159,6 +153,14 @@ struct proc_watch {
 #define NOTE_DISCONNECTED 0x00001000
 #define SOCKEV_CONNECTED    0x00000001
 #define SOCKEV_DISCONNECTED 0x00000002
+
+struct proc_watch {
+	struct knote *kn;
+	int pidfd;
+	struct proc_watch *next;
+};
+
+static struct proc_watch *proc_watches;
 
 struct __darwin_kevent {
 	uint64_t ident;
@@ -226,7 +228,6 @@ static int knote_touch(struct knote *kn, const struct kevent_qos_s *change);
 static void user_touch(struct knote *kn, const struct kevent_qos_s *change);
 static void timer_arm(struct knote *kn);
 static void proc_watch_start(struct knote *kn);
-static void *proc_watch_main(void *arg);
 static void proc_exited(struct knote *kn);
 static uint64_t timer_nanoseconds(uint32_t fflags, int64_t data);
 static uint64_t now_monotonic(void);
@@ -681,11 +682,12 @@ knote_detach(struct knote *kn)
 			break;
 		}
 	}
-	if (kn->kev.filter == EVFILT_SIGNAL) {
-		signals_watch((int)kn->kev.ident, false);
-	}
 	if (kn->watch != NULL) {
 		kn->watch->kn = NULL;
+		fd_watch_wake();
+	}
+	if (kn->kev.filter == EVFILT_SIGNAL) {
+		signals_watch((int)kn->kev.ident, false);
 	}
 	if (kn->waiting) {
 		kn->deleted = true;
@@ -762,35 +764,17 @@ proc_watch_start(struct knote *kn)
 		return;
 	}
 	struct proc_watch *watch = calloc(1, sizeof(*watch));
-	watch->kn = kn;
-	watch->pidfd = pidfd;
-	kn->watch = watch;
-	pthread_t thread;
-	if (pthread_create(&thread, NULL, proc_watch_main, watch) != 0) {
-		kn->watch = NULL;
+	if (watch == NULL) {
 		close(pidfd);
-		free(watch);
 		return;
 	}
-	pthread_detach(thread);
-}
-
-static void *
-proc_watch_main(void *arg)
-{
-	struct proc_watch *watch = arg;
-	struct pollfd pfd = {.fd = watch->pidfd, .events = POLLIN};
-	while (poll(&pfd, 1, -1) == -1 && errno == EINTR) {
-	}
-	pthread_mutex_lock(&lock);
-	if (watch->kn != NULL) {
-		watch->kn->watch = NULL;
-		proc_exited(watch->kn);
-	}
-	pthread_mutex_unlock(&lock);
-	close(watch->pidfd);
-	free(watch);
-	return NULL;
+	watch->kn = kn;
+	watch->pidfd = pidfd;
+	watch->next = proc_watches;
+	proc_watches = watch;
+	kn->watch = watch;
+	fd_watch_start();
+	fd_watch_wake();
 }
 
 /*
@@ -1067,7 +1051,9 @@ kqueue_request(struct kqueue *kq, bool manager)
  * no thread waits on as a kqueue's own do: a thread of limbo's polls them,
  * and requests a thread for a kqueue as one of them becomes ready. Only the
  * kqueues that no thread is requested or bound for, which look again
- * themselves as they go back to the kernel
+ * themselves as they go back to the kernel. It polls the process knotes'
+ * pidfds too, of every kqueue, and closes those let go of: one thread for
+ * all, where a daemon watches each of its clients' exits
  */
 static int fd_watch_event = -1;
 
@@ -1082,6 +1068,7 @@ fd_watch_wake(void)
 struct fd_watched {
 	struct kqueue *kq;
 	bool manager;
+	struct proc_watch *watch;
 };
 
 static void *
@@ -1094,6 +1081,25 @@ fd_watch_main(void *arg)
 	while (true) {
 		nfds_t count = 1;
 		fds[0] = (struct pollfd){.fd = fd_watch_event, .events = POLLIN};
+		for (struct proc_watch **p = &proc_watches; *p != NULL;) {
+			struct proc_watch *watch = *p;
+			if (watch->kn == NULL) {
+				*p = watch->next;
+				close(watch->pidfd);
+				free(watch);
+				continue;
+			}
+			if (count == capacity) {
+				capacity *= 2;
+				fds = realloc(fds, capacity * sizeof(*fds));
+				watched = realloc(watched,
+						capacity * sizeof(*watched));
+			}
+			watched[count] = (struct fd_watched){.watch = watch};
+			fds[count++] = (struct pollfd){
+					.fd = watch->pidfd, .events = POLLIN};
+			p = &watch->next;
+		}
 		for (struct kqueue *kq = &workq_kqueue; kq != NULL;
 				kq = kqueue_next(kq)) {
 			if (kq->kind == KQUEUE_FD) {
@@ -1127,7 +1133,7 @@ fd_watch_main(void *arg)
 							capacity * sizeof(*watched));
 				}
 				watched[count] = (struct fd_watched){
-						kq, kn->manager};
+						kq, kn->manager, NULL};
 				fds[count++] = (struct pollfd){
 						.fd = (int)kn->kev.ident,
 						.events = events};
@@ -1141,6 +1147,15 @@ fd_watch_main(void *arg)
 		}
 		pthread_mutex_lock(&lock);
 		for (nfds_t i = 1; i < count; i++) {
+			struct proc_watch *watch = watched[i].watch;
+			if (watch != NULL) {
+				if (fds[i].revents != 0 && watch->kn != NULL) {
+					watch->kn->watch = NULL;
+					proc_exited(watch->kn);
+					watch->kn = NULL;
+				}
+				continue;
+			}
 			if (fds[i].revents != 0) {
 #ifdef ENABLE_STRACE
 				fprintf(stderr, "  fd watch: %d ready, %#x, kq %#lx\n",
@@ -1155,11 +1170,51 @@ fd_watch_main(void *arg)
 }
 
 static void
+fd_watch_fork_prepare(void)
+{
+	pthread_mutex_lock(&lock);
+}
+
+static void
+fd_watch_fork_parent(void)
+{
+	pthread_mutex_unlock(&lock);
+}
+
+static void
+fd_watch_fork_child(void)
+{
+	if (fd_watch_event != -1) {
+		close(fd_watch_event);
+		fd_watch_event = -1;
+	}
+	while (proc_watches != NULL) {
+		struct proc_watch *watch = proc_watches;
+		proc_watches = watch->next;
+		if (watch->kn != NULL) {
+			watch->kn->watch = NULL;
+		}
+		close(watch->pidfd);
+		free(watch);
+	}
+	pthread_mutex_unlock(&lock);
+}
+
+static void
+fd_watch_init(void)
+{
+	pthread_atfork(fd_watch_fork_prepare, fd_watch_fork_parent,
+			fd_watch_fork_child);
+}
+
+static void
 fd_watch_start(void)
 {
 	if (fd_watch_event != -1) {
 		return;
 	}
+	static pthread_once_t once = PTHREAD_ONCE_INIT;
+	pthread_once(&once, fd_watch_init);
 	fd_watch_event = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
 	sigset_t all, previous;
 	sigfillset(&all);
