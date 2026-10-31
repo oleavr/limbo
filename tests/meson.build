@@ -26,6 +26,7 @@ guest_tests = [
   'mach.c',
   'paths.c',
   'persona.c',
+  'route.c',
   'sandbox.c',
   'semaphore.c',
   'signals.c',
