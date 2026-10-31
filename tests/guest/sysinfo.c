@@ -127,6 +127,14 @@ main(void)
 			== KERN_SUCCESS);
 	CHECK(basic.cpu_type == HOST_CPU_TYPE && basic.avail_cpus > 0);
 
+#ifdef __x86_64__
+	uint64_t capabilities = *(volatile uint64_t *)0x7fffffe00010ULL;
+	CHECK((capabilities & 0x204) == 0x204);
+	CHECK((capabilities >> 16 & 0xff) > 0);
+	CHECK(*(volatile uint32_t *)0x7fffffe00020ULL
+			== (uint32_t)capabilities);
+#endif
+
 	CHECK(labs(time(NULL) - info.kp_proc.p_starttime.tv_sec) < 60);
 	return 0;
 }

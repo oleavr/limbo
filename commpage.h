@@ -88,3 +88,4 @@ int commpage_mmap(void);
 uint64_t commpage_absolute_time(void);
 void commpage_timebase(uint32_t *numer, uint32_t *denom);
 uint64_t commpage_absolute_to_nanoseconds(uint64_t absolute);
+uint64_t commpage_boot_nanoseconds(void);
