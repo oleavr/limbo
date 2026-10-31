@@ -25,10 +25,13 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <bank/bank_types.h>
+#include <bsm/audit.h>
 #include <errno.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <mach/mach_vm.h>
+#include <mach/mach_voucher.h>
 #include <pthread.h>
 #include <string.h>
 #include <unistd.h>
@@ -58,6 +61,7 @@ static void check_memory_entries(void);
 static void check_remaps(void);
 static void check_shared_range_entries(void);
 static void check_exception_ports(void);
+static void check_vouchers(void);
 static void check_destroy(void);
 static mach_port_t allocate_port(void);
 
@@ -71,6 +75,7 @@ main(void)
 	check_memory_entries();
 	check_remaps();
 	check_exception_ports();
+	check_vouchers();
 	check_destroy();
 	return 0;
 }
@@ -255,6 +260,49 @@ check_time(void)
 			+ 20000000ULL * timebase.denom / timebase.numer;
 	CHECK(mach_wait_until(deadline) == KERN_SUCCESS);
 	CHECK(mach_absolute_time() >= deadline);
+}
+
+static void
+check_vouchers(void)
+{
+	mach_voucher_attr_recipe_data_t recipe = {
+			.key = MACH_VOUCHER_ATTR_KEY_BANK,
+			.command = MACH_VOUCHER_ATTR_BANK_CREATE,
+	};
+	mach_voucher_t voucher = MACH_PORT_NULL, again = MACH_PORT_NULL;
+	CHECK(host_create_mach_voucher(mach_host_self(),
+			      (mach_voucher_attr_raw_recipe_array_t)&recipe,
+			      sizeof(recipe), &voucher)
+			== KERN_SUCCESS);
+	CHECK(host_create_mach_voucher(mach_host_self(),
+			      (mach_voucher_attr_raw_recipe_array_t)&recipe,
+			      sizeof(recipe), &again)
+			== KERN_SUCCESS);
+	CHECK(MACH_PORT_VALID(voucher) && again == voucher);
+
+	uint32_t pid = 0;
+	mach_msg_type_number_t size = sizeof(pid);
+	CHECK(mach_voucher_attr_command(voucher, MACH_VOUCHER_ATTR_KEY_BANK,
+			      BANK_ORIGINATOR_PID, NULL, 0,
+			      (mach_voucher_attr_content_t)&pid, &size)
+			== KERN_SUCCESS);
+	CHECK(size == sizeof(pid) && pid == (uint32_t)getpid());
+
+	boolean_t adopt_any = TRUE;
+	size = sizeof(adopt_any);
+	CHECK(mach_voucher_attr_command(voucher, MACH_VOUCHER_ATTR_KEY_BANK,
+			      BANK_PERSONA_ADOPT_ANY, NULL, 0,
+			      (mach_voucher_attr_content_t)&adopt_any, &size)
+			== KERN_SUCCESS);
+	CHECK(size == sizeof(adopt_any) && !adopt_any);
+	size = 0;
+	CHECK(mach_voucher_attr_command(voucher, MACH_VOUCHER_ATTR_KEY_BANK,
+			      BANK_PERSONA_ADOPT_ANY, NULL, 0,
+			      (mach_voucher_attr_content_t)&adopt_any, &size)
+			== KERN_NO_SPACE);
+
+	CHECK(mach_port_deallocate(mach_task_self(), voucher) == KERN_SUCCESS);
+	CHECK(mach_port_deallocate(mach_task_self(), again) == KERN_SUCCESS);
 }
 
 /*

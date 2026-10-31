@@ -648,8 +648,7 @@ sys_host_create_mach_voucher_trap(mach_port_name_t host,
 			(void *)host, (void *)recipes, (void *)recipes_size,
 			(void *)voucher);
 #endif
-	/* TODO: Allocate and return a voucher */
-	*(mach_port_name_t *)voucher = 0xb170babe;
+	*voucher = ipc_kobject_copy_send(ipc_kobject_name(IPC_KOBJECT_VOUCHER));
 	return KERN_SUCCESS;
 }
 
