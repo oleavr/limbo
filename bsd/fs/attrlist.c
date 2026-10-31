@@ -29,6 +29,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include <arpa/inet.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <stdbool.h>
@@ -40,11 +41,12 @@
 #include <sys/statvfs.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
 #include "at.h"
-#include "bsd_flags.h"
 #include "bsd/xnu-errno.h"
+#include "bsd_flags.h"
 #include "device.h"
 #include "fileid.h"
 #include "sysroot.h"
@@ -99,6 +101,9 @@ struct reference {
 #define ATTR_CMN_ACCTIME            0x00001000
 #define ATTR_CMN_BKUPTIME           0x00002000
 #define ATTR_CMN_FNDRINFO           0x00004000
+
+#define FINDER_INFO_XATTR           "user.com.apple.FinderInfo"
+#define FINDER_INFO_SIZE            32
 #define ATTR_CMN_OWNERID            0x00008000
 #define ATTR_CMN_GRPID              0x00010000
 #define ATTR_CMN_ACCESSMASK         0x00020000
@@ -154,9 +159,12 @@ struct reference {
 
 #define VOLUME_NAME "Macintosh HD"
 
-#define VOLUME_SIGNATURE              0x4244
-#define VOL_CAP_FMT_CASE_SENSITIVE    0x00000100
-#define VOLUME_FORMAT_CAPABILITIES    (0x039b6edf | VOL_CAP_FMT_CASE_SENSITIVE)
+#define VOLUME_SIGNATURE                0x4244
+#define VOL_CAP_FMT_CASE_SENSITIVE      0x00000100
+#define VOL_CAP_FMT_DECMPFS_COMPRESSION 0x00010000
+#define VOLUME_FORMAT_CAPABILITIES                                             \
+	((0x039b6edf | VOL_CAP_FMT_CASE_SENSITIVE)                             \
+			& ~VOL_CAP_FMT_DECMPFS_COMPRESSION)
 #define VOLUME_FORMAT_VALID           0x07ffffff
 #define VOLUME_INTERFACE_CAPABILITIES 0x01ad6fc7
 #define VOLUME_INTERFACE_VALID        0x01ffffff
@@ -173,6 +181,7 @@ struct reference {
 #define ATTR_FILE_RSRCLENGTH    0x00001000
 #define ATTR_FILE_RSRCALLOCSIZE 0x00002000
 
+#define ATTR_CMNEXT_RELPATH        0x00000004
 #define ATTR_CMNEXT_LINKID         0x00000010
 #define ATTR_CMNEXT_NOFIRMLINKPATH 0x00000020
 #define ATTR_CMNEXT_REALDEVID      0x00000040
@@ -413,8 +422,12 @@ pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 	}
 
 	if (returned.commonattr & ATTR_CMN_FNDRINFO) {
-		memset(buffer + offset, 0, 32);
-		offset += 32;
+		memset(buffer + offset, 0, FINDER_INFO_SIZE);
+		char link[48];
+		snprintf(link, sizeof(link), "/proc/thread-self/fd/%d", fd);
+		getxattr(link, FINDER_INFO_XATTR, buffer + offset,
+				FINDER_INFO_SIZE);
+		offset += FINDER_INFO_SIZE;
 		commonattr &= ~ATTR_CMN_FNDRINFO;
 	}
 
@@ -458,6 +471,33 @@ pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 		commonattr &= ~ATTR_CMN_USERACCESS;
 	}
 
+	if (returned.commonattr & ATTR_CMN_EXTENDED_SECURITY) {
+		attrreference_t none = {0, 0};
+		memcpy(buffer + offset, &none, sizeof(none));
+		offset += sizeof(none);
+		commonattr &= ~ATTR_CMN_EXTENDED_SECURITY;
+	}
+
+	if (returned.commonattr & ATTR_CMN_UUID) {
+		static const uint8_t prefix[12] = {0xff, 0xff, 0xee, 0xee, 0xdd,
+				0xdd, 0xcc, 0xcc, 0xbb, 0xbb, 0xaa, 0xaa};
+		memcpy(buffer + offset, prefix, sizeof(prefix));
+		uint32_t id = htonl(s.st_uid);
+		memcpy(buffer + offset + sizeof(prefix), &id, sizeof(id));
+		offset += 16;
+		commonattr &= ~ATTR_CMN_UUID;
+	}
+
+	if (returned.commonattr & ATTR_CMN_GRPUUID) {
+		static const uint8_t prefix[12] = {0xab, 0xcd, 0xef, 0xab, 0xcd,
+				0xef, 0xab, 0xcd, 0xef, 0xab, 0xcd, 0xef};
+		memcpy(buffer + offset, prefix, sizeof(prefix));
+		uint32_t id = htonl(s.st_gid);
+		memcpy(buffer + offset + sizeof(prefix), &id, sizeof(id));
+		offset += 16;
+		commonattr &= ~ATTR_CMN_GRPUUID;
+	}
+
 	if (returned.commonattr & ATTR_CMN_FILEID) {
 		uint64_t ino = sysroot_file_id(s.st_dev, s.st_ino);
 		memcpy(buffer + offset, &ino, sizeof(ino));
@@ -491,9 +531,9 @@ pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 		volattr &= ~ATTR_VOL_FSTYPE;
 	}
 
-	struct statvfs vfs;
+	struct statvfs vfs = {0};
 	fstatvfs(fd, &vfs);
-	uint64_t block = vfs.f_frsize;
+	uint64_t block = vfs.f_frsize ? vfs.f_frsize : vfs.f_bsize;
 
 	if (returned.volattr & ATTR_VOL_SIGNATURE) {
 		offset = pack_u32(buffer, offset, VOLUME_SIGNATURE);
@@ -685,7 +725,9 @@ pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 						| ATTR_FILE_IOBLOCKSIZE
 						| ATTR_FILE_DEVTYPE
 						| ATTR_FILE_DATALENGTH
-						| ATTR_FILE_DATAALLOCSIZE,
+						| ATTR_FILE_DATAALLOCSIZE
+						| ATTR_FILE_RSRCLENGTH
+						| ATTR_FILE_RSRCALLOCSIZE,
 		};
 		memcpy(buffer + offset, &supported, sizeof(supported));
 		offset += sizeof(supported);
@@ -765,8 +807,25 @@ pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 		fileattr &= ~ATTR_FILE_DATAALLOCSIZE;
 	}
 
+	if (returned.fileattr & ATTR_FILE_RSRCLENGTH) {
+		offset = pack_u64(buffer, offset, 0);
+		fileattr &= ~ATTR_FILE_RSRCLENGTH;
+	}
+
+	if (returned.fileattr & ATTR_FILE_RSRCALLOCSIZE) {
+		offset = pack_u64(buffer, offset, 0);
+		fileattr &= ~ATTR_FILE_RSRCALLOCSIZE;
+	}
+
+	if (returned.forkattr & ATTR_CMNEXT_RELPATH) {
+		offset = pack_reference(buffer, offset, references,
+				&reference_count, path);
+		cmnextattr &= ~ATTR_CMNEXT_RELPATH;
+	}
+
 	if (returned.forkattr & ATTR_CMNEXT_LINKID) {
-		offset = pack_u64(buffer, offset, s.st_ino);
+		offset = pack_u64(buffer, offset,
+				sysroot_file_id(s.st_dev, s.st_ino));
 		cmnextattr &= ~ATTR_CMNEXT_LINKID;
 	}
 
@@ -788,7 +847,8 @@ pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 	}
 
 	if (returned.forkattr & ATTR_CMNEXT_CLONEID) {
-		offset = pack_u64(buffer, offset, s.st_ino);
+		offset = pack_u64(buffer, offset,
+				sysroot_file_id(s.st_dev, s.st_ino));
 		cmnextattr &= ~ATTR_CMNEXT_CLONEID;
 	}
 
@@ -802,46 +862,29 @@ pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 	}
 
 	if (commonattr) {
-#ifdef ENABLE_STRACE
-		fprintf(stderr,
-				">> getattrlist unhandled commonattr flags: "
-				"%x\n",
+		fprintf(stderr, "limbo: getattrlist: commonattr %x\n",
 				commonattr);
-#endif
 		unimplemented();
 	}
 
 	if (volattr) {
-#ifdef ENABLE_STRACE
-		fprintf(stderr, ">> getattrlist unhandled volattr flags: %x\n",
-				volattr);
-#endif
+		fprintf(stderr, "limbo: getattrlist: volattr %x\n", volattr);
 		unimplemented();
 	}
 
 	if (dirattr) {
-#ifdef ENABLE_STRACE
-		fprintf(stderr, ">> getattrlist unhandled dirattr flags: %x\n",
-				dirattr);
-#endif
+		fprintf(stderr, "limbo: getattrlist: dirattr %x\n", dirattr);
 		unimplemented();
 	}
 
 	if (fileattr) {
-#ifdef ENABLE_STRACE
-		fprintf(stderr, ">> getattrlist unhandled fileattr flags: %x\n",
-				fileattr);
-#endif
+		fprintf(stderr, "limbo: getattrlist: fileattr %x\n", fileattr);
 		unimplemented();
 	}
 
 	if (cmnextattr) {
-#ifdef ENABLE_STRACE
-		fprintf(stderr,
-				">> getattrlist unhandled cmnextattr flags: "
-				"%x\n",
+		fprintf(stderr, "limbo: getattrlist: cmnextattr %x\n",
 				cmnextattr);
-#endif
 		unimplemented();
 	}
 
@@ -924,9 +967,14 @@ set_attributes(int dirfd, const char *path, int flags, void *alist,
 			alistp->fileattr, alistp->forkattr);
 #endif
 	if ((alistp->commonattr
-			    & ~(ATTR_CMN_MODTIME | ATTR_CMN_ACCTIME
-					    | ATTR_CMN_ACCESSMASK | ATTR_CMN_FLAGS
-					    | ATTR_CMN_EXTENDED_SECURITY))
+			    & ~(ATTR_CMN_CRTIME | ATTR_CMN_MODTIME
+					    | ATTR_CMN_ACCTIME
+					    | ATTR_CMN_FNDRINFO
+					    | ATTR_CMN_OWNERID | ATTR_CMN_GRPID
+					    | ATTR_CMN_ACCESSMASK
+					    | ATTR_CMN_FLAGS
+					    | ATTR_CMN_EXTENDED_SECURITY
+					    | ATTR_CMN_UUID | ATTR_CMN_GRPUUID))
 			|| alistp->volattr || alistp->dirattr
 			|| alistp->fileattr || alistp->forkattr) {
 		unimplemented();
@@ -937,11 +985,55 @@ set_attributes(int dirfd, const char *path, int flags, void *alist,
 			{.tv_nsec = UTIME_OMIT},
 	};
 	const char *cursor = attributeBuffer;
+	if (alistp->commonattr & ATTR_CMN_CRTIME) {
+		struct timespec creation;
+		cursor = unpack_timespec(cursor, &creation);
+	}
 	if (alistp->commonattr & ATTR_CMN_MODTIME) {
 		cursor = unpack_timespec(cursor, &times[1]);
 	}
 	if (alistp->commonattr & ATTR_CMN_ACCTIME) {
 		cursor = unpack_timespec(cursor, &times[0]);
+	}
+	if (alistp->commonattr & ATTR_CMN_FNDRINFO) {
+		char target[PATH_MAX];
+		if (path == NULL) {
+			snprintf(target, sizeof(target),
+					"/proc/thread-self/fd/%d", dirfd);
+		} else if (path[0] == '/' || dirfd == AT_FDCWD) {
+			snprintf(target, sizeof(target), "%s", path);
+		} else {
+			snprintf(target, sizeof(target),
+					"/proc/thread-self/fd/%d/%s", dirfd,
+					path);
+		}
+		int r = (flags & AT_SYMLINK_NOFOLLOW)
+				? lsetxattr(target, FINDER_INFO_XATTR, cursor,
+						  FINDER_INFO_SIZE, 0)
+				: setxattr(target, FINDER_INFO_XATTR, cursor,
+						  FINDER_INFO_SIZE, 0);
+		if (r == -1 && errno != EPERM && errno != ENOTSUP) {
+			return -1;
+		}
+		cursor += FINDER_INFO_SIZE;
+	}
+	if (alistp->commonattr & (ATTR_CMN_OWNERID | ATTR_CMN_GRPID)) {
+		uint32_t owner = UINT32_MAX, group = UINT32_MAX;
+		if (alistp->commonattr & ATTR_CMN_OWNERID) {
+			memcpy(&owner, cursor, sizeof(owner));
+			cursor += sizeof(owner);
+		}
+		if (alistp->commonattr & ATTR_CMN_GRPID) {
+			memcpy(&group, cursor, sizeof(group));
+			cursor += sizeof(group);
+		}
+		int r = (path == NULL)
+				? fchown(dirfd, owner, group)
+				: fchownat(dirfd, path, owner, group,
+						  flags & AT_SYMLINK_NOFOLLOW);
+		if (r == -1) {
+			return -1;
+		}
 	}
 	if (alistp->commonattr & ATTR_CMN_ACCESSMASK) {
 		uint32_t mode;
