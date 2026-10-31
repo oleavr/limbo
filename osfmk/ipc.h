@@ -62,6 +62,7 @@ typedef enum {
 	IPC_KOBJECT_SEMAPHORE,
 	IPC_KOBJECT_BOOTSTRAP,
 	IPC_KOBJECT_LIBINFO,
+	IPC_KOBJECT_PROCESSOR_SET,
 	IPC_KOBJECT_VOUCHER,
 	IPC_KOBJECT_MEMORY_ENTRY,
 	/* A file descriptor as a port, which goes to other processes */
