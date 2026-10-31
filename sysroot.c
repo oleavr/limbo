@@ -110,6 +110,11 @@ sysroot_host_path(const char *path, int flags, char *buffer)
 		}
 	}
 
+	if (strncmp(path, "/dev", 4) == 0
+			&& (path[4] == '/' || path[4] == '\0')) {
+		return path;
+	}
+
 	int fd = open_in_root(path, flags, resolve);
 	if (fd != -1) {
 		return (read_fd_path(fd, buffer) != -1) ? buffer : path;
