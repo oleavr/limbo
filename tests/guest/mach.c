@@ -25,6 +25,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <errno.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <mach/mach_vm.h>
@@ -54,6 +55,7 @@ static void check_semaphores(void);
 static void *signal_semaphore(void *arg);
 static void check_time(void);
 static void check_memory_entries(void);
+static void check_remaps(void);
 static void check_shared_range_entries(void);
 static void check_exception_ports(void);
 static void check_destroy(void);
@@ -67,6 +69,7 @@ main(void)
 	check_semaphores();
 	check_time();
 	check_memory_entries();
+	check_remaps();
 	check_exception_ports();
 	check_destroy();
 	return 0;
@@ -340,4 +343,49 @@ allocate_port(void)
 			      mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port)
 			== KERN_SUCCESS);
 	return port;
+}
+
+static void
+check_remaps(void)
+{
+	mach_vm_size_t sizes[3] = {
+			4 * vm_page_size,
+			16 * vm_page_size,
+			64 * vm_page_size,
+	};
+	mach_vm_address_t tables[3];
+	for (int i = 0; i < 3; i++) {
+		tables[i] = 0;
+		CHECK(mach_vm_allocate(mach_task_self(), &tables[i], sizes[i],
+				      VM_FLAGS_ANYWHERE)
+				== KERN_SUCCESS);
+		((volatile char *)tables[i])[sizes[i] - 1] = (char)(i + 1);
+		if (i == 0) {
+			continue;
+		}
+		vm_prot_t current, maximum;
+		CHECK(mach_vm_remap(mach_task_self(), &tables[i], sizes[i - 1],
+				      0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
+				      mach_task_self(), tables[i - 1], false,
+				      &current, &maximum, VM_INHERIT_NONE)
+				== KERN_SUCCESS);
+	}
+	volatile char *first = (volatile char *)tables[0];
+	volatile char *second = (volatile char *)tables[1];
+	volatile char *third = (volatile char *)tables[2];
+	CHECK(third[sizes[0] - 1] == 1 && third[sizes[1] - 1] == 2);
+
+	third[7] = 42;
+	CHECK(first[7] == 42 && second[7] == 42);
+	third[sizes[0] + 7] = 43;
+	CHECK(second[sizes[0] + 7] == 43);
+	second[sizes[0] + 9] = 44;
+	CHECK(third[sizes[0] + 9] == 44);
+	first[9] = 45;
+	CHECK(third[9] == 45);
+
+	for (int i = 0; i < 3; i++) {
+		CHECK(mach_vm_deallocate(mach_task_self(), tables[i], sizes[i])
+				== KERN_SUCCESS);
+	}
 }

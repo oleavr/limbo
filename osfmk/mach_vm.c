@@ -60,15 +60,21 @@ struct memory_entry {
 static kern_return_t map_anonymous(mach_vm_address_t *address,
 		mach_vm_size_t size, mach_vm_offset_t mask, int flags,
 		vm_prot_t protection);
+static int move_to_memfd(mach_vm_address_t address, mach_vm_size_t size,
+		vm_prot_t protection);
 static void *map_aligned(mach_vm_size_t size, mach_vm_offset_t mask,
 		vm_prot_t protection);
 static kern_return_t remap_share(mach_vm_address_t *target_address,
 		mach_vm_size_t size, mach_vm_offset_t mask, int flags,
-		mach_vm_address_t src_address, vm_prot_t protection);
+		mach_vm_address_t src_address);
+static int share_piece(mach_vm_address_t address, mach_vm_size_t size,
+		mach_vm_address_t start, vm_prot_t protection, bool shared,
+		uint64_t file_offset, off_t *offset);
 static int share_in_place(mach_vm_address_t address, mach_vm_size_t size,
 		vm_prot_t protection);
 static int shared_range_fd(mach_vm_address_t start);
 static void shared_range_add(mach_vm_address_t start, int fd);
+static int held_fd(mach_vm_address_t start);
 static bool region_inode(mach_vm_address_t start, dev_t *device, ino_t *inode);
 static int copy_range(mach_vm_address_t address, mach_vm_size_t size);
 static kern_return_t remap_copy(mach_vm_address_t *target_address,
@@ -338,10 +344,97 @@ _kernelrpc_mach_vm_map(vm_task_entry_t target_task, mach_vm_address_t *address,
 		if (kr == KERN_SUCCESS && (flags & VM_FLAGS_RETURN_DATA_ADDR)) {
 			*address += entry->data_offset;
 		}
+#ifdef ENABLE_STRACE
+		fprintf(stderr,
+				"  mach_vm_map: entry of %#llx bytes: %d, at "
+				"%#llx\n",
+				(unsigned long long)entry->size, kr,
+				(unsigned long long)*address);
+#endif
 		return kr;
 	}
 
 	return map_anonymous(address, size, mask, flags, cur_protection);
+}
+
+mach_port_name_t
+memory_entry_create(mach_vm_size_t size, void **contents)
+{
+	size = (size + PAGE_MASK) & ~PAGE_MASK;
+	int fd = memfd_create("memory entry", MFD_CLOEXEC);
+	if (fd == -1 || ftruncate(fd, size) == -1) {
+		perror("memfd_create");
+		abort();
+	}
+	*contents = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	if (*contents == MAP_FAILED) {
+		perror("mmap");
+		abort();
+	}
+
+	struct memory_entry *entry = malloc(sizeof(*entry));
+	*entry = (struct memory_entry){.fd = fd, .size = size};
+	return ipc_kobject_alloc(IPC_KOBJECT_MEMORY_ENTRY, entry);
+}
+
+mach_port_name_t
+memory_entry_share(int fd, mach_vm_size_t size)
+{
+	int own = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+	if (own == -1) {
+		perror("fcntl");
+		abort();
+	}
+	return ipc_kobject_alloc(IPC_KOBJECT_MEMORY_ENTRY,
+			memory_entry_adopt(own, (size + PAGE_MASK) & ~PAGE_MASK,
+					0));
+}
+
+bool
+memory_entry_describe(const void *kobject, int *fd, mach_vm_size_t *size,
+		mach_vm_offset_t *data_offset)
+{
+	const struct memory_entry *entry = kobject;
+	*fd = entry->fd;
+	*size = entry->size;
+	*data_offset = entry->data_offset;
+	return true;
+}
+
+void *
+memory_entry_adopt(int fd, mach_vm_size_t size, mach_vm_offset_t data_offset)
+{
+	struct memory_entry *entry = malloc(sizeof(*entry));
+	*entry = (struct memory_entry){
+			.fd = fd,
+			.size = size,
+			.data_offset = data_offset,
+	};
+	return entry;
+}
+
+void
+memory_entry_destroy(void *kobject)
+{
+	struct memory_entry *entry = kobject;
+	close(entry->fd);
+	free(entry);
+}
+
+kern_return_t
+mach_vm_allocate_anywhere(mach_vm_address_t *address, mach_vm_size_t size)
+{
+	return map_anonymous(address, size, 0, VM_FLAGS_ANYWHERE,
+			VM_PROT_READ | VM_PROT_WRITE);
+}
+
+kern_return_t
+mach_vm_map_fd(int fd, mach_vm_size_t size, vm_prot_t protection,
+		mach_vm_address_t *address)
+{
+	struct memory_entry entry = {.fd = fd, .size = size};
+	return map_entry(address, size, 0, VM_FLAGS_ANYWHERE, &entry, 0, false,
+			protection);
 }
 
 static kern_return_t
@@ -404,8 +497,8 @@ _kernelrpc_mach_vm_remap(vm_map_t target_task,
 	*cur_protection = region_protection(src_address);
 	*max_protection = VM_PROT_ALL;
 	if (!copy) {
-		return remap_share(target_address, size, mask, flags,
-				src_address, *cur_protection);
+		return remap_share(
+				target_address, size, mask, flags, src_address);
 	}
 	return remap_copy(target_address, size, mask, flags, src_address,
 			cur_protection);
@@ -413,22 +506,54 @@ _kernelrpc_mach_vm_remap(vm_map_t target_task,
 
 static kern_return_t
 remap_share(mach_vm_address_t *target_address, mach_vm_size_t size,
-		mach_vm_offset_t mask, int flags, mach_vm_address_t src_address,
-		vm_prot_t protection)
+		mach_vm_offset_t mask, int flags, mach_vm_address_t src_address)
 {
 	size = (size + PAGE_MASK) & ~PAGE_MASK;
-	struct memory_entry entry = {
-			.fd = share_in_place(src_address, size, protection),
-			.size = size,
-	};
-	if (entry.fd == -1) {
-		return KERN_NO_SPACE;
+	kern_return_t kr = map_anonymous(
+			target_address, size, mask, flags, VM_PROT_NONE);
+	if (kr != KERN_SUCCESS) {
+		return kr;
 	}
 
-	kern_return_t kr = map_entry(target_address, size, mask, flags, &entry,
-			0, false, protection);
-	close(entry.fd);
-	return kr;
+	mach_vm_address_t end = src_address + size;
+	mach_vm_address_t address = src_address;
+	while (address < end) {
+		mach_vm_address_t start;
+		mach_vm_size_t region_size;
+		vm_prot_t protection;
+		bool shared;
+		uint64_t file_offset;
+		if (!region_find(address, &start, &region_size, &protection,
+				    &shared, &file_offset)
+				|| start >= end) {
+			break;
+		}
+		if (start > address) {
+			address = start;
+			continue;
+		}
+		mach_vm_address_t last = start + region_size < end
+				? start + region_size
+				: end;
+		off_t offset;
+		int fd = share_piece(address, last - address, start, protection,
+				shared, file_offset, &offset);
+		void *at = (void *)(*target_address + (address - src_address));
+		if (fd == -1
+				|| mmap(at, last - address, protection,
+						   MAP_SHARED | MAP_FIXED, fd,
+						   offset)
+						== MAP_FAILED) {
+			if (fd != -1) {
+				close(fd);
+			}
+			munmap((void *)*target_address, size);
+			return KERN_NO_SPACE;
+		}
+		close(fd);
+		address = last;
+	}
+	return KERN_SUCCESS;
 }
 
 static bool
@@ -474,7 +599,8 @@ share_in_place(mach_vm_address_t address, mach_vm_size_t size,
 	 * a copy of it: coreservicesd makes an entry of its store's segment
 	 * for every client (limbo-19k.96). The mapping's file is the memfd
 	 * the range was moved into, which limbo keeps, as /proc's map_files
-	 * would need a privilege
+	 * would need a privilege; or, for a range mapped from an entry, the
+	 * memfd that entry holds
 	 */
 	mach_vm_address_t start;
 	mach_vm_size_t region_size;
@@ -487,11 +613,40 @@ share_in_place(mach_vm_address_t address, mach_vm_size_t size,
 			&& address + size <= start + region_size
 			&& file_offset + (address - start) == 0) {
 		int same = shared_range_fd(start);
+		if (same == -1) {
+			same = held_fd(start);
+		}
 		if (same != -1) {
 			return same;
 		}
 	}
 
+	return move_to_memfd(address, size, protection);
+}
+
+static int
+share_piece(mach_vm_address_t address, mach_vm_size_t size,
+		mach_vm_address_t start, vm_prot_t protection, bool shared,
+		uint64_t file_offset, off_t *offset)
+{
+	if (shared) {
+		int same = shared_range_fd(start);
+		if (same == -1) {
+			same = held_fd(start);
+		}
+		if (same != -1) {
+			*offset = (off_t)(file_offset + (address - start));
+			return same;
+		}
+	}
+	*offset = 0;
+	return move_to_memfd(address, size, protection);
+}
+
+static int
+move_to_memfd(mach_vm_address_t address, mach_vm_size_t size,
+		vm_prot_t protection)
+{
 	bool shared;
 	int fd = memfd_create("remap", MFD_CLOEXEC);
 	if (fd == -1 || ftruncate(fd, size) == -1
@@ -570,6 +725,36 @@ shared_range_add(mach_vm_address_t start, int fd)
 	range->next = shared_ranges;
 	shared_ranges = range;
 	pthread_mutex_unlock(&shared_ranges_lock);
+}
+
+static int
+held_fd(mach_vm_address_t start)
+{
+	dev_t device;
+	ino_t inode;
+	DIR *fds = opendir("/proc/thread-self/fd");
+	if (!region_inode(start, &device, &inode) || fds == NULL) {
+		if (fds != NULL) {
+			closedir(fds);
+		}
+		return -1;
+	}
+	int found = -1;
+	struct dirent *name;
+	while (found == -1 && (name = readdir(fds)) != NULL) {
+		int fd = atoi(name->d_name);
+		struct stat status;
+		if (name->d_name[0] != '.' && fd != dirfd(fds)
+				&& (fcntl(fd, F_GETFL) & O_ACCMODE) == O_RDWR
+				&& fstat(fd, &status) == 0
+				&& S_ISREG(status.st_mode)
+				&& status.st_dev == device
+				&& status.st_ino == inode) {
+			found = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+		}
+	}
+	closedir(fds);
+	return found;
 }
 
 /* The inode of the file the mapping that starts at START maps */
@@ -795,6 +980,24 @@ mach_make_memory_entry(vm_map_t target_task, memory_object_size_t *size,
 			: share_in_place(start, end - start,
 					  region_protection(start));
 	if (fd == -1) {
+#ifdef ENABLE_STRACE
+		fprintf(stderr, "  mach_make_memory_entry: %#llx-%#llx: %s\n",
+				(unsigned long long)start,
+				(unsigned long long)end, strerror(errno));
+		FILE *maps = fopen("/proc/thread-self/maps", "r");
+		char line[512];
+		while (maps != NULL
+				&& fgets(line, sizeof(line), maps) != NULL) {
+			unsigned long from, to;
+			if (sscanf(line, "%lx-%lx", &from, &to) == 2
+					&& to > start && from < end) {
+				fprintf(stderr, "    %s", line);
+			}
+		}
+		if (maps != NULL) {
+			fclose(maps);
+		}
+#endif
 		return KERN_INVALID_ADDRESS;
 	}
 
