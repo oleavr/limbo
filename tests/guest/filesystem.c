@@ -49,6 +49,7 @@ static void check_directories(void);
 static void check_attributes(void);
 static void check_copyfile(void);
 static void check_xattrs(void);
+static void check_locks_of_pid(void);
 static void write_file(const char *path, const char *contents);
 static int count_entries(const char *path);
 
@@ -64,6 +65,7 @@ main(void)
 	check_attributes();
 	check_copyfile();
 	check_xattrs();
+	check_locks_of_pid();
 
 	CHECK(chdir("/") == 0);
 	CHECK(rmdir(template) == 0);
@@ -282,6 +284,105 @@ check_xattrs(void)
 			== -1);
 	CHECK(errno == ENOATTR);
 	CHECK(unlink("xattrs") == 0);
+}
+
+static void
+check_locks_of_pid(void)
+{
+	write_file("l", "locked");
+	int ready[2], done[2];
+	CHECK(pipe(ready) == 0 && pipe(done) == 0);
+	pid_t child = fork();
+	CHECK(child != -1);
+	if (child == 0) {
+		close(ready[0]);
+		close(done[1]);
+		int fd = open("l", O_RDWR | O_CLOFORK);
+		struct flock lock = {
+				.l_type = F_WRLCK,
+				.l_whence = SEEK_SET,
+				.l_start = 2,
+				.l_len = 2,
+		};
+		struct flock record = {
+				.l_type = F_WRLCK,
+				.l_whence = SEEK_SET,
+				.l_start = 6,
+				.l_len = 2,
+		};
+		char byte = 0;
+		if (fd == -1 || fcntl(fd, F_SETCONFINED, 1) == -1
+				|| fcntl(fd, F_OFD_SETLK, &lock) == -1
+				|| fcntl(fd, F_SETLK, &record) == -1) {
+			perror("lock");
+			_exit(1);
+		}
+		if (write(ready[1], &byte, 1) != 1
+				|| read(done[0], &byte, 1) == -1) {
+			_exit(1);
+		}
+		_exit(0);
+	}
+	CHECK(close(ready[1]) == 0 && close(done[0]) == 0);
+	char byte;
+	CHECK(read(ready[0], &byte, 1) == 1);
+
+	int fd = open("l", O_RDONLY);
+	CHECK(fd != -1);
+	struct flock lock = {
+			.l_type = F_RDLCK,
+			.l_whence = SEEK_SET,
+			.l_pid = child,
+	};
+	CHECK(fcntl(fd, F_OFD_GETLKPID, &lock) == 0);
+	CHECK(lock.l_type == F_WRLCK && lock.l_start == 2 && lock.l_len == 2
+			&& lock.l_pid == child);
+
+	lock = (struct flock){
+			.l_type = F_WRLCK,
+			.l_whence = SEEK_SET,
+			.l_start = 4,
+			.l_pid = child,
+	};
+	CHECK(fcntl(fd, F_OFD_GETLKPID, &lock) == 0 && lock.l_type == F_UNLCK);
+	lock = (struct flock){
+			.l_type = F_WRLCK,
+			.l_whence = SEEK_SET,
+			.l_pid = getpid(),
+	};
+	CHECK(fcntl(fd, F_OFD_GETLKPID, &lock) == 0 && lock.l_type == F_UNLCK);
+
+	lock = (struct flock){
+			.l_type = F_RDLCK,
+			.l_whence = SEEK_SET,
+			.l_start = 4,
+			.l_pid = child,
+	};
+	CHECK(fcntl(fd, F_GETLKPID, &lock) == 0);
+	CHECK(lock.l_type == F_WRLCK && lock.l_start == 6 && lock.l_len == 2
+			&& lock.l_pid == child);
+	lock = (struct flock){
+			.l_type = F_WRLCK,
+			.l_whence = SEEK_SET,
+			.l_pid = getpid(),
+	};
+	CHECK(fcntl(fd, F_GETLKPID, &lock) == 0 && lock.l_type == F_UNLCK);
+
+	lock = (struct flock){
+			.l_type = F_RDLCK,
+			.l_whence = SEEK_SET,
+			.l_pid = -1,
+	};
+	CHECK(fcntl(fd, F_OFD_GETLKPID, &lock) == 0);
+	CHECK(lock.l_type == F_WRLCK && lock.l_start == 2 && lock.l_len == 2);
+
+	CHECK(close(done[1]) == 0);
+	int status;
+	CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status)
+			&& WEXITSTATUS(status) == 0);
+	CHECK(close(fd) == 0);
+	CHECK(close(ready[0]) == 0);
+	CHECK(unlink("l") == 0);
 }
 
 static void
