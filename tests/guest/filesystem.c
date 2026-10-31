@@ -30,19 +30,38 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <mach-o/dyld.h>
+#include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/acl.h>
 #include <sys/attr.h>
 #include <sys/file.h>
+#include <sys/fsgetpath.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/vnode.h>
+#include <sys/wait.h>
 #include <sys/xattr.h>
 #include <unistd.h>
 
 #include "check.h"
+
+#ifndef O_CLOFORK
+#define O_CLOFORK 0x08000000
+#endif
+
+#ifndef F_GETLKPID
+#define F_GETLKPID 66
+#endif
+#ifndef F_OFD_GETLKPID
+#define F_OFD_GETLKPID 94
+#endif
+#ifndef F_SETCONFINED
+#define F_SETCONFINED 95
+#endif
 
 static void check_files(void);
 static void check_directories(void);
@@ -50,12 +69,18 @@ static void check_attributes(void);
 static void check_copyfile(void);
 static void check_xattrs(void);
 static void check_locks_of_pid(void);
+static void check_file_ids(void);
+extern char **environ;
+static int resolve_file_id(char **argv);
 static void write_file(const char *path, const char *contents);
 static int count_entries(const char *path);
 
 int
-main(void)
+main(int argc, char **argv)
 {
+	if (argc == 5 && strcmp(argv[1], "fsgetpath") == 0) {
+		return resolve_file_id(argv + 2);
+	}
 	char template[] = "/tmp/limbo-filesystem-XXXXXX";
 	CHECK(mkdtemp(template) != NULL);
 	CHECK(chdir(template) == 0);
@@ -66,6 +91,7 @@ main(void)
 	check_copyfile();
 	check_xattrs();
 	check_locks_of_pid();
+	check_file_ids();
 
 	CHECK(chdir("/") == 0);
 	CHECK(rmdir(template) == 0);
@@ -109,7 +135,7 @@ check_files(void)
 			== (O_RDWR | O_APPEND));
 	char path[MAXPATHLEN];
 	CHECK(fcntl(fd, F_GETPATH, path) == 0);
-	CHECK(strncmp(path, "/tmp/limbo-filesystem-", 22) == 0);
+	CHECK(strncmp(path, "/private/tmp/limbo-filesystem-", 30) == 0);
 	CHECK(strcmp(strrchr(path, '/'), "/a") == 0);
 	CHECK(write(fd, "ta", 2) == 2);
 	CHECK(fstat(fd, &st) == 0 && st.st_size == 4);
@@ -153,6 +179,14 @@ check_directories(void)
 	}
 	CHECK(close(dirfd) == 0);
 	CHECK(count_entries("dir") == 0);
+	char cwd[PATH_MAX], path[PATH_MAX + 8];
+	CHECK(getcwd(cwd, sizeof(cwd)) != NULL);
+	const char *dots[] = {"dir/.", "dir/./", "dir/.."};
+	for (size_t i = 0; i < sizeof(dots) / sizeof(dots[0]); i++) {
+		CHECK(rmdir(dots[i]) == -1 && errno == EINVAL);
+		snprintf(path, sizeof(path), "%s/%s", cwd, dots[i]);
+		CHECK(rmdir(path) == -1 && errno == EINVAL);
+	}
 	CHECK(rmdir("dir") == 0);
 }
 
@@ -410,4 +444,54 @@ count_entries(const char *path)
 	}
 	closedir(dir);
 	return count;
+}
+
+static void
+check_file_ids(void)
+{
+	write_file("e", "id");
+	char path[PATH_MAX];
+	CHECK(realpath("e", path) != NULL);
+	struct attrlist request = {
+			.bitmapcount = ATTR_BIT_MAP_COUNT,
+			.commonattr = ATTR_CMN_FSID | ATTR_CMN_FILEID,
+	};
+	struct __attribute__((packed)) {
+		uint32_t length;
+		fsid_t fsid;
+		uint64_t file_id;
+	} reply;
+	CHECK(getattrlist(path, &request, &reply, sizeof(reply), 0) == 0);
+
+	fsid_t volume = reply.fsid;
+	char found[PATH_MAX];
+	CHECK(fsgetpath(found, sizeof(found), &volume, reply.file_id) > 0);
+	CHECK(strcmp(found, path) == 0);
+
+	char executable[PATH_MAX];
+	uint32_t size = sizeof(executable);
+	CHECK(_NSGetExecutablePath(executable, &size) == 0);
+	char fsid[32], id[32];
+	snprintf(fsid, sizeof(fsid), "%d.%d", volume.val[0], volume.val[1]);
+	snprintf(id, sizeof(id), "%llu", (unsigned long long)reply.file_id);
+	char *arguments[] = {executable, "fsgetpath", fsid, id, path, NULL};
+	pid_t pid;
+	CHECK(posix_spawn(&pid, executable, NULL, NULL, arguments, environ)
+			== 0);
+	int status;
+	CHECK(waitpid(pid, &status, 0) == pid);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	CHECK(unlink("e") == 0);
+}
+
+static int
+resolve_file_id(char **argv)
+{
+	fsid_t fsid;
+	CHECK(sscanf(argv[0], "%d.%d", &fsid.val[0], &fsid.val[1]) == 2);
+	uint64_t id = strtoull(argv[1], NULL, 10);
+	char found[PATH_MAX];
+	CHECK(fsgetpath(found, sizeof(found), &fsid, id) > 0);
+	CHECK(strcmp(found, argv[2]) == 0);
+	return 0;
 }
