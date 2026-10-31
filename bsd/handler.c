@@ -76,6 +76,7 @@
 #include <ucontext.h>
 #include <unistd.h>
 
+#include "bsd/hostuuid.h"
 #include "commpage.h"
 #include "persona.h"
 #include "persona.h"
@@ -1973,16 +1974,13 @@ sys_gethostuuid(unsigned char *uuid_buf, void *timeoutp)
 	fprintf(stderr, "gethostuuid(%p, %p)\n", (void *)uuid_buf,
 			(void *)timeoutp);
 #endif
-	FILE *machine_id = fopen("/etc/machine-id", "r");
-	if (machine_id == NULL) {
-		return err_map(errno);
+	if (!host_uuid(uuid_buf)) {
+		return _EIO;
 	}
-	int count = 0;
-	for (int i = 0; i < 16; i++) {
-		count += fscanf(machine_id, "%2hhx", &uuid_buf[i]);
-	}
-	fclose(machine_id);
-	return (count == 16) ? 0 : _EIO;
+#ifdef ENABLE_STRACE
+	fprintf(stderr, "  host uuid: %s\n", host_uuid_string());
+#endif
+	return 0;
 }
 
 int
@@ -4186,7 +4184,6 @@ sys_clonefileat(int src_dirfd, user_addr_t src, int dst_dirfd, user_addr_t dst,
 	close(fd);
 	return result;
 }
-
 
 int
 sys_openat(int fd, user_addr_t path, int flags, int mode)
