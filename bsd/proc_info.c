@@ -162,7 +162,10 @@ struct proc_taskallinfo {
 
 #define PROC_PIDPATHINFO 11
 
+#ifndef PROC_PIDPLATFORMINFO
 #define PROC_PIDPLATFORMINFO 30
+#endif
+
 static int pidinfo(int32_t pid, uint32_t flavor, user_addr_t buffer,
 		int32_t buffersize);
 static void uniqidentifierinfo(const struct process *process,
@@ -179,6 +182,7 @@ static int listpids(uint32_t type, uint32_t typeinfo, user_addr_t buffer,
 		int32_t buffersize);
 static bool status_field(pid_t pid, const char *field, int index,
 		unsigned long *value);
+static uint64_t wakeups(int32_t pid);
 
 int
 sys_proc_info(int32_t callnum, int32_t pid, uint32_t flavor, uint64_t arg,
@@ -197,8 +201,6 @@ sys_proc_info(int32_t callnum, int32_t pid, uint32_t flavor, uint64_t arg,
 	case PROC_INFO_CALL_PIDFDINFO:
 		return fdinfo(pid, flavor, (int32_t)arg, (void *)buffer,
 				buffersize);
-	case PROC_INFO_CALL_PIDRUSAGE:
-		return pidrusage(pid, flavor, buffer);
 	case PROC_INFO_CALL_SETCONTROL:
 		return setcontrol(flavor, buffer, buffersize);
 	case PROC_INFO_CALL_SET_DYLD_IMAGES:
@@ -207,6 +209,8 @@ sys_proc_info(int32_t callnum, int32_t pid, uint32_t flavor, uint64_t arg,
 		return 0;
 	case PROC_INFO_CALL_DIRTYCONTROL:
 		return 0;
+	case PROC_INFO_CALL_PIDRUSAGE:
+		return pidrusage(pid, flavor, buffer);
 	default:
 		unimplemented();
 	}
@@ -356,6 +360,7 @@ bsdinfo(const struct process *process, struct proc_bsdinfo *info)
 	memcpy(info->pbi_comm, process->comm, sizeof(process->comm));
 	memcpy(info->pbi_name, process->comm, sizeof(process->comm));
 	info->pbi_pgid = process->pgid;
+	info->e_tdev = process_terminal(process);
 	info->e_tpgid = process->tpgid;
 	info->pbi_nice = process->nice;
 	process_start_time(process, &info->pbi_start_tvsec,
@@ -391,9 +396,9 @@ taskinfo(const struct process *process, struct proc_taskinfo *info)
 
 /*
  * The rusage_info of a version, as proc_pid_rusage asks, as sysmond does of
- * each process: times, the start time and memory as Linux counts them, and
- * disk I/O where /proc lets it be read. Every version begins as the first,
- * and the second adds disk I/O at 144
+ * each process: times, wakeups, the start time and memory as Linux counts
+ * them, and disk I/O where /proc lets it be read. Every version begins as
+ * the first, and the second adds disk I/O at 144
  */
 #define RUSAGE_INFO_V6 6
 static int
@@ -417,13 +422,16 @@ pidrusage(int32_t pid, uint32_t flavor, user_addr_t buffer)
 				process.system_ticks)),
 	};
 	memcpy(info + 16, fields, sizeof(fields));
+	uint64_t woken = wakeups(pid);
+	memcpy(info + 40, &woken, sizeof(woken));
 	/* ri_resident_size, at 64, and ri_phys_footprint */
 	uint64_t resident = process.resident_pages * (uint64_t)getpagesize();
 	memcpy(info + 64, &resident, sizeof(resident));
 	memcpy(info + 72, &resident, sizeof(resident));
-	/* ri_proc_start_abstime, at 80, on the same clock as mach time */
+	uint64_t started = process_ticks_to_nanoseconds(process.start_ticks);
+	uint64_t boot = commpage_boot_nanoseconds();
 	uint64_t start = nanoseconds_to_absolute(
-			process_ticks_to_nanoseconds(process.start_ticks));
+			started > boot ? started - boot : 0);
 	memcpy(info + 80, &start, sizeof(start));
 	if (flavor >= 2) {
 		char path[64];
@@ -442,6 +450,44 @@ pidrusage(int32_t pid, uint32_t flavor, user_addr_t buffer)
 		memcpy(info + 152, &write_bytes, sizeof(write_bytes));
 	}
 	return 0;
+}
+
+static uint64_t
+wakeups(int32_t pid)
+{
+	char path[64];
+	snprintf(path, sizeof(path), "/proc/%d/task", pid);
+	DIR *tasks = opendir(path);
+	if (tasks == NULL) {
+		return 0;
+	}
+	uint64_t count = 0;
+	struct dirent *task;
+	while ((task = readdir(tasks)) != NULL) {
+		if (task->d_name[0] == '.') {
+			continue;
+		}
+		char status_path[PATH_MAX];
+		snprintf(status_path, sizeof(status_path), "%s/%s/status", path,
+				task->d_name);
+		FILE *status = fopen(status_path, "r");
+		if (status == NULL) {
+			continue;
+		}
+		char line[128];
+		uint64_t switches;
+		while (fgets(line, sizeof(line), status) != NULL) {
+			if (sscanf(line, "voluntary_ctxt_switches: %lu",
+					    &switches)
+					== 1) {
+				count += switches;
+				break;
+			}
+		}
+		fclose(status);
+	}
+	closedir(tasks);
+	return count;
 }
 
 static uint64_t
@@ -470,13 +516,16 @@ listpids(uint32_t type, uint32_t typeinfo, user_addr_t buffer,
 		int32_t buffersize)
 {
 	DIR *proc = opendir("/proc");
+	if (proc == NULL) {
+		return 0;
+	}
 	int32_t size = 0;
 	int *pids = buffer;
 	struct dirent *entry;
 	while ((entry = readdir(proc)) != NULL) {
 		char *end;
 		long pid = strtol(entry->d_name, &end, 10);
-		if (*end != '\0') {
+		if (*end != '\0' || pid <= 0) {
 			continue;
 		}
 		unsigned long value;
@@ -540,64 +589,6 @@ status_field(pid_t pid, const char *field, int index, unsigned long *value)
 	}
 	fclose(status);
 	return found;
-}
-
-static int
-listfds(int32_t pid, void *buffer, int32_t buffersize)
-{
-	enum {
-		PROX_FDTYPE_VNODE = 1,
-		PROX_FDTYPE_SOCKET = 2,
-		PROX_FDTYPE_KQUEUE = 5,
-		PROX_FDTYPE_PIPE = 6,
-	};
-	struct proc_fdinfo_entry {
-		int32_t proc_fd;
-		uint32_t proc_fdtype;
-	};
-
-	char path[64];
-	snprintf(path, sizeof(path), "/proc/%d/fd", pid);
-	DIR *dir = opendir(path);
-	if (dir == NULL) {
-		return _ESRCH;
-	}
-	struct proc_fdinfo_entry *out = buffer;
-	int32_t count = 0;
-	int32_t room = (buffer != NULL)
-			? buffersize / (int32_t)sizeof(*out)
-			: INT32_MAX;
-	struct dirent *entry;
-	while ((entry = readdir(dir)) != NULL && count < room) {
-		if (entry->d_name[0] == '.') {
-			continue;
-		}
-		if (buffer != NULL) {
-			char link[PATH_MAX];
-			snprintf(path, sizeof(path), "/proc/%d/fd/%s", pid,
-					entry->d_name);
-			ssize_t length = readlink(path, link, sizeof(link) - 1);
-			link[length > 0 ? length : 0] = '\0';
-			uint32_t type = PROX_FDTYPE_VNODE;
-			if (strncmp(link, "socket:", 7) == 0) {
-				type = PROX_FDTYPE_SOCKET;
-			} else if (strncmp(link, "pipe:", 5) == 0) {
-				type = PROX_FDTYPE_PIPE;
-			} else if (strncmp(link, "anon_inode:", 11) == 0) {
-				type = PROX_FDTYPE_KQUEUE;
-			}
-			out[count] = (struct proc_fdinfo_entry){
-					.proc_fd = atoi(entry->d_name),
-					.proc_fdtype = type,
-			};
-		}
-		count++;
-	}
-	closedir(dir);
-	if (buffer == NULL) {
-		count += 20;
-	}
-	return count * (int32_t)sizeof(*out);
 }
 
 static int
@@ -725,4 +716,61 @@ fdinfo(int32_t pid, uint32_t flavor, int32_t fd, void *buffer,
 	snprintf(info->pvip.vip_path, sizeof(info->pvip.vip_path), "%s",
 			sysroot_guest_path(link));
 	return sizeof(*info);
+}
+
+static int
+listfds(int32_t pid, void *buffer, int32_t buffersize)
+{
+	enum {
+		PROX_FDTYPE_VNODE = 1,
+		PROX_FDTYPE_SOCKET = 2,
+		PROX_FDTYPE_KQUEUE = 5,
+		PROX_FDTYPE_PIPE = 6,
+	};
+	struct proc_fdinfo_entry {
+		int32_t proc_fd;
+		uint32_t proc_fdtype;
+	};
+
+	char path[64];
+	snprintf(path, sizeof(path), "/proc/%d/fd", pid);
+	DIR *dir = opendir(path);
+	if (dir == NULL) {
+		return _ESRCH;
+	}
+	struct proc_fdinfo_entry *out = buffer;
+	int32_t count = 0;
+	int32_t room = (buffer != NULL) ? buffersize / (int32_t)sizeof(*out)
+					: INT32_MAX;
+	struct dirent *entry;
+	while ((entry = readdir(dir)) != NULL && count < room) {
+		if (entry->d_name[0] == '.') {
+			continue;
+		}
+		if (buffer != NULL) {
+			char link[PATH_MAX];
+			snprintf(path, sizeof(path), "/proc/%d/fd/%s", pid,
+					entry->d_name);
+			ssize_t length = readlink(path, link, sizeof(link) - 1);
+			link[length > 0 ? length : 0] = '\0';
+			uint32_t type = PROX_FDTYPE_VNODE;
+			if (strncmp(link, "socket:", 7) == 0) {
+				type = PROX_FDTYPE_SOCKET;
+			} else if (strncmp(link, "pipe:", 5) == 0) {
+				type = PROX_FDTYPE_PIPE;
+			} else if (strncmp(link, "anon_inode:", 11) == 0) {
+				type = PROX_FDTYPE_KQUEUE;
+			}
+			out[count] = (struct proc_fdinfo_entry){
+					.proc_fd = atoi(entry->d_name),
+					.proc_fdtype = type,
+			};
+		}
+		count++;
+	}
+	closedir(dir);
+	if (buffer == NULL) {
+		count += 20;
+	}
+	return count * (int32_t)sizeof(*out);
 }
