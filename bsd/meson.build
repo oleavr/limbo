@@ -1,6 +1,7 @@
 bsd_lib = static_library('bsd',
   sources: [
     'handler.c',
+    'kctl.c',
     'credentials.c',
     'hostuuid.c',
     'cpuinfo.c',

@@ -80,6 +80,7 @@
 #include "bsd/credentials.h"
 #include "bsd/hostuuid.h"
 #include "commpage.h"
+#include "kctl.h"
 #include "persona.h"
 #include "persona.h"
 #include "signals.h"
@@ -339,6 +340,7 @@ sys_sys_close(int fd)
 	fprintf(stderr, "sys_close(%p)\n", (void *)fd);
 #endif
 	kevent_close(fd);
+	kctl_close(fd);
 	return errno_map(close(fd));
 }
 
@@ -984,6 +986,14 @@ sys_ioctl(int fd, uint64_t com, void *data)
 	fprintf(stderr, "ioctl(%p, %p, %p)\n", (void *)fd, (void *)com,
 			(void *)data);
 #endif
+	int result = kctl_ioctl(fd, com, data);
+	if (result != 1) {
+		return result;
+	}
+	result = tty_ioctl(fd, com, data);
+	if (result != 1) {
+		return result;
+	}
 	/* TODO: ioctl(2) emulation layer */
 	/* if (fd == 2 && com == 0x4004667a) {
 		return 0;
@@ -998,10 +1008,12 @@ sys_ioctl(int fd, uint64_t com, void *data)
 		return 0;
 	}
 	unimplemented(); */
-	int result = tty_ioctl(fd, com, data);
-	if (result != 1) {
-		return result;
+	if (fcntl(fd, F_GETFD) == -1) {
+		return errno_map(-1);
 	}
+#ifdef ENABLE_STRACE
+	fprintf(stderr, "  ioctl: %#llx not done\n", (unsigned long long)com);
+#endif
 	return 0;
 }
 
@@ -1381,6 +1393,7 @@ sys_setpriority(int which, void *who, int prio)
 #define xnu_AF_INET    2
 #define xnu_PF_ROUTE   17
 #define xnu_PF_SYSTEM  32
+#define xnu_SYSPROTO_CONTROL 2
 #define xnu_AF_INET6   30
 #define xnu_SOCK_STREAM 1
 #define xnu_SOCK_DGRAM 2
@@ -1545,7 +1558,10 @@ sys_socket(int domain, int type, int protocol)
 	fprintf(stderr, "socket(%p, %p, %p)\n", (void *)domain, (void *)type,
 			(void *)protocol);
 #endif
-	if (domain == xnu_PF_ROUTE || domain == xnu_PF_SYSTEM) {
+	if (domain == xnu_PF_SYSTEM && protocol == xnu_SYSPROTO_CONTROL) {
+		return kctl_socket(type);
+	}
+	if (domain == xnu_PF_SYSTEM) {
 		return _EAFNOSUPPORT;
 	}
 	int host_domain = translate_domain(domain);
@@ -1569,6 +1585,9 @@ sys_connect(int s, void *name, void *namelen)
 			(void *)namelen);
 #endif
 	socklen_t length = (socklen_t)(uintptr_t)namelen;
+	if (kctl_is_socket(s)) {
+		return kctl_connect(s, name, length);
+	}
 	if (length >= 2 && ((const uint8_t *)name)[1] == xnu_PF_UNIX) {
 		struct sockaddr_un linux_address;
 		int directory;

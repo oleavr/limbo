@@ -28,6 +28,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -38,6 +39,8 @@
 int
 main(void)
 {
+	int bytes;
+	CHECK(ioctl(-1, FIONREAD, &bytes) == -1 && errno == EBADF);
 
 	int pair[2];
 	CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == 0);
