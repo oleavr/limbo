@@ -36,3 +36,5 @@
 void sha1(const void *data, size_t length, uint8_t digest[SHA1_DIGEST_LENGTH]);
 void sha256(const void *data, size_t length,
 		uint8_t digest[SHA256_DIGEST_LENGTH]);
+void hmac_sha256(const void *key, size_t key_length, const void *data,
+		size_t length, uint8_t digest[SHA256_DIGEST_LENGTH]);
