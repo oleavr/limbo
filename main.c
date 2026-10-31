@@ -173,7 +173,7 @@ run(int argc, char *argv[], char *envp[])
 	uintptr_t entry = 0;
 	uint8_t *exe_base = linker_link(argv[1], &dylinker_path, &entry);
 	if (exe_base == NULL) {
-		fprintf(stderr, "limbo: failed to load binary\n");
+		fprintf(stderr, "limbo: failed to load binary %s\n", argv[1]);
 		return 1;
 	}
 #ifdef __arm64__
