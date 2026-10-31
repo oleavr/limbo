@@ -54,6 +54,9 @@ struct psynch_waiter {
 struct psynch_prepost {
 	struct psynch_prepost *next;
 	user_addr_t object;
+	mach_port_name_t thread;
+	bool sequenced;
+	uint32_t upto;
 	uint32_t count;
 };
 
@@ -61,15 +64,18 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static struct psynch_waiter *waiters;
 static struct psynch_prepost *preposts;
 
-static int psynch_wait(user_addr_t object, int64_t sec, uint32_t nsec);
-static bool consume_prepost(user_addr_t object);
+static int psynch_wait(user_addr_t object, bool sequenced, uint32_t seq,
+		int64_t sec, uint32_t nsec);
+static bool consume_prepost(user_addr_t object, mach_port_name_t thread,
+		bool sequenced, uint32_t seq);
 static int wait_for_signal(
 		struct psynch_waiter *waiter, int64_t sec, uint32_t nsec);
 static void remove_waiter(struct psynch_waiter *waiter);
 static void psynch_wake_one(user_addr_t object);
 static uint32_t wake_waiters(
 		user_addr_t object, mach_port_name_t thread, uint32_t count);
-static void add_prepost(user_addr_t object, uint32_t count);
+static void add_prepost(user_addr_t object, mach_port_name_t thread,
+		bool sequenced, uint32_t upto, uint32_t count);
 static uint32_t pending_waiters(uint64_t cvlsgen);
 
 int
@@ -80,7 +86,7 @@ sys_psynch_mutexwait(user_addr_t mutex, uint32_t mgen, uint32_t ugen,
 	fprintf(stderr, "psynch_mutexwait(%p, %#x, %#x, %#lx, %#x)\n", mutex,
 			mgen, ugen, tid, flags);
 #endif
-	return psynch_wait(mutex, 0, 0);
+	return psynch_wait(mutex, false, 0, 0, 0);
 }
 
 int
@@ -109,11 +115,13 @@ sys_psynch_cvwait(user_addr_t cv, uint64_t cvlsgen, uint32_t cvugen,
 	if (mutex != NULL) {
 		psynch_wake_one(mutex);
 	}
-	return psynch_wait(cv, sec, nsec);
+	return psynch_wait(cv, true, (uint32_t)cvlsgen & PTHRW_COUNT_MASK, sec,
+			nsec);
 }
 
 static int
-psynch_wait(user_addr_t object, int64_t sec, uint32_t nsec)
+psynch_wait(user_addr_t object, bool sequenced, uint32_t seq, int64_t sec,
+		uint32_t nsec)
 {
 	struct psynch_waiter waiter = {
 			.object = object,
@@ -123,7 +131,7 @@ psynch_wait(user_addr_t object, int64_t sec, uint32_t nsec)
 
 	pthread_mutex_lock(&lock);
 	int result = 0;
-	if (!consume_prepost(object)) {
+	if (!consume_prepost(object, waiter.thread, sequenced, seq)) {
 		waiter.next = waiters;
 		waiters = &waiter;
 		result = wait_for_signal(&waiter, sec, nsec);
@@ -135,12 +143,18 @@ psynch_wait(user_addr_t object, int64_t sec, uint32_t nsec)
 }
 
 static bool
-consume_prepost(user_addr_t object)
+consume_prepost(user_addr_t object, mach_port_name_t thread, bool sequenced,
+		uint32_t seq)
 {
 	for (struct psynch_prepost **p = &preposts; *p != NULL;
 			p = &(*p)->next) {
 		struct psynch_prepost *prepost = *p;
-		if (prepost->object != object) {
+		if (prepost->object != object
+				|| (prepost->thread != MACH_PORT_NULL
+						&& prepost->thread != thread)
+				|| (prepost->sequenced && sequenced
+						&& (int32_t)(seq - prepost->upto)
+								> 0)) {
 			continue;
 		}
 		if (--prepost->count == 0) {
@@ -204,8 +218,9 @@ sys_psynch_cvsignal(user_addr_t cv, uint64_t cvlsgen, uint32_t cvugen,
 #endif
 	pthread_mutex_lock(&lock);
 	uint32_t woken = wake_waiters(cv, thread_port, 1);
-	if (woken == 0 && thread_port == 0 && pending_waiters(cvlsgen) != 0) {
-		add_prepost(cv, 1);
+	if (woken == 0 && pending_waiters(cvlsgen) != 0) {
+		add_prepost(cv, thread_port, true,
+				(uint32_t)cvlsgen & PTHRW_COUNT_MASK, 1);
 		woken = 1;
 	}
 	pthread_mutex_unlock(&lock);
@@ -225,7 +240,9 @@ sys_psynch_cvbroad(user_addr_t cv, uint64_t cvlsgen, uint64_t cvudgen,
 	pthread_mutex_lock(&lock);
 	uint32_t woken = wake_waiters(cv, MACH_PORT_NULL, pending);
 	if (woken < pending) {
-		add_prepost(cv, pending - woken);
+		add_prepost(cv, MACH_PORT_NULL, true,
+				(uint32_t)cvlsgen & PTHRW_COUNT_MASK,
+				pending - woken);
 	}
 	pthread_mutex_unlock(&lock);
 	return pending * PTHRW_INC;
@@ -236,7 +253,7 @@ psynch_wake_one(user_addr_t object)
 {
 	pthread_mutex_lock(&lock);
 	if (wake_waiters(object, MACH_PORT_NULL, 1) == 0) {
-		add_prepost(object, 1);
+		add_prepost(object, MACH_PORT_NULL, false, 0, 1);
 	}
 	pthread_mutex_unlock(&lock);
 }
@@ -264,17 +281,25 @@ wake_waiters(user_addr_t object, mach_port_name_t thread, uint32_t count)
 }
 
 static void
-add_prepost(user_addr_t object, uint32_t count)
+add_prepost(user_addr_t object, mach_port_name_t thread, bool sequenced,
+		uint32_t upto, uint32_t count)
 {
 	for (struct psynch_prepost *p = preposts; p != NULL; p = p->next) {
-		if (p->object == object) {
+		if (p->object == object && p->thread == thread
+				&& p->sequenced == sequenced) {
 			p->count += count;
+			if ((int32_t)(upto - p->upto) > 0) {
+				p->upto = upto;
+			}
 			return;
 		}
 	}
 
 	struct psynch_prepost *prepost = calloc(1, sizeof(*prepost));
 	prepost->object = object;
+	prepost->thread = thread;
+	prepost->sequenced = sequenced;
+	prepost->upto = upto;
 	prepost->count = count;
 	prepost->next = preposts;
 	preposts = prepost;
@@ -467,7 +492,8 @@ rw_grant(user_addr_t rwlock, uint32_t sseq)
 
 	bool writers = false;
 	for (struct rw_waiter *w = rw_waiters; w != NULL; w = w->next) {
-		if (w->rwlock == rwlock && w->write && w != first) {
+		if (w->rwlock == rwlock && !w->granted && w->write
+				&& w != first) {
 			writers = true;
 		}
 	}
@@ -503,7 +529,7 @@ static struct rw_waiter *
 rw_waiter_at(user_addr_t rwlock, uint32_t seq)
 {
 	for (struct rw_waiter *w = rw_waiters; w != NULL; w = w->next) {
-		if (w->rwlock == rwlock && w->seq == seq) {
+		if (w->rwlock == rwlock && w->seq == seq && !w->granted) {
 			return w;
 		}
 	}
