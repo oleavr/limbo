@@ -40,6 +40,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "handler.h"
@@ -150,12 +151,23 @@ sys_posix_spawn(void *pid, const char *path, void *adesc, char **argv,
 	char buffer[PATH_MAX];
 	char **script_argv;
 	const char *host = exec_path(path, argv, buffer, &script_argv);
-	int result = posix_spawn(pid, host, &actions, &attr,
-			(script_argv != NULL) ? script_argv : argv, envp);
+	char **env = exec_environment(envp);
+	pid_t child;
+	int result = posix_spawn(&child, host, &actions, &attr,
+			(script_argv != NULL) ? script_argv : argv, env);
+	if (env != envp) {
+		free(env);
+	}
 	free(script_argv);
 	posix_spawn_file_actions_destroy(&actions);
 	posix_spawnattr_destroy(&attr);
-	return (result == 0) ? 0 : err_map(result);
+	if (result != 0) {
+		return err_map(result);
+	}
+	if (pid != NULL) {
+		*(pid_t *)pid = child;
+	}
+	return 0;
 }
 
 static int
@@ -191,8 +203,12 @@ spawn_exec(const char *path, const struct darwin_spawnattr *attrp,
 	char buffer[PATH_MAX];
 	char **script_argv;
 	const char *host = exec_path(path, argv, buffer, &script_argv);
-	execve(host, (script_argv != NULL) ? script_argv : argv, envp);
+	char **env = exec_environment(envp);
+	execve(host, (script_argv != NULL) ? script_argv : argv, env);
 	int err = errno;
+	if (env != envp) {
+		free(env);
+	}
 	free(script_argv);
 	return err_map(err);
 }
@@ -202,6 +218,7 @@ spawn_exec(const char *path, const struct darwin_spawnattr *attrp,
 static const char *script_path(const char *path, const char *host,
 		char **argv, char *buffer, char ***script_argv);
 static const char *limbo_path(const char *host, char ***argv);
+static bool has_variable(char **envp, const char *variable);
 
 const char *
 exec_path(const char *path, char **argv, char *buffer, char ***script_argv)
@@ -215,6 +232,51 @@ exec_path(const char *path, char **argv, char *buffer, char ***script_argv)
 		*script_argv = limbo_argv;
 	}
 	return limbo;
+}
+
+char **
+exec_environment(char **envp)
+{
+	extern char **environ;
+	size_t count = 0, missing = 0;
+	while (envp != NULL && envp[count] != NULL) {
+		count++;
+	}
+	for (char **own = environ; *own != NULL; own++) {
+		missing += strncmp(*own, "LIMBO_", 6) == 0
+				&& !has_variable(envp, *own);
+	}
+	if (missing == 0) {
+		return envp;
+	}
+	char **result = malloc((count + missing + 1) * sizeof(char *));
+	if (result == NULL) {
+		return envp;
+	}
+	if (count != 0) {
+		memcpy(result, envp, count * sizeof(char *));
+	}
+	for (char **own = environ; *own != NULL; own++) {
+		if (strncmp(*own, "LIMBO_", 6) == 0
+				&& !has_variable(envp, *own)) {
+			result[count++] = *own;
+		}
+	}
+	result[count] = NULL;
+	return result;
+}
+
+static bool
+has_variable(char **envp, const char *variable)
+{
+	size_t length = strcspn(variable, "=");
+	for (char **var = envp; var != NULL && *var != NULL; var++) {
+		if (strncmp(*var, variable, length) == 0
+				&& (*var)[length] == '=') {
+			return true;
+		}
+	}
+	return false;
 }
 
 static const char *
