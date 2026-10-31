@@ -34,6 +34,7 @@
 #include <unistd.h>
 
 #include "ipc.h"
+#include "mach_vm.h"
 #include "shared_cache.h"
 
 #ifdef __arm64__
@@ -187,11 +188,12 @@ host_processor_info(host_t host, processor_flavor_t flavor,
 		return KERN_INVALID_ARGUMENT;
 	}
 	size_t size = (size_t)count * words * sizeof(natural_t);
-	natural_t *info = mmap(NULL, size, PROT_READ | PROT_WRITE,
-			MAP_PRIVATE | MAP_ANON, -1, 0);
-	if (info == MAP_FAILED) {
+	mach_vm_address_t address = 0;
+	if (_kernelrpc_mach_vm_allocate(0, &address, size, VM_FLAGS_ANYWHERE)
+			!= KERN_SUCCESS) {
 		return KERN_RESOURCE_SHORTAGE;
 	}
+	natural_t *info = (natural_t *)address;
 	for (natural_t i = 0; i < count; i++) {
 		natural_t *entry = info + i * words;
 		if (flavor == PROCESSOR_CPU_LOAD_INFO) {
