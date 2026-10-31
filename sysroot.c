@@ -63,9 +63,10 @@ sysroot_open(void)
 	}
 	root_length = strlen(root);
 	struct stat s;
-	stat(root, &s);
-	root_dev = s.st_dev;
-	root_ino = s.st_ino;
+	if (stat(root, &s) == 0) {
+		root_dev = s.st_dev;
+		root_ino = s.st_ino;
+	}
 
 	return 0;
 }
