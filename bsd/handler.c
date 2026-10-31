@@ -82,6 +82,7 @@
 
 #include "bsd/credentials.h"
 #include "bsd/hostuuid.h"
+#include "bsd/process.h"
 #include "commpage.h"
 #include "fsevents.h"
 #include "icmp.h"

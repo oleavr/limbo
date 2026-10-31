@@ -33,6 +33,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "broker.h"
 #include "process.h"
 
 static void read_ids(FILE *status, const char *key, uint32_t ids[3]);
@@ -66,11 +67,12 @@ process_lookup(int32_t pid, struct process *process)
 			(int)(fields - comm), comm);
 	long resident = 0;
 	sscanf(fields + 2,
-			"%*c %d %d %*d %*d %d %*u %*u %*u %*u %*u %lu %lu %*d "
+			"%*c %d %d %d %u %d %*u %*u %*u %*u %*u %lu %lu %*d "
 			"%*d %*d %d %d %*d %lu %lu %ld",
-			&process->ppid, &process->pgid, &process->tpgid,
-			&process->user_ticks, &process->system_ticks,
-			&process->nice, &process->threads, &process->start_ticks,
+			&process->ppid, &process->pgid, &process->session,
+			&process->tty, &process->tpgid, &process->user_ticks,
+			&process->system_ticks, &process->nice,
+			&process->threads, &process->start_ticks,
 			&process->virtual_size, &resident);
 	process->resident_pages = resident > 0 ? (uint64_t)resident : 0;
 
@@ -83,6 +85,18 @@ process_lookup(int32_t pid, struct process *process)
 	read_ids(status, "Gid:", process->gid);
 	fclose(status);
 	return 0;
+}
+
+int32_t
+process_terminal(const struct process *process)
+{
+	if (process->tty == 0) {
+		return -1;
+	}
+	uint32_t major = (process->tty >> 8) & 0xfff;
+	uint32_t minor = (process->tty & 0xff)
+			| ((process->tty >> 12) & 0xfff00);
+	return (int32_t)(major << 24 | minor);
 }
 
 void
@@ -129,17 +143,12 @@ boot_time(void)
 	return btime;
 }
 
-ssize_t
-process_cmdline(int32_t pid, char *buffer, size_t size)
-{
-	return read_process_file(pid, "cmdline", buffer, size);
-}
-
 bool
 process_executable_path(int32_t pid, char *path)
 {
 	char arguments[PATH_MAX * 2];
-	ssize_t size = read_process_file(pid, "cmdline", arguments, sizeof(arguments) - 1);
+	ssize_t size = read_process_file(
+			pid, "cmdline", arguments, sizeof(arguments) - 1);
 	if (size <= 0) {
 		return false;
 	}
@@ -149,6 +158,37 @@ process_executable_path(int32_t pid, char *path)
 		return false;
 	}
 	return realpath(arguments + first, path) != NULL;
+}
+
+ssize_t
+process_cmdline(int32_t pid, char *buffer, size_t size)
+{
+	return read_process_file(pid, "cmdline", buffer, size);
+}
+
+bool
+process_environment_value(
+		int32_t pid, const char *name, char *value, size_t size)
+{
+	size_t capacity = 64 * 1024;
+	char *environment = malloc(capacity);
+	ssize_t length = read_process_file(
+			pid, "environ", environment, capacity - 1);
+	if (length > 0) {
+		environment[length] = '\0';
+	}
+	bool found = false;
+	size_t name_length = strlen(name);
+	for (char *entry = environment; !found && entry < environment + length;
+			entry += strlen(entry) + 1) {
+		if (strncmp(entry, name, name_length) == 0
+				&& entry[name_length] == '=') {
+			snprintf(value, size, "%s", entry + name_length + 1);
+			found = true;
+		}
+	}
+	free(environment);
+	return found;
 }
 
 static ssize_t
