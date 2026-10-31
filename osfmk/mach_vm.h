@@ -29,6 +29,8 @@
 
 #include <mach/mach_types.h>
 #include <stdbool.h>
+kern_return_t mach_vm_reclaim_update_kernel_accounting(
+		uint64_t *bytes_reclaimed, uint64_t *next_deadline);
 
 kern_return_t _kernelrpc_mach_vm_allocate(vm_task_entry_t target,
 		mach_vm_address_t *address, mach_vm_size_t size, int flags);
