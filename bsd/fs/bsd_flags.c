@@ -33,10 +33,15 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <sys/stat.h>
 #include <sys/xattr.h>
 #include <unistd.h>
 
-static void fd_path(int fd, char *buffer, size_t size);
+static void
+fd_path(int fd, char *buffer, size_t size)
+{
+	snprintf(buffer, size, "/proc/thread-self/fd/%d", fd);
+}
 
 int
 bsd_flags_set(int fd, uint32_t flags)
@@ -54,6 +59,19 @@ bsd_flags_set(int fd, uint32_t flags)
 }
 
 uint32_t
+bsd_flags_get(int fd)
+{
+	char path[48];
+	fd_path(fd, path, sizeof(path));
+	uint32_t flags = 0;
+	if (getxattr(path, BSD_FLAGS_XATTR, &flags, sizeof(flags))
+			!= sizeof(flags)) {
+		return 0;
+	}
+	return flags;
+}
+
+uint32_t
 bsd_flags_get_at(int dirfd, const char *host_path, int at_flags)
 {
 	int fd = openat(dirfd, host_path,
@@ -68,26 +86,10 @@ bsd_flags_get_at(int dirfd, const char *host_path, int at_flags)
 	if (fd == -1) {
 		return 0;
 	}
-	uint32_t flags = bsd_flags_get(fd);
+	struct stat s;
+	uint32_t flags = (fstat(fd, &s) == 0 && !S_ISLNK(s.st_mode))
+			? bsd_flags_get(fd)
+			: 0;
 	close(fd);
 	return flags;
-}
-
-uint32_t
-bsd_flags_get(int fd)
-{
-	char path[48];
-	fd_path(fd, path, sizeof(path));
-	uint32_t flags = 0;
-	if (getxattr(path, BSD_FLAGS_XATTR, &flags, sizeof(flags))
-			!= sizeof(flags)) {
-		return 0;
-	}
-	return flags;
-}
-
-static void
-fd_path(int fd, char *buffer, size_t size)
-{
-	snprintf(buffer, size, "/proc/thread-self/fd/%d", fd);
 }
