@@ -83,6 +83,7 @@
 #include "bsd/credentials.h"
 #include "bsd/hostuuid.h"
 #include "commpage.h"
+#include "fsevents.h"
 #include "icmp.h"
 #include "kctl.h"
 #include "net.h"
@@ -217,6 +218,9 @@ sys_read(int fd, user_addr_t cbuf, user_size_t nbyte)
 	if (net_is_bpf(fd)) {
 		return net_bpf_read(fd, cbuf, nbyte);
 	}
+	if (fsevents_is_watcher(fd)) {
+		return fsevents_read(fd, cbuf, nbyte);
+	}
 	return errno_map(read(fd, cbuf, nbyte));
 }
 
@@ -293,6 +297,9 @@ sys_open(user_addr_t path, int flags, int mode)
 	if (net_is_bpf_path(path)) {
 		return net_bpf_open(flags & _O_NONBLOCK, flags & _O_CLOEXEC);
 	}
+	if (fsevents_is_device_path(path)) {
+		return fsevents_open(flags & _O_CLOEXEC);
+	}
 	char buffer[PATH_MAX];
 	return errno_map(open(
 			sysroot_host_path(path, open_follow(flags), buffer),
@@ -359,6 +366,7 @@ sys_sys_close(int fd)
 	route_close(fd);
 	kctl_close(fd);
 	icmp_close(fd);
+	fsevents_close(fd);
 	return errno_map(close(fd));
 }
 
@@ -1046,6 +1054,10 @@ sys_ioctl(int fd, uint64_t com, void *data)
 		return result;
 	}
 	result = kctl_ioctl(fd, com, data);
+	if (result != 1) {
+		return result;
+	}
+	result = fsevents_ioctl(fd, com, data);
 	if (result != 1) {
 		return result;
 	}
@@ -4352,6 +4364,9 @@ sys_openat(int fd, user_addr_t path, int flags, int mode)
 	fprintf(stderr, "openat(%p, \"%s\", %p, %p)\n", (void *)fd,
 			(char *)path, (void *)flags, (void *)mode);
 #endif
+	if (fsevents_is_device_path(path)) {
+		return fsevents_open(flags & _O_CLOEXEC);
+	}
 	char buffer[PATH_MAX];
 	return errno_map(openat(at_fd(fd),
 			sysroot_host_path(path, open_follow(flags), buffer),

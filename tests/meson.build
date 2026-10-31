@@ -20,6 +20,7 @@ guest_tests = [
   'cxx.cpp',
   'dispatch.c',
   'filesystem.c',
+  'fsevents.c',
   'hello.c',
   'kqueue.c',
   'kqueue_dispatch2.c',
