@@ -276,19 +276,6 @@ mach_vm_wire(host_priv_t host_priv, vm_map_t task, mach_vm_address_t address,
 }
 
 kern_return_t
-host_processor_sets(host_priv_t host_priv,
-		processor_set_name_array_t *processor_sets,
-		mach_msg_type_number_t *processor_setsCnt)
-{
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "host_processor_sets(%p, %p, %p)\n", (void *)host_priv,
-			(void *)processor_sets, (void *)processor_setsCnt);
-#endif
-
-	return KERN_INVALID_HOST;
-}
-
-kern_return_t
 host_processor_set_priv(host_priv_t host_priv,
 		processor_set_name_t set_name, processor_set_t *set)
 {

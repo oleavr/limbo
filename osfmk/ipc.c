@@ -101,6 +101,7 @@ struct clock_subsystem;
 struct task_restartable_subsystem;
 struct host_priv_subsystem;
 struct is_iokit_subsystem;
+struct processor_set_subsystem;
 struct mach_voucher_subsystem;
 
 extern const struct task_subsystem task_subsystem;
@@ -112,6 +113,7 @@ extern const struct clock_subsystem clock_subsystem;
 extern const struct task_restartable_subsystem task_restartable_subsystem;
 extern const struct host_priv_subsystem host_priv_subsystem;
 extern const struct is_iokit_subsystem is_iokit_subsystem;
+extern const struct processor_set_subsystem processor_set_subsystem;
 extern const struct mach_voucher_subsystem mach_voucher_subsystem;
 extern const struct mig_subsystem x_bootstrap_subsystem;
 
@@ -126,6 +128,7 @@ static const struct mig_subsystem *const kobject_subsystems[] = {
 		&x_bootstrap_subsystem,
 		(const struct mig_subsystem *)&host_priv_subsystem,
 		(const struct mig_subsystem *)&is_iokit_subsystem,
+		(const struct mig_subsystem *)&processor_set_subsystem,
 		(const struct mig_subsystem *)&mach_voucher_subsystem,
 };
 
