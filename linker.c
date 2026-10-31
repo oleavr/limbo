@@ -171,17 +171,34 @@ linker_link(const char *path, const char **dylinker_path, uintptr_t *entry)
 				start = base_address + cmd->vmaddr;
 			}
 
-			void *seg = mmap((void *)(base_address + cmd->vmaddr),
-					cmd->vmsize, prot,
-					MAP_PRIVATE | MAP_FIXED_NOREPLACE, f,
-					offset + cmd->fileoff);
+			uint64_t page = (uint64_t)getpagesize();
+			uint64_t in_file = (cmd->filesize + page - 1)
+					& ~(page - 1);
+			if (in_file > cmd->vmsize) {
+				in_file = cmd->vmsize;
+			}
+			uint8_t *at = (uint8_t *)(base_address + cmd->vmaddr);
+			if (in_file != 0
+					&& mmap(at, in_file, prot,
+							   MAP_PRIVATE | MAP_FIXED_NOREPLACE,
+							   f,
+							   offset + cmd->fileoff)
+							== MAP_FAILED) {
+				goto error;
+			}
+			if (in_file < cmd->vmsize
+					&& mmap(at + in_file,
+							   cmd->vmsize - in_file,
+							   prot,
+							   MAP_PRIVATE | MAP_ANON
+									   | MAP_FIXED_NOREPLACE,
+							   -1, 0)
+							== MAP_FAILED) {
+				goto error;
+			}
 
 			/* HACK: Zero the BSS */
 			zero_bss(cmd, base_address);
-
-			if (seg == MAP_FAILED) {
-				goto error;
-			}
 		} break;
 		/* The dynamic linker that handles this binary */
 		case LC_LOAD_DYLINKER: {
