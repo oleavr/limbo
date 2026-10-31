@@ -25,13 +25,16 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "../xnu-errno.h"
 #include "fileid.h"
@@ -47,8 +50,47 @@ struct slot {
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static struct slot slots[SLOT_COUNT];
 
+#define SHARED_PATH     "/private/var/db/limbo/fileids"
+#define SHARED_PATH_MAX 248
+
+struct shared_slot {
+	uint64_t id;
+	char path[SHARED_PATH_MAX];
+};
+
+static struct shared_slot *shared_slots;
+static pthread_once_t shared_once = PTHREAD_ONCE_INIT;
+
 static struct slot *slot_for(uint64_t id);
+static struct shared_slot *shared_slot_for(uint64_t id);
 static bool still_names(const char *path, uint64_t id);
+
+static void
+map_shared(void)
+{
+	char buffer[PATH_MAX];
+	int fd = open(sysroot_host_path(SHARED_PATH, 0, buffer),
+			O_RDWR | O_CREAT | O_CLOEXEC, 0666);
+	if (fd == -1) {
+		return;
+	}
+	struct stat s;
+	if (fstat(fd, &s) == 0 && (s.st_mode & 0777) != 0666) {
+		fchmod(fd, 0666);
+	}
+	size_t size = SLOT_COUNT * sizeof(struct shared_slot);
+	if (fstat(fd, &s) == 0 && (size_t)s.st_size < size
+			&& ftruncate(fd, (off_t)size) != 0) {
+		close(fd);
+		return;
+	}
+	void *mapping = mmap(
+			NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	close(fd);
+	if (mapping != MAP_FAILED) {
+		shared_slots = mapping;
+	}
+}
 
 void
 fileid_remember(uint64_t id, const char *path)
@@ -65,6 +107,20 @@ fileid_remember(uint64_t id, const char *path)
 		slot->path = strdup(path);
 	}
 	pthread_mutex_unlock(&lock);
+
+	pthread_once(&shared_once, map_shared);
+	size_t length = strlen(path);
+	struct shared_slot *shared = shared_slot_for(id);
+	if (shared == NULL || length >= SHARED_PATH_MAX) {
+		return;
+	}
+	if (__atomic_load_n(&shared->id, __ATOMIC_ACQUIRE) == id
+			&& strncmp(shared->path, path, SHARED_PATH_MAX) == 0) {
+		return;
+	}
+	__atomic_store_n(&shared->id, 0, __ATOMIC_RELEASE);
+	memcpy(shared->path, path, length + 1);
+	__atomic_store_n(&shared->id, id, __ATOMIC_RELEASE);
 }
 
 int
@@ -82,7 +138,22 @@ fileid_path(uint64_t id, char *buffer, size_t size)
 		}
 		pthread_mutex_unlock(&lock);
 		if (!found || !still_names(path, id)) {
-			return _ENOENT;
+			pthread_once(&shared_once, map_shared);
+			struct shared_slot *shared = shared_slot_for(id);
+			found = false;
+			if (shared != NULL
+					&& __atomic_load_n(&shared->id,
+							   __ATOMIC_ACQUIRE)
+							== id) {
+				memcpy(path, shared->path, SHARED_PATH_MAX);
+				path[SHARED_PATH_MAX - 1] = '\0';
+				found = __atomic_load_n(&shared->id,
+							__ATOMIC_ACQUIRE)
+						== id;
+			}
+			if (!found || !still_names(path, id)) {
+				return _ENOENT;
+			}
 		}
 	}
 
@@ -98,6 +169,15 @@ static struct slot *
 slot_for(uint64_t id)
 {
 	return &slots[(id * 0x9e3779b97f4a7c15ull) >> 48];
+}
+
+static struct shared_slot *
+shared_slot_for(uint64_t id)
+{
+	if (shared_slots == NULL) {
+		return NULL;
+	}
+	return &shared_slots[(id * 0x9e3779b97f4a7c15ull) >> 48];
 }
 
 static bool
