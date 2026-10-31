@@ -69,7 +69,7 @@ main(int argc, char *argv[])
 	char output[PATH_MAX] = {0};
 	read_all(fds[0], output, sizeof(output));
 	close(fds[0]);
-	CHECK(strcmp(output, "/tmp\n") == 0);
+	CHECK(strcmp(output, "/private/tmp\n") == 0);
 	CHECK(wait_child(pid) == 0);
 	posix_spawn_file_actions_destroy(&actions);
 
@@ -103,6 +103,27 @@ main(int argc, char *argv[])
 	memset(output, 0, sizeof(output));
 	read_all(fds[0], output, sizeof(output));
 	CHECK(strcmp(output, "echo\n") == 0);
+	CHECK(wait_child(pid) == 0);
+
+	CHECK(pipe(fds) == 0);
+	pid = fork();
+	CHECK(pid != -1);
+	if (pid == 0) {
+		posix_spawn_file_actions_init(&actions);
+		posix_spawn_file_actions_adddup2(
+				&actions, fds[1], STDOUT_FILENO);
+		posix_spawn_file_actions_addclose(&actions, fds[0]);
+		posix_spawn_file_actions_addchdir(&actions, "/tmp");
+		posix_spawnattr_init(&attr);
+		posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETEXEC);
+		char *argv[] = {self, "pwd", NULL};
+		posix_spawn(NULL, self, &actions, &attr, argv, environ);
+		_exit(127);
+	}
+	close(fds[1]);
+	memset(output, 0, sizeof(output));
+	read_all(fds[0], output, sizeof(output));
+	CHECK(strcmp(output, "/private/tmp\n") == 0);
 	CHECK(wait_child(pid) == 0);
 	return 0;
 }
