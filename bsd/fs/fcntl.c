@@ -29,18 +29,21 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include <dirent.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
+#include "bsd/codesign.h"
 #include "bsd/xnu-errno.h"
 #include "sysroot.h"
-#include "bsd/codesign.h"
 
 #define _F_DUPFD                    0
 #define _F_GETFD                    1
@@ -162,9 +165,10 @@ struct darwin_fpunchhole {
 };
 
 static int preallocate(int fd, struct darwin_fstore *store);
+static int record_lock(int fd, int cmd, struct darwin_flock *lock);
 static int record_lock_timeout(
 		int fd, int cmd, struct darwin_flocktimeout *lock);
-static int record_lock(int fd, int cmd, struct darwin_flock *lock);
+static int record_lock_of_pid(int fd, struct darwin_flock *lock, bool ofd);
 static short lock_type_from_darwin(short type);
 static short lock_type_to_darwin(short type);
 
@@ -176,6 +180,11 @@ sys_sys_fcntl(int fd, int cmd, long arg)
 			(void *)arg);
 #endif
 	switch (cmd) {
+	case _F_ADDSIGS:
+	case _F_ADDFILESIGS:
+	case _F_ADDFILESIGS_FOR_DYLD_SIM:
+	case _F_ADDFILESUPPL:
+		return 0;
 	case _F_ADDFILESIGS_RETURN: {
 		unsigned long *data = (void *)arg;
 		data[0] = data[1];
@@ -214,6 +223,10 @@ sys_sys_fcntl(int fd, int cmd, long arg)
 		return record_lock(fd, F_OFD_SETLK, (void *)arg);
 	case _F_OFD_SETLKW:
 		return record_lock(fd, F_OFD_SETLKW, (void *)arg);
+	case _F_GETLKPID:
+		return record_lock_of_pid(fd, (void *)arg, false);
+	case _F_OFD_GETLKPID:
+		return record_lock_of_pid(fd, (void *)arg, true);
 	case _F_SETLKWTIMEOUT:
 		return record_lock_timeout(fd, F_SETLK, (void *)arg);
 	case _F_OFD_SETLKWTIMEOUT:
@@ -248,7 +261,7 @@ sys_sys_fcntl(int fd, int cmd, long arg)
 			int32_t info_request;
 			int32_t sig_is_platform;
 		} *info = (void *)arg;
-		if (info->info_request != 1 ) {
+		if (info->info_request != 1 /* GETSIGSINFO_PLATFORM_BINARY */) {
 			return _EINVAL;
 		}
 		bool platform;
@@ -261,12 +274,6 @@ sys_sys_fcntl(int fd, int cmd, long arg)
 		return 0;
 	} break;
 	case _F_CHECK_LV:
-		return 0;
-	/* Signatures are taken, as the code isn't checked against them */
-	case _F_ADDSIGS:
-	case _F_ADDFILESIGS:
-	case _F_ADDFILESIGS_FOR_DYLD_SIM:
-	case _F_ADDFILESUPPL:
 		return 0;
 	case _F_SPECULATIVE_READ:
 		return 0;
@@ -292,39 +299,6 @@ sys_sys_fcntl(int fd, int cmd, long arg)
 	}
 
 	unimplemented();
-}
-
-static int
-preallocate(int fd, struct darwin_fstore *store)
-{
-	if (store->fst_flags
-			& ~(_F_ALLOCATECONTIG | _F_ALLOCATEALL
-					| _F_ALLOCATEPERSIST)) {
-		return _EINVAL;
-	}
-	if (store->fst_length < 0) {
-		return _EINVAL;
-	}
-	off_t start = store->fst_offset;
-	if (store->fst_posmode == _F_PEOFPOSMODE) {
-		struct stat s;
-		if (fstat(fd, &s) == -1) {
-			return err_map(errno);
-		}
-		start += (off_t)s.st_blocks * 512;
-	} else if (store->fst_posmode != _F_VOLPOSMODE) {
-		return _EINVAL;
-	}
-	store->fst_bytesalloc = 0;
-	if (store->fst_length == 0) {
-		return 0;
-	}
-	if (fallocate(fd, FALLOC_FL_KEEP_SIZE, start, store->fst_length)
-			== -1) {
-		return err_map(errno);
-	}
-	store->fst_bytesalloc = store->fst_length;
-	return 0;
 }
 
 static int
@@ -363,6 +337,151 @@ status_flags_from_darwin(int flags)
 }
 
 static int
+preallocate(int fd, struct darwin_fstore *store)
+{
+	if (store->fst_flags
+			& ~(_F_ALLOCATECONTIG | _F_ALLOCATEALL
+					| _F_ALLOCATEPERSIST)) {
+		return _EINVAL;
+	}
+	if (store->fst_length < 0) {
+		return _EINVAL;
+	}
+	off_t start = store->fst_offset;
+	if (store->fst_posmode == _F_PEOFPOSMODE) {
+		struct stat s;
+		if (fstat(fd, &s) == -1) {
+			return err_map(errno);
+		}
+		start += (off_t)s.st_blocks * 512;
+	} else if (store->fst_posmode != _F_VOLPOSMODE) {
+		return _EINVAL;
+	}
+	store->fst_bytesalloc = 0;
+	if (store->fst_length == 0) {
+		return 0;
+	}
+	if (fallocate(fd, FALLOC_FL_KEEP_SIZE, start, store->fst_length)
+			== -1) {
+		return err_map(errno);
+	}
+	store->fst_bytesalloc = store->fst_length;
+	return 0;
+}
+
+static int
+record_lock(int fd, int cmd, struct darwin_flock *lock)
+{
+	struct flock host = {
+			.l_type = lock_type_from_darwin(lock->l_type),
+			.l_whence = lock->l_whence,
+			.l_start = lock->l_start,
+			.l_len = lock->l_len,
+	};
+	if (fcntl(fd, cmd, &host) == -1) {
+		return err_map(errno);
+	}
+	if (cmd == F_GETLK || cmd == F_OFD_GETLK) {
+		lock->l_type = lock_type_to_darwin(host.l_type);
+		lock->l_whence = host.l_whence;
+		lock->l_start = host.l_start;
+		lock->l_len = host.l_len;
+		lock->l_pid = host.l_pid;
+	}
+	return 0;
+}
+
+static int
+record_lock_of_pid(int fd, struct darwin_flock *lock, bool ofd)
+{
+	if (lock->l_pid == -1) {
+		return record_lock(fd, ofd ? F_OFD_GETLK : F_GETLK, lock);
+	}
+	struct stat file;
+	if (fstat(fd, &file) == -1) {
+		return err_map(errno);
+	}
+	off_t start = lock->l_start;
+	if (lock->l_whence == SEEK_CUR) {
+		start += lseek(fd, 0, SEEK_CUR);
+	} else if (lock->l_whence == SEEK_END) {
+		start += file.st_size;
+	}
+	off_t end = lock->l_len == 0 ? INT64_MAX : start + lock->l_len - 1;
+	pid_t pid = lock->l_pid;
+	bool want_write = lock->l_type == _F_WRLCK;
+	lock->l_type = _F_UNLCK;
+
+	char path[64];
+	snprintf(path, sizeof(path), "/proc/%d/fd", (int)pid);
+	DIR *dir = opendir(path);
+	if (dir == NULL) {
+		return 0;
+	}
+	struct dirent *entry;
+	bool found = false;
+	while (!found && (entry = readdir(dir)) != NULL) {
+		if (entry->d_name[0] == '.') {
+			continue;
+		}
+		char name[PATH_MAX];
+		struct stat other;
+		snprintf(name, sizeof(name), "/proc/%d/fd/%s", (int)pid,
+				entry->d_name);
+		if (stat(name, &other) == -1 || other.st_dev != file.st_dev
+				|| other.st_ino != file.st_ino) {
+			continue;
+		}
+		snprintf(name, sizeof(name), "/proc/%d/fdinfo/%s", (int)pid,
+				entry->d_name);
+		FILE *info = fopen(name, "r");
+		if (info == NULL) {
+			continue;
+		}
+		char line[256];
+		while (!found && fgets(line, sizeof(line), info) != NULL) {
+			char class[16], type[16], last[32];
+			long long first;
+			int owner;
+			if (strncmp(line, "lock:", 5) != 0
+					|| sscanf(line,
+							   "lock: %*d: %15s "
+							   "%*s "
+							   "%15s "
+							   "%d %*s %lld %31s",
+							   class, type, &owner,
+							   &first, last)
+							!= 5) {
+				continue;
+			}
+			if (ofd ? strcmp(class, "OFDLCK") != 0
+				: strcmp(class, "POSIX") != 0 || owner != (int)pid) {
+				continue;
+			}
+			bool write = strcmp(type, "WRITE") == 0;
+			long long held_end = strcmp(last, "EOF") == 0
+					? INT64_MAX
+					: strtoll(last, NULL, 10);
+			if (first > end || held_end < start
+					|| (!write && !want_write)) {
+				continue;
+			}
+			found = true;
+			lock->l_type = write ? _F_WRLCK : _F_RDLCK;
+			lock->l_whence = SEEK_SET;
+			lock->l_start = first;
+			lock->l_len = held_end == INT64_MAX
+					? 0
+					: held_end - first + 1;
+			lock->l_pid = pid;
+		}
+		fclose(info);
+	}
+	closedir(dir);
+	return 0;
+}
+
+static int
 record_lock_timeout(int fd, int cmd, struct darwin_flocktimeout *lock)
 {
 	struct timespec deadline;
@@ -388,28 +507,6 @@ record_lock_timeout(int fd, int cmd, struct darwin_flocktimeout *lock)
 		}
 		nanosleep(&(struct timespec){.tv_nsec = 1000000}, NULL);
 	}
-}
-
-static int
-record_lock(int fd, int cmd, struct darwin_flock *lock)
-{
-	struct flock host = {
-			.l_type = lock_type_from_darwin(lock->l_type),
-			.l_whence = lock->l_whence,
-			.l_start = lock->l_start,
-			.l_len = lock->l_len,
-	};
-	if (fcntl(fd, cmd, &host) == -1) {
-		return err_map(errno);
-	}
-	if (cmd == F_GETLK || cmd == F_OFD_GETLK) {
-		lock->l_type = lock_type_to_darwin(host.l_type);
-		lock->l_whence = host.l_whence;
-		lock->l_start = host.l_start;
-		lock->l_len = host.l_len;
-		lock->l_pid = host.l_pid;
-	}
-	return 0;
 }
 
 static short
