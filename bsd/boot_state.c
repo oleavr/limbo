@@ -32,6 +32,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/file.h>
@@ -54,11 +55,21 @@ boot_id(char boot[40])
 	}
 }
 
+#define STATES_MAX 32
+static struct boot_state *_Atomic states[STATES_MAX];
+static pthread_once_t fork_hook = PTHREAD_ONCE_INIT;
+
+static void remember(struct boot_state *state);
+static void register_fork_hook(void);
+static void forget_all(void);
+static void forget(struct boot_state *state);
 static int open_file(const char *path);
 
 void *
 boot_state_begin(struct boot_state *state)
 {
+	pthread_once(&fork_hook, register_fork_hook);
+	remember(state);
 	pthread_mutex_lock(&state->lock);
 	if (state->fd == -1) {
 		char buffer[PATH_MAX];
@@ -88,6 +99,45 @@ boot_state_begin(struct boot_state *state)
 		memcpy(header->boot, boot, sizeof(boot));
 	}
 	return state->data;
+}
+
+static void
+remember(struct boot_state *state)
+{
+	for (size_t i = 0; i < STATES_MAX; i++) {
+		struct boot_state *expected = NULL;
+		if (atomic_compare_exchange_strong(&states[i], &expected, state)
+				|| expected == state) {
+			return;
+		}
+	}
+}
+
+static void
+register_fork_hook(void)
+{
+	pthread_atfork(NULL, NULL, forget_all);
+}
+
+static void
+forget_all(void)
+{
+	for (size_t i = 0; i < STATES_MAX; i++) {
+		struct boot_state *state = atomic_load(&states[i]);
+		if (state != NULL) {
+			forget(state);
+		}
+	}
+}
+
+static void
+forget(struct boot_state *state)
+{
+	pthread_mutex_init(&state->lock, NULL);
+	if (state->fd != -1) {
+		close(state->fd);
+		state->fd = -1;
+	}
 }
 
 static int
