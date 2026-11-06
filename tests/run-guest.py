@@ -57,18 +57,13 @@ def enter_namespace():
     if os.environ.get("LIMBO_TEST_USER") is not None and os.geteuid() == 0:
         enter_namespace_as_root()
         return
-    unshare = ["unshare", "--user", "--map-root-user", "--mount",
-               "--propagation", "private"]
-    command = None
-    for candidate in (unshare + ["--map-auto"], unshare):
-        try:
-            probe = subprocess.run(candidate + ["true"], capture_output=True)
-        except FileNotFoundError:
-            skip("unshare is not available")
-        if probe.returncode == 0:
-            command = candidate
-            break
-    if command is None:
+    command = ["unshare", "--user", "--map-root-user", "--map-auto",
+               "--mount", "--propagation", "private"]
+    try:
+        probe = subprocess.run(command + ["true"], capture_output=True)
+    except FileNotFoundError:
+        skip("unshare is not available")
+    if probe.returncode != 0:
         env = dict(os.environ, LIMBO_TEST_USER=f"{os.getuid()}:{os.getgid()}")
         command = ["sudo", "-n", "--preserve-env"]
     result = subprocess.run(command + [sys.executable] + sys.argv, env=env)
