@@ -898,8 +898,11 @@ mach_vm_region(vm_map_read_t target_task, mach_vm_address_t *address,
 			(void *)flavor, (void *)info, (void *)infoCnt,
 			(void *)object_name);
 #endif
-	if (flavor != VM_REGION_BASIC_INFO_64
-			|| *infoCnt < VM_REGION_BASIC_INFO_COUNT_64) {
+	bool narrow = flavor == VM_REGION_BASIC_INFO
+			&& *infoCnt >= VM_REGION_BASIC_INFO_COUNT;
+	if (!narrow
+			&& (flavor != VM_REGION_BASIC_INFO_64
+					|| *infoCnt < VM_REGION_BASIC_INFO_COUNT_64)) {
 		unimplemented();
 	}
 	vm_prot_t protection;
@@ -909,15 +912,27 @@ mach_vm_region(vm_map_read_t target_task, mach_vm_address_t *address,
 			    &offset)) {
 		return KERN_INVALID_ADDRESS;
 	}
-	vm_region_basic_info_data_64_t *basic = (void *)info;
-	*basic = (vm_region_basic_info_data_64_t){
-			.protection = protection,
-			.max_protection = VM_PROT_ALL,
-			.inheritance = VM_INHERIT_COPY,
-			.shared = shared,
-			.offset = offset,
-	};
-	*infoCnt = VM_REGION_BASIC_INFO_COUNT_64;
+	if (narrow) {
+		vm_region_basic_info_data_t *basic = (void *)info;
+		*basic = (vm_region_basic_info_data_t){
+				.protection = protection,
+				.max_protection = VM_PROT_ALL,
+				.inheritance = VM_INHERIT_COPY,
+				.shared = shared,
+				.offset = (uint32_t)offset,
+		};
+		*infoCnt = VM_REGION_BASIC_INFO_COUNT;
+	} else {
+		vm_region_basic_info_data_64_t *basic = (void *)info;
+		*basic = (vm_region_basic_info_data_64_t){
+				.protection = protection,
+				.max_protection = VM_PROT_ALL,
+				.inheritance = VM_INHERIT_COPY,
+				.shared = shared,
+				.offset = offset,
+		};
+		*infoCnt = VM_REGION_BASIC_INFO_COUNT_64;
+	}
 	if (object_name != NULL) {
 		*object_name = MACH_PORT_NULL;
 	}
