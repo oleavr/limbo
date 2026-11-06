@@ -4701,7 +4701,13 @@ sys_openbyid_np(user_addr_t fsid, user_addr_t objid, int oflags)
 	fprintf(stderr, "openbyid_np(%p, %p, %p)\n", (void *)fsid,
 			(void *)objid, (void *)oflags);
 #endif
-	unimplemented();
+	uint64_t id;
+	memcpy(&id, objid, sizeof(id));
+	char path[PATH_MAX];
+	if (fileid_path(id, path, sizeof(path)) <= 0) {
+		return _ENOENT;
+	}
+	return sys_open(path, oflags, 0);
 }
 
 user_ssize_t
