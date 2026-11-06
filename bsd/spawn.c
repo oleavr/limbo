@@ -152,8 +152,10 @@ sys_posix_spawn(void *pid, const char *path, void *adesc, char **argv,
 
 	char buffer[PATH_MAX];
 	char **script_argv;
-	const char *host = exec_path(path, argv, buffer, &script_argv);
-	char **env = exec_environment(envp);
+	const char *executable;
+	const char *host = exec_path(
+			path, argv, buffer, &script_argv, &executable);
+	char **env = exec_environment(envp, executable);
 	pid_t child;
 	int result = posix_spawn(&child, host, &actions, &attr,
 			(script_argv != NULL) ? script_argv : argv, env);
@@ -208,8 +210,10 @@ spawn_exec(const char *path, const struct darwin_spawnattr *attrp,
 
 	char buffer[PATH_MAX];
 	char **script_argv;
-	const char *host = exec_path(path, argv, buffer, &script_argv);
-	char **env = exec_environment(envp);
+	const char *executable;
+	const char *host = exec_path(
+			path, argv, buffer, &script_argv, &executable);
+	char **env = exec_environment(envp, executable);
 	execve(host, (script_argv != NULL) ? script_argv : argv, env);
 	int err = errno;
 	if (env != envp) {
@@ -220,6 +224,7 @@ spawn_exec(const char *path, const struct darwin_spawnattr *attrp,
 }
 
 #define IMG_SHSIZE 512
+#define EXEC_PATH_VARIABLE "LIMBO_EXEC_PATH"
 
 static const char *script_path(const char *path, const char *host,
 		char **argv, char *buffer, char ***script_argv);
@@ -227,21 +232,25 @@ static const char *limbo_path(const char *host, char ***argv);
 static bool has_variable(char **envp, const char *variable);
 
 const char *
-exec_path(const char *path, char **argv, char *buffer, char ***script_argv)
+exec_path(const char *path, char **argv, char *buffer, char ***script_argv,
+		const char **executable)
 {
 	const char *host = sysroot_host_path(path, 0, buffer);
 	host = script_path(path, host, argv, buffer, script_argv);
-	char **limbo_argv = (*script_argv != NULL) ? *script_argv : argv;
+	bool script = *script_argv != NULL;
+	char **limbo_argv = script ? *script_argv : argv;
 	const char *limbo = limbo_path(host, &limbo_argv);
+	*executable = NULL;
 	if (limbo != host) {
 		free(*script_argv);
 		*script_argv = limbo_argv;
+		*executable = script ? limbo_argv[2] : path;
 	}
 	return limbo;
 }
 
 char **
-exec_environment(char **envp)
+exec_environment(char **envp, const char *executable)
 {
 	extern char **environ;
 	size_t count = 0, missing = 0;
@@ -252,10 +261,14 @@ exec_environment(char **envp)
 		missing += strncmp(*own, "LIMBO_", 6) == 0
 				&& !has_variable(envp, *own);
 	}
-	if (missing == 0) {
+	if (missing == 0 && executable == NULL) {
 		return envp;
 	}
-	char **result = malloc((count + missing + 1) * sizeof(char *));
+	size_t executable_size = executable != NULL
+			? sizeof(EXEC_PATH_VARIABLE "=") + strlen(executable)
+			: 0;
+	char **result = malloc((count + missing + 2) * sizeof(char *)
+			+ executable_size);
 	if (result == NULL) {
 		return envp;
 	}
@@ -267,6 +280,12 @@ exec_environment(char **envp)
 				&& !has_variable(envp, *own)) {
 			result[count++] = *own;
 		}
+	}
+	if (executable != NULL) {
+		char *variable = (char *)(result + count + 2);
+		snprintf(variable, executable_size, EXEC_PATH_VARIABLE "=%s",
+				executable);
+		result[count++] = variable;
 	}
 	result[count] = NULL;
 	return result;

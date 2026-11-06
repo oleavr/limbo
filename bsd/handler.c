@@ -1300,8 +1300,10 @@ sys_execve(char *fname, char **argp, char **envp)
 #endif
 	char buffer[PATH_MAX];
 	char **script_argv;
-	const char *host = exec_path(fname, argp, buffer, &script_argv);
-	char **env = exec_environment(envp);
+	const char *executable;
+	const char *host = exec_path(
+			fname, argp, buffer, &script_argv, &executable);
+	char **env = exec_environment(envp, executable);
 	int result = errno_map(execve(
 			host, (script_argv != NULL) ? script_argv : argp, env));
 	if (env != envp) {
