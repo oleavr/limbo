@@ -49,6 +49,7 @@
 #include "commpage.h"
 #include "handler.h"
 #include "kevent.h"
+#include "memorystatus.h"
 #include "osfmk/ipc.h"
 #include "signals.h"
 #include "thread.h"
@@ -63,6 +64,7 @@
 #define EVFILT_TIMER    -7
 #define EVFILT_USER     -10
 #define EVFILT_SOCK     -13
+#define EVFILT_MEMORYSTATUS -14
 #define EVFILT_WORKLOOP -17
 
 #define EV_ADD            0x0001
@@ -143,6 +145,7 @@ struct knote {
 	uint32_t proc_fflags;
 	struct proc_watch *watch;
 	uint32_t sock_interest;
+	uint32_t memorystatus_interest;
 	uint32_t sock_reported;
 };
 
@@ -247,6 +250,7 @@ static int workloop_update_owner(struct kqueue *kq,
 		const struct kevent_qos_s *change, bool stale, uint64_t state);
 static void workloop_sync_wait(struct knote *kn);
 static void kqueue_request(struct kqueue *kq, bool manager);
+static void memorystatus_check(void);
 static bool kqueue_deliverable(struct kqueue *kq, bool manager, uint32_t *qos);
 static bool knote_deliverable(struct knote *kn, bool manager);
 static bool knote_active(struct knote *kn);
@@ -689,6 +693,9 @@ knote_attach(struct kqueue *kq, const struct kevent_qos_s *change)
 					|| kn->kev.filter == EVFILT_SOCK)) {
 		fd_watch_start();
 	}
+	if (kn->kev.filter == EVFILT_MEMORYSTATUS) {
+		fd_watch_start();
+	}
 	return kn;
 }
 
@@ -745,6 +752,9 @@ knote_touch(struct knote *kn, const struct kevent_qos_s *change)
 	case EVFILT_SOCK:
 		kn->sock_interest = change->fflags;
 		memcpy(kn->kev.ext, change->ext, sizeof(kn->kev.ext));
+		return 0;
+	case EVFILT_MEMORYSTATUS:
+		kn->memorystatus_interest = change->fflags;
 		return 0;
 	default:
 		kn->kev.fflags = change->fflags;
@@ -1166,6 +1176,7 @@ fd_watch_main(void *arg)
 			eventfd_read(fd_watch_event, &value);
 		}
 		pthread_mutex_lock(&lock);
+		memorystatus_check();
 		for (nfds_t i = 1; i < count; i++) {
 			struct proc_watch *watch = watched[i].watch;
 			if (watch != NULL) {
@@ -1187,6 +1198,30 @@ fd_watch_main(void *arg)
 		}
 	}
 	return NULL;
+}
+
+static void
+memorystatus_check(void)
+{
+	static uint32_t told = MEMORYSTATUS_NORMAL;
+	uint32_t level = memorystatus_level();
+	if (level == told) {
+		return;
+	}
+	told = level;
+	for (struct kqueue *kq = &workq_kqueue; kq != NULL;
+			kq = kqueue_next(kq)) {
+		for (struct knote *kn = kq->knotes; kn != NULL; kn = kn->next) {
+			if (kn->kev.filter != EVFILT_MEMORYSTATUS
+					|| !(kn->memorystatus_interest
+							& level)) {
+				continue;
+			}
+			kn->kev.fflags = level;
+			kn->active = true;
+			kqueue_request(kq, kn->manager);
+		}
+	}
 }
 
 static void

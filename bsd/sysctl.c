@@ -46,6 +46,7 @@
 #include "cpuinfo.h"
 #include "handler.h"
 #include "kmsg.h"
+#include "memorystatus.h"
 #include "net.h"
 #include "process.h"
 #include "route.h"
@@ -204,6 +205,7 @@ static int read_cpu_frequency(void *old, size_t *oldlenp);
 static int read_cpusubtype(void *old, size_t *oldlenp);
 static int read_swapusage(void *old, size_t *oldlenp);
 static int read_ip_ttl(void *old, size_t *oldlenp);
+static int read_pressure_level(void *old, size_t *oldlenp);
 
 static const struct sysctl_node nodes[] = {
 		{"kern.ostype", {CTL_KERN, KERN_OSTYPE}, SYSCTL_STRING,
@@ -255,8 +257,8 @@ static const struct sysctl_node nodes[] = {
 		{"kern.wq_max_constrained_threads", {0, 0}, SYSCTL_INT,
 				.number = 70},
 
-		{"kern.memorystatus_vm_pressure_level", {0, 0}, SYSCTL_INT,
-				.number = 1},
+		{"kern.memorystatus_vm_pressure_level", {0, 0}, SYSCTL_READER,
+				.reader = read_pressure_level},
 		{"vm.swapusage", {CTL_VM, VM_SWAPUSAGE}, SYSCTL_READER,
 				.reader = read_swapusage},
 		{"net.inet.ip.ttl", {0, 0}, SYSCTL_READER,
@@ -915,6 +917,12 @@ read_ip_ttl(void *old, size_t *oldlenp)
 	fscanf(file, "%d", &ttl);
 	fclose(file);
 	return read_number(ttl, sizeof(int32_t), old, oldlenp);
+}
+
+static int
+read_pressure_level(void *old, size_t *oldlenp)
+{
+	return read_number(memorystatus_level(), sizeof(int32_t), old, oldlenp);
 }
 
 static int
