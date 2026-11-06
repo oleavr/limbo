@@ -170,9 +170,45 @@ static int preallocate(int fd, struct darwin_fstore *store);
 static int record_lock(int fd, int cmd, struct darwin_flock *lock);
 static int record_lock_timeout(
 		int fd, int cmd, struct darwin_flocktimeout *lock);
+static const char *const package_extensions[] = {
+		"app",
+		"appex",
+		"bundle",
+		"framework",
+		"plugin",
+		"kext",
+		"xpc",
+		"mdimporter",
+		"qlgenerator",
+		"prefPane",
+		"saver",
+		"wdgt",
+		"rtfd",
+		"pkg",
+		"mpkg",
+		"photoslibrary",
+		"musiclibrary",
+		"tvlibrary",
+		"photolibrary",
+		"imovielibrary",
+		"fcpbundle",
+		"logicx",
+		"band",
+		"key",
+		"pages",
+		"numbers",
+		"playground",
+		"xcodeproj",
+		"xcworkspace",
+		"dSYM",
+		"lproj",
+};
+
 static int record_lock_of_pid(int fd, struct darwin_flock *lock, bool ofd);
 static short lock_type_from_darwin(short type);
 static short lock_type_to_darwin(short type);
+static int path_package_component(const char *path);
+static bool is_package_name(const char *name, size_t length);
 
 int
 sys_sys_fcntl(int fd, int cmd, long arg)
@@ -291,6 +327,8 @@ sys_sys_fcntl(int fd, int cmd, long arg)
 		return 0;
 	case _F_GETNOSIGPIPE:
 		return 0;
+	case _F_PATHPKG_CHECK:
+		return path_package_component((const char *)arg);
 	case _F_CHECK_OPENEVT:
 		return 0;
 	case _F_RECYCLE:
@@ -311,6 +349,49 @@ sys_sys_fcntl(int fd, int cmd, long arg)
 	}
 
 	unimplemented();
+}
+
+static int
+path_package_component(const char *path)
+{
+	if (path[0] != '/') {
+		return _EINVAL;
+	}
+	int component = 0;
+	for (const char *at = path + 1; *at != '\0';) {
+		at += strspn(at, "/");
+		size_t length = strcspn(at, "/");
+		if (length == 0) {
+			break;
+		}
+		if (is_package_name(at, length)) {
+			return component;
+		}
+		at += length;
+		component++;
+	}
+	return -1;
+}
+
+static bool
+is_package_name(const char *name, size_t length)
+{
+	const char *dot = memrchr(name, '.', length);
+	if (dot == NULL || dot == name) {
+		return false;
+	}
+	size_t extension_length = length - (size_t)(dot + 1 - name);
+	for (size_t i = 0; i < sizeof(package_extensions)
+					/ sizeof(*package_extensions);
+			i++) {
+		if (strlen(package_extensions[i]) == extension_length
+				&& strncasecmp(dot + 1, package_extensions[i],
+						   extension_length)
+						== 0) {
+			return true;
+		}
+	}
+	return false;
 }
 
 static int
