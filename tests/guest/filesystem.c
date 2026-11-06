@@ -169,6 +169,19 @@ check_directories(void)
 	}
 	CHECK(count_entries("dir") == 100);
 
+	struct attrlist count_request = {
+			.bitmapcount = ATTR_BIT_MAP_COUNT,
+			.dirattr = ATTR_DIR_ENTRYCOUNT,
+	};
+	struct {
+		uint32_t length;
+		uint32_t count;
+	} __attribute__((packed)) count_reply;
+	CHECK(getattrlist("dir", &count_request, &count_reply,
+			      sizeof(count_reply), 0)
+			== 0);
+	CHECK(count_reply.count == 100);
+
 	struct stat st;
 	CHECK(fstatat(dirfd, "file7", &st, 0) == 0 && S_ISREG(st.st_mode));
 	CHECK(fstatat(dirfd, NULL, &st, AT_FDONLY) == 0 && S_ISDIR(st.st_mode));

@@ -155,6 +155,7 @@ struct reference {
 #define ATTR_VOL_INFO            0x80000000
 
 #define ATTR_DIR_LINKCOUNT   0x00000001
+#define ATTR_DIR_ENTRYCOUNT  0x00000002
 #define ATTR_DIR_MOUNTSTATUS 0x00000004
 
 #define DIR_MNTSTATUS_MNTPOINT 0x00000001
@@ -236,6 +237,7 @@ static uint32_t pack_timespec(
 		char *buffer, uint32_t offset, const struct timespec *ts);
 static uint64_t parent_id(const char *path, const char *host_path);
 static uint32_t pack_u32(char *buffer, uint32_t offset, uint32_t value);
+static uint32_t directory_entry_count(int fd);
 static uint32_t pack_u64(char *buffer, uint32_t offset, uint64_t value);
 static const char *unpack_timespec(const char *buffer, struct timespec *ts);
 
@@ -725,8 +727,9 @@ pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 						| ATTR_VOL_RESERVED_SIZE
 						| ATTR_VOL_ATTRIBUTES
 						| ATTR_VOL_INFO,
-				.dirattr
-				= ATTR_DIR_LINKCOUNT | ATTR_DIR_MOUNTSTATUS,
+				.dirattr = ATTR_DIR_LINKCOUNT
+						| ATTR_DIR_ENTRYCOUNT
+						| ATTR_DIR_MOUNTSTATUS,
 				.fileattr = ATTR_FILE_LINKCOUNT
 						| ATTR_FILE_TOTALSIZE
 						| ATTR_FILE_ALLOCSIZE
@@ -768,6 +771,11 @@ pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 	if (returned.dirattr & ATTR_DIR_LINKCOUNT) {
 		offset = pack_u32(buffer, offset, s.st_nlink);
 		dirattr &= ~ATTR_DIR_LINKCOUNT;
+	}
+
+	if (returned.dirattr & ATTR_DIR_ENTRYCOUNT) {
+		offset = pack_u32(buffer, offset, directory_entry_count(fd));
+		dirattr &= ~ATTR_DIR_ENTRYCOUNT;
 	}
 
 	if (returned.dirattr & ATTR_DIR_MOUNTSTATUS) {
@@ -953,6 +961,21 @@ pack_u32(char *buffer, uint32_t offset, uint32_t value)
 {
 	memcpy(buffer + offset, &value, sizeof(value));
 	return offset + sizeof(value);
+}
+
+static uint32_t
+directory_entry_count(int fd)
+{
+	DIR *dir = fdopendir(
+			openat(fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+	uint32_t count = 0;
+	struct dirent *entry;
+	while ((entry = readdir(dir)) != NULL) {
+		count += strcmp(entry->d_name, ".") != 0
+				&& strcmp(entry->d_name, "..") != 0;
+	}
+	closedir(dir);
+	return count;
 }
 
 static uint32_t
