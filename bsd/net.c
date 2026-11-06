@@ -189,9 +189,19 @@ struct output {
 	size_t capacity;
 };
 
+#pragma pack(push, 4)
+struct xnu_ifconf {
+	int32_t length;
+	uint8_t *buffer;
+};
+#pragma pack(pop)
+
+_Static_assert(sizeof(struct xnu_ifconf) == 12, "ifconf");
+
 #define IOCGROUP(command) (((command) >> 8) & 0xff)
 #define xnu_IOC_OUT       0x40000000
 
+#define xnu_SIOCGIFCONF              0xc00c6924
 #define xnu_SIOCGIFFLAGS             0xc0206911
 #define xnu_SIOCGIFMETRIC            0xc0206917
 #define xnu_SIOCGIFADDR              0xc0206921
@@ -359,6 +369,14 @@ static bool interface_address(const char *name, int family,
 		bool (*pick)(const struct ifaddrs *), struct sockaddr *out,
 		bool netmask);
 static bool is_primary(const struct ifaddrs *entry);
+static size_t collect_interfaces(
+		struct ifaddrs *list, struct interface *interfaces, size_t max);
+static int interface_conf(struct xnu_ifconf *conf);
+static bool append_interface_conf(struct xnu_ifconf *conf, size_t *used,
+		struct ifaddrs *list, const struct interface *interface);
+static bool append_conf_record(struct xnu_ifconf *conf, size_t *used,
+		const char *name, struct output *address);
+static bool is_ip_address_of(const struct ifaddrs *entry, const char *name);
 
 int
 net_interface_list(int type, int family, int index, void *old, size_t *oldlenp)
@@ -369,42 +387,8 @@ net_interface_list(int type, int family, int index, void *old, size_t *oldlenp)
 	}
 
 	struct interface interfaces[64];
-	size_t count = 0;
-	for (struct ifaddrs *entry = list; entry != NULL;
-			entry = entry->ifa_next) {
-		if (entry->ifa_addr == NULL
-				|| entry->ifa_addr->sa_family != AF_PACKET
-				|| count == sizeof(interfaces) / sizeof(*interfaces)) {
-			continue;
-		}
-		const struct sockaddr_ll *link
-				= (const struct sockaddr_ll *)entry->ifa_addr;
-		struct interface *interface = &interfaces[count++];
-		memset(interface, 0, sizeof(*interface));
-		interface->name = entry->ifa_name;
-		interface->index = (unsigned int)link->sll_ifindex;
-		interface->flags = entry->ifa_flags;
-		interface->arp_type = link->sll_hatype;
-		interface->mtu = read_sys_number(entry->ifa_name, "mtu", 1500);
-		interface->address_length
-				= link->sll_halen <= 8 ? link->sll_halen : 0;
-		memcpy(interface->address, link->sll_addr,
-				interface->address_length);
-		if (entry->ifa_data != NULL) {
-			interface->stats = *(struct rtnl_link_stats *)
-							    entry->ifa_data;
-		}
-	}
-	for (size_t i = 1; i < count; i++) {
-		for (size_t j = i; j > 0
-				&& interfaces[j - 1].index
-						> interfaces[j].index;
-				j--) {
-			struct interface swap = interfaces[j];
-			interfaces[j] = interfaces[j - 1];
-			interfaces[j - 1] = swap;
-		}
-	}
+	size_t count = collect_interfaces(list, interfaces,
+			sizeof(interfaces) / sizeof(*interfaces));
 
 	struct output out = {0};
 	for (size_t i = 0; i != count; i++) {
@@ -530,6 +514,49 @@ net_interface_list(int type, int family, int index, void *old, size_t *oldlenp)
 	return result;
 }
 
+static size_t
+collect_interfaces(
+		struct ifaddrs *list, struct interface *interfaces, size_t max)
+{
+	size_t count = 0;
+	for (struct ifaddrs *entry = list; entry != NULL;
+			entry = entry->ifa_next) {
+		if (entry->ifa_addr == NULL
+				|| entry->ifa_addr->sa_family != AF_PACKET
+				|| count == max) {
+			continue;
+		}
+		const struct sockaddr_ll *link
+				= (const struct sockaddr_ll *)entry->ifa_addr;
+		struct interface *interface = &interfaces[count++];
+		memset(interface, 0, sizeof(*interface));
+		interface->name = entry->ifa_name;
+		interface->index = (unsigned int)link->sll_ifindex;
+		interface->flags = entry->ifa_flags;
+		interface->arp_type = link->sll_hatype;
+		interface->mtu = read_sys_number(entry->ifa_name, "mtu", 1500);
+		interface->address_length
+				= link->sll_halen <= 8 ? link->sll_halen : 0;
+		memcpy(interface->address, link->sll_addr,
+				interface->address_length);
+		if (entry->ifa_data != NULL) {
+			interface->stats = *(struct rtnl_link_stats *)
+							    entry->ifa_data;
+		}
+	}
+	for (size_t i = 1; i < count; i++) {
+		for (size_t j = i; j > 0
+				&& interfaces[j - 1].index
+						> interfaces[j].index;
+				j--) {
+			struct interface swap = interfaces[j];
+			interfaces[j] = interfaces[j - 1];
+			interfaces[j - 1] = swap;
+		}
+	}
+	return count;
+}
+
 static unsigned int
 read_sys_number(const char *name, const char *attribute, unsigned int fallback)
 {
@@ -652,6 +679,8 @@ net_ioctl(int fd, uint64_t command, void *data)
 	int error;
 
 	switch (command) {
+	case xnu_SIOCGIFCONF:
+		return interface_conf(data);
 	case xnu_SIOCGIFFLAGS:
 		error = host_interface_ioctl(SIOCGIFFLAGS, name, &host);
 		if (error == 0) {
@@ -975,6 +1004,79 @@ bpf_ioctl(int fd, uint64_t command, void *data)
 #endif
 		return _EINVAL;
 	}
+}
+
+static int
+interface_conf(struct xnu_ifconf *conf)
+{
+	struct ifaddrs *list;
+	if (getifaddrs(&list) == -1) {
+		return err_map(errno);
+	}
+	struct interface interfaces[64];
+	size_t count = collect_interfaces(list, interfaces,
+			sizeof(interfaces) / sizeof(*interfaces));
+
+	size_t used = 0;
+	for (size_t i = 0; i != count
+			&& append_interface_conf(
+					conf, &used, list, &interfaces[i]);
+			i++) {
+	}
+	freeifaddrs(list);
+	conf->length = (int32_t)used;
+	return 0;
+}
+
+static bool
+append_interface_conf(struct xnu_ifconf *conf, size_t *used,
+		struct ifaddrs *list, const struct interface *interface)
+{
+	struct output link = {0};
+	append_link_sockaddr(&link, interface);
+	if (!append_conf_record(conf, used, interface->name, &link)) {
+		return false;
+	}
+	for (struct ifaddrs *entry = list; entry != NULL;
+			entry = entry->ifa_next) {
+		if (!is_ip_address_of(entry, interface->name)) {
+			continue;
+		}
+		struct output address = {0};
+		append_sockaddr(&address, entry->ifa_addr, interface->index);
+		if (!append_conf_record(
+				    conf, used, interface->name, &address)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool
+append_conf_record(struct xnu_ifconf *conf, size_t *used, const char *name,
+		struct output *address)
+{
+	size_t length = address->bytes[0];
+	size_t size = IFNAMSIZ + (length > 16 ? length : 16);
+	bool fits = *used + size <= (size_t)conf->length;
+	if (fits) {
+		uint8_t *record = conf->buffer + *used;
+		memset(record, 0, size);
+		snprintf((char *)record, IFNAMSIZ, "%s", name);
+		memcpy(record + IFNAMSIZ, address->bytes, length);
+		*used += size;
+	}
+	free(address->bytes);
+	return fits;
+}
+
+static bool
+is_ip_address_of(const struct ifaddrs *entry, const char *name)
+{
+	return entry->ifa_addr != NULL && strcmp(entry->ifa_name, name) == 0
+			&& (entry->ifa_addr->sa_family == AF_INET
+					|| entry->ifa_addr->sa_family
+							== AF_INET6);
 }
 
 static int

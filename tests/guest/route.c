@@ -232,6 +232,45 @@ main(void)
 	CHECK(read(e, buffer, sizeof(buffer)) == -1 && errno == EAGAIN);
 	CHECK(close(e) == 0);
 
+	int d = socket(AF_INET, SOCK_DGRAM, 0);
+	CHECK(d != -1);
+	uint8_t records[8192];
+	struct ifconf conf = {
+			.ifc_len = sizeof(records), .ifc_buf = (void *)records};
+	CHECK(ioctl(d, SIOCGIFCONF, &conf) == 0);
+	CHECK(conf.ifc_len > 0 && conf.ifc_len < (int)sizeof(records));
+	bool loopback_address = false, link = false;
+	size_t first = 0;
+	for (int offset = 0; offset < conf.ifc_len;) {
+		const struct ifreq *request
+				= (const struct ifreq *)(records + offset);
+		size_t length = request->ifr_addr.sa_len;
+		size_t step = IFNAMSIZ
+				+ (length > sizeof(struct sockaddr)
+								? length
+								: sizeof(struct sockaddr));
+		if (first == 0) {
+			first = step;
+		}
+		CHECK(offset + step <= (size_t)conf.ifc_len);
+		if (request->ifr_addr.sa_family == AF_LINK) {
+			link = true;
+		}
+		if (request->ifr_addr.sa_family == AF_INET
+				&& ((const struct sockaddr_in *)&request
+								   ->ifr_addr)
+								->sin_addr
+								.s_addr
+						== htonl(INADDR_LOOPBACK)) {
+			loopback_address = true;
+		}
+		offset += step;
+	}
+	CHECK(loopback_address && link);
+	conf.ifc_len = (int)first + 1;
+	CHECK(ioctl(d, SIOCGIFCONF, &conf) == 0 && conf.ifc_len == (int)first);
+	CHECK(close(d) == 0);
+
 	printf("route: ok\n");
 	return 0;
 }
