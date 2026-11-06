@@ -49,6 +49,8 @@
 #define HOST_MACHINE  "x86_64"
 #endif
 
+int proc_get_cpumon_params(pid_t pid, int *percentage, int *interval);
+
 int
 main(void)
 {
@@ -188,6 +190,13 @@ main(void)
 	CHECK(*(volatile uint32_t *)0x7fffffe00020ULL
 			== (uint32_t)capabilities);
 #endif
+
+	int percentage = -1, interval = -1;
+	CHECK(proc_get_cpumon_params(getpid(), &percentage, &interval) == 0);
+	CHECK(percentage == 0 && interval == 0);
+	errno = 0;
+	CHECK(proc_get_cpumon_params(99998, &percentage, &interval) == -1
+			&& errno == ESRCH);
 
 	CHECK(labs(time(NULL) - info.kp_proc.p_starttime.tv_sec) < 60);
 	return 0;
