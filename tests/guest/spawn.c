@@ -73,6 +73,24 @@ main(int argc, char *argv[])
 	CHECK(wait_child(pid) == 0);
 	posix_spawn_file_actions_destroy(&actions);
 
+	static const char link[] = "/tmp/limbo-spawn-link";
+	unlink(link);
+	CHECK(symlink(self, link) == 0);
+	CHECK(pipe(fds) == 0);
+	posix_spawn_file_actions_init(&actions);
+	posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO);
+	posix_spawn_file_actions_addclose(&actions, fds[0]);
+	char *link_argv[] = {(char *)link, "exe", NULL};
+	CHECK(posix_spawn(&pid, link, &actions, NULL, link_argv, environ) == 0);
+	close(fds[1]);
+	memset(output, 0, sizeof(output));
+	read_all(fds[0], output, sizeof(output));
+	close(fds[0]);
+	CHECK(strcmp(output, "/tmp/limbo-spawn-link\n") == 0);
+	CHECK(wait_child(pid) == 0);
+	CHECK(unlink(link) == 0);
+	posix_spawn_file_actions_destroy(&actions);
+
 	int status = wait_child(spawn_child("exit", NULL, NULL));
 	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 3);
 
@@ -135,6 +153,14 @@ run_child(const char *mode)
 		char cwd[PATH_MAX];
 		CHECK(getcwd(cwd, sizeof(cwd)) != NULL);
 		printf("%s\n", cwd);
+		return 0;
+	}
+	if (strcmp(mode, "exe") == 0) {
+		char path[PATH_MAX];
+		uint32_t length = sizeof(path);
+		CHECK(_NSGetExecutablePath(path, &length) == 0);
+		CHECK(getenv("LIMBO_EXEC_PATH") == NULL);
+		printf("%s\n", path);
 		return 0;
 	}
 	if (strcmp(mode, "exit") == 0) {

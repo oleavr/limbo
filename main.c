@@ -166,6 +166,11 @@ run(int argc, char *argv[], char *envp[])
 	if (sysroot_open() || syscall_handler_install()) {
 		goto error;
 	}
+	const char *named = getenv("LIMBO_EXEC_PATH");
+	if (named != NULL) {
+		named = strdup(named);
+		unsetenv("LIMBO_EXEC_PATH");
+	}
 	prctl(PR_SET_NAME, basename(argv[1]));
 	prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
 
@@ -218,8 +223,9 @@ run(int argc, char *argv[], char *envp[])
 	}
 
 	/* Set up the stack in the way that dyld expects */
-	uintptr_t stack_base = build_stack(
-			exe_base, argv[1], argc - 2, argv + 2, envp);
+	uintptr_t stack_base
+			= build_stack(exe_base, named != NULL ? named : argv[1],
+					argc - 2, argv + 2, envp);
 	if (stack_base == 0) {
 		goto error;
 	}
