@@ -2883,7 +2883,7 @@ sys_searchfs(const char *path, void *searchblock, uint32_t *nummatches,
 			(void *)searchblock, (void *)nummatches,
 			(void *)scriptcode, (void *)options, (void *)state);
 #endif
-	unimplemented();
+	return _ENOTSUP;
 }
 
 int
