@@ -32,6 +32,7 @@
 #include <mach/mach_time.h>
 #include <mach/mach_vm.h>
 #include <mach/mach_voucher.h>
+#include <mach/memory_entry.h>
 #include <pthread.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -400,6 +401,27 @@ check_memory_entries(void)
 	CHECK(first != second && ((volatile char *)first)[size - 1] == 0);
 	((volatile char *)first)[vm_page_size + 5] = 42;
 	CHECK(((volatile char *)second)[vm_page_size + 5] == 42);
+
+	CHECK(mach_memory_entry_ownership(entry, mach_task_self(),
+			      VM_LEDGER_TAG_GRAPHICS, 0)
+			== KERN_SUCCESS);
+	CHECK(mach_memory_entry_ownership(
+			      entry, TASK_NULL, VM_LEDGER_TAG_DEFAULT, 0)
+			== KERN_SUCCESS);
+	CHECK(mach_memory_entry_ownership(entry, mach_task_self(),
+			      VM_LEDGER_TAG_MEDIA, VM_LEDGER_FLAG_NO_FOOTPRINT)
+			== KERN_NO_ACCESS);
+	CHECK(mach_memory_entry_ownership(
+			      entry, mach_task_self(), VM_LEDGER_TAG_MAX + 1, 0)
+			== KERN_INVALID_ARGUMENT);
+	CHECK(mach_memory_entry_ownership(mach_task_self(), mach_task_self(),
+			      VM_LEDGER_TAG_DEFAULT, 0)
+			== KERN_INVALID_ARGUMENT);
+	int state = 0;
+	CHECK(mach_memory_entry_purgable_control(
+			      entry, VM_PURGABLE_GET_STATE, &state)
+			== KERN_SUCCESS);
+	CHECK(state == VM_PURGABLE_NONVOLATILE);
 
 	CHECK(mach_vm_deallocate(mach_task_self(), first, size) == KERN_SUCCESS);
 	CHECK(mach_vm_deallocate(mach_task_self(), second, size)
