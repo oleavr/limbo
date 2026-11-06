@@ -30,12 +30,11 @@
 #define _GNU_SOURCE
 #endif
 #include <dirent.h>
-
 #include <errno.h>
 #include <fcntl.h>
+#include <mach/mach_types.h>
 #include <pthread.h>
 #include <signal.h>
-#include <mach/mach_types.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,8 +43,9 @@
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <unistd.h>
-#include "commpage.h"
 
+#include "bsd/codesign.h"
+#include "commpage.h"
 #include "ipc.h"
 #include "mach_vm.h"
 
@@ -1121,6 +1121,76 @@ _kernelrpc_mach_vm_purgable_control(vm_map_t target_task,
 	return KERN_SUCCESS;
 }
 
+#ifndef VM_LEDGER_TAG_UNCHANGED
+#define VM_LEDGER_TAG_UNCHANGED ((int)-1)
+#endif
+#ifndef VM_LEDGER_FLAG_NO_FOOTPRINT_FOR_DEBUG
+#define VM_LEDGER_FLAG_NO_FOOTPRINT_FOR_DEBUG 0x00000002
+#endif
+#define VM_LEDGER_FLAGS_USER                                                   \
+	(VM_LEDGER_FLAG_NO_FOOTPRINT | VM_LEDGER_FLAG_NO_FOOTPRINT_FOR_DEBUG)
+
+kern_return_t
+mach_memory_entry_purgable_control(mem_entry_name_port_t mem_entry,
+		vm_purgable_t control, int *state)
+{
+#ifdef ENABLE_STRACE
+	fprintf(stderr, "mach_memory_entry_purgable_control(%p, %p, %p)\n",
+			(void *)(uintptr_t)mem_entry,
+			(void *)(uintptr_t)control, (void *)state);
+#endif
+	if (ipc_kobject_lookup(mem_entry, IPC_KOBJECT_MEMORY_ENTRY) == NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	*state = VM_PURGABLE_NONVOLATILE;
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+mach_memory_entry_access_tracking(mem_entry_name_port_t mem_entry,
+		int *access_tracking, uint32_t *access_tracking_reads,
+		uint32_t *access_tracking_writes)
+{
+#ifdef ENABLE_STRACE
+	fprintf(stderr, "mach_memory_entry_access_tracking(%p, %p, %p, %p)\n",
+			(void *)(uintptr_t)mem_entry, (void *)access_tracking,
+			(void *)access_tracking_reads,
+			(void *)access_tracking_writes);
+#endif
+	return KERN_NOT_SUPPORTED;
+}
+
+kern_return_t
+mach_memory_entry_ownership(mem_entry_name_port_t mem_entry, task_t owner,
+		int ledger_tag, int ledger_flags)
+{
+#ifdef ENABLE_STRACE
+	fprintf(stderr, "mach_memory_entry_ownership(%p, %p, %d, %#x)\n",
+			(void *)(uintptr_t)mem_entry, (void *)(uintptr_t)owner,
+			ledger_tag, ledger_flags);
+#endif
+	bool transfers = (owner != MACH_PORT_NULL
+					 && owner != ipc_kobject_name(IPC_KOBJECT_TASK))
+			|| (ledger_flags & VM_LEDGER_FLAGS_USER) != 0
+			|| ledger_tag == VM_LEDGER_TAG_NETWORK;
+	if (transfers
+			&& !codesign_entitled(getpid(),
+					"com.apple.private.memory.ownership_"
+					"transfer")) {
+		return KERN_NO_ACCESS;
+	}
+	if ((ledger_flags & ~VM_LEDGER_FLAGS_USER) != 0) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	if (ledger_tag != VM_LEDGER_TAG_UNCHANGED
+			&& (ledger_tag < 0 || ledger_tag > VM_LEDGER_TAG_MAX)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	if (ipc_kobject_lookup(mem_entry, IPC_KOBJECT_MEMORY_ENTRY) == NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	return KERN_SUCCESS;
+}
 kern_return_t
 mach_vm_page_info(vm_map_read_t target_task, mach_vm_address_t address,
 		vm_page_info_flavor_t flavor, vm_page_info_t info,
