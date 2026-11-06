@@ -27,6 +27,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/in_systm.h>
 #include <netinet/ip.h>
@@ -36,12 +37,14 @@
 #include <sys/ioctl.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/sys_domain.h>
 #include <sys/un.h>
 #include <unistd.h>
 
 #include "check.h"
 static void check_icmp(void);
 static void check_connection_info(void);
+static void check_control_with_many_open(void);
 
 int
 main(void)
@@ -91,6 +94,7 @@ main(void)
 	CHECK(close(s) == 0);
 	CHECK(unlink(path) == 0);
 	check_connection_info();
+	check_control_with_many_open();
 	check_icmp();
 	return 0;
 }
@@ -145,6 +149,23 @@ check_connection_info(void)
 	CHECK(request.dst_len == sizeof(destination));
 	CHECK(destination.sin_port == address.sin_port);
 	CHECK(close(client) == 0 && close(listener) == 0);
+}
+
+static void
+check_control_with_many_open(void)
+{
+	enum { OPEN = 1100 };
+	static int fds[OPEN];
+	for (int i = 0; i < OPEN; i++) {
+		fds[i] = open("/dev/null", O_RDONLY);
+		CHECK(fds[i] >= 0);
+	}
+	int control = socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL);
+	CHECK(control >= 0);
+	CHECK(close(control) == 0);
+	for (int i = 0; i < OPEN; i++) {
+		CHECK(close(fds[i]) == 0);
+	}
 }
 
 static void
