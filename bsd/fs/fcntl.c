@@ -43,6 +43,7 @@
 
 #include "bsd/codesign.h"
 #include "bsd/kevent.h"
+#include "bsd/process.h"
 #include "bsd/xnu-errno.h"
 #include "sysroot.h"
 
@@ -513,8 +514,9 @@ record_lock_of_pid(int fd, struct darwin_flock *lock, bool ofd)
 	bool want_write = lock->l_type == _F_WRLCK;
 	lock->l_type = _F_UNLCK;
 
-	char path[64];
-	snprintf(path, sizeof(path), "/proc/%d/fd", (int)pid);
+	char proc_dir[64 + NAME_MAX], path[80 + NAME_MAX];
+	process_proc_dir(pid, proc_dir, sizeof(proc_dir));
+	snprintf(path, sizeof(path), "%s/fd", proc_dir);
 	DIR *dir = opendir(path);
 	if (dir == NULL) {
 		return 0;
@@ -527,13 +529,13 @@ record_lock_of_pid(int fd, struct darwin_flock *lock, bool ofd)
 		}
 		char name[PATH_MAX];
 		struct stat other;
-		snprintf(name, sizeof(name), "/proc/%d/fd/%s", (int)pid,
+		snprintf(name, sizeof(name), "%s/fd/%s", proc_dir,
 				entry->d_name);
 		if (stat(name, &other) == -1 || other.st_dev != file.st_dev
 				|| other.st_ino != file.st_ino) {
 			continue;
 		}
-		snprintf(name, sizeof(name), "/proc/%d/fdinfo/%s", (int)pid,
+		snprintf(name, sizeof(name), "%s/fdinfo/%s", proc_dir,
 				entry->d_name);
 		FILE *info = fopen(name, "r");
 		if (info == NULL) {

@@ -402,8 +402,9 @@ pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, user_addr_t buffer,
 		if (buffersize < (int32_t)sizeof(*info)) {
 			return _ENOMEM;
 		}
-		char cwd[64];
-		snprintf(cwd, sizeof(cwd), "/proc/%d/cwd", pid);
+		char dir[64 + NAME_MAX], cwd[80 + NAME_MAX];
+		process_proc_dir(pid, dir, sizeof(dir));
+		snprintf(cwd, sizeof(cwd), "%s/cwd", dir);
 		memset(info, 0, sizeof(*info));
 		if (!vnode_info_path(cwd, &info->pvi_cdir)) {
 			return _EPERM;
@@ -488,8 +489,9 @@ bsdinfo(const struct process *process, struct proc_bsdinfo *info)
 static uint32_t
 file_table_size(int32_t pid)
 {
-	char path[64];
-	snprintf(path, sizeof(path), "/proc/%d/fd", pid);
+	char proc_dir[64 + NAME_MAX], path[80 + NAME_MAX];
+	process_proc_dir(pid, proc_dir, sizeof(proc_dir));
+	snprintf(path, sizeof(path), "%s/fd", proc_dir);
 	DIR *dir = opendir(path);
 	uint32_t size = 0;
 	struct dirent *entry;
@@ -704,8 +706,9 @@ listpids(uint32_t type, uint32_t typeinfo, user_addr_t buffer,
 static bool
 status_field(pid_t pid, const char *field, int index, unsigned long *value)
 {
-	char path[64], line[256];
-	snprintf(path, sizeof(path), "/proc/%d/status", pid);
+	char dir[64 + NAME_MAX], path[80 + NAME_MAX], line[256];
+	process_proc_dir(pid, dir, sizeof(dir));
+	snprintf(path, sizeof(path), "%s/status", dir);
 	FILE *status = fopen(path, "r");
 	if (status == NULL) {
 		return false;
@@ -754,16 +757,17 @@ fdinfo(int32_t pid, uint32_t flavor, int32_t fd, void *buffer,
 	if (buffersize < (int32_t)sizeof(*info)) {
 		return _ENOMEM;
 	}
-	char path[64];
-	snprintf(path, sizeof(path), "/proc/%d/fd/%d", pid, fd);
+	char proc_dir[64 + NAME_MAX], path[80 + NAME_MAX];
+	process_proc_dir(pid, proc_dir, sizeof(proc_dir));
+	snprintf(path, sizeof(path), "%s/fd/%d", proc_dir, fd);
 	struct vnode_info_path vnode;
 	if (!vnode_info_path(path, &vnode)) {
 		return _EBADF;
 	}
 	memset(info, 0, sizeof(*info));
 	info->pvip = vnode;
-	char flags_path[64];
-	snprintf(flags_path, sizeof(flags_path), "/proc/%d/fdinfo/%d", pid, fd);
+	char flags_path[80 + NAME_MAX];
+	snprintf(flags_path, sizeof(flags_path), "%s/fdinfo/%d", proc_dir, fd);
 	FILE *file = fopen(flags_path, "r");
 	if (file != NULL) {
 		char line[128];
@@ -797,8 +801,9 @@ listfds(int32_t pid, void *buffer, int32_t buffersize)
 		uint32_t proc_fdtype;
 	};
 
-	char path[64];
-	snprintf(path, sizeof(path), "/proc/%d/fd", pid);
+	char proc_dir[64 + NAME_MAX], path[80 + NAME_MAX];
+	process_proc_dir(pid, proc_dir, sizeof(proc_dir));
+	snprintf(path, sizeof(path), "%s/fd", proc_dir);
 	DIR *dir = opendir(path);
 	if (dir == NULL) {
 		return _ESRCH;
@@ -814,7 +819,7 @@ listfds(int32_t pid, void *buffer, int32_t buffersize)
 		}
 		if (buffer != NULL) {
 			char link[PATH_MAX];
-			snprintf(path, sizeof(path), "/proc/%d/fd/%s", pid,
+			snprintf(path, sizeof(path), "%s/fd/%s", proc_dir,
 					entry->d_name);
 			ssize_t length = readlink(path, link, sizeof(link) - 1);
 			link[length > 0 ? length : 0] = '\0';
@@ -896,8 +901,9 @@ static bool
 region_with_path(int32_t pid, uint64_t address,
 		struct proc_regionwithpathinfo *info)
 {
-	char maps_path[64];
-	snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
+	char dir[64 + NAME_MAX], maps_path[80 + NAME_MAX];
+	process_proc_dir(pid, dir, sizeof(dir));
+	snprintf(maps_path, sizeof(maps_path), "%s/maps", dir);
 	FILE *maps = fopen(maps_path, "re");
 	if (maps == NULL) {
 		return false;

@@ -41,6 +41,7 @@ static uint64_t boot_time(void);
 static ssize_t read_process_file(
 		int32_t pid, const char *file, char *buffer, size_t size);
 static ssize_t read_file(const char *name, char *buffer, size_t size);
+static char stat_state(const char *path);
 
 int
 process_lookup(int32_t pid, struct process *process)
@@ -191,6 +192,38 @@ process_environment_value(
 	return found;
 }
 
+void
+process_proc_dir(int32_t pid, char *dir, size_t size)
+{
+	snprintf(dir, size, "/proc/%d", (int)pid);
+	char path[64 + NAME_MAX];
+	snprintf(path, sizeof(path), "/proc/%d/stat", (int)pid);
+	if (stat_state(path) != 'Z') {
+		return;
+	}
+	snprintf(path, sizeof(path), "/proc/%d/task", (int)pid);
+	DIR *tasks = opendir(path);
+	if (tasks == NULL) {
+		return;
+	}
+	struct dirent *task;
+	while ((task = readdir(tasks)) != NULL) {
+		if (task->d_name[0] == '.'
+				|| strtol(task->d_name, NULL, 10) == pid) {
+			continue;
+		}
+		snprintf(path, sizeof(path), "/proc/%d/task/%s/stat", (int)pid,
+				task->d_name);
+		char state = stat_state(path);
+		if (state != 0 && state != 'Z' && state != 'X') {
+			snprintf(dir, size, "/proc/%d/task/%s", (int)pid,
+					task->d_name);
+			break;
+		}
+	}
+	closedir(tasks);
+}
+
 static ssize_t
 read_process_file(int32_t pid, const char *file, char *buffer, size_t size)
 {
@@ -229,4 +262,16 @@ read_file(const char *name, char *buffer, size_t size)
 	ssize_t length = read(fd, buffer, size);
 	close(fd);
 	return length;
+}
+
+static char
+stat_state(const char *path)
+{
+	char line[512];
+	ssize_t length = read_file(path, line, sizeof(line) - 1);
+	if (length <= 0) {
+		return 0;
+	}
+	line[length] = '\0';
+	return strrchr(line, ')')[2];
 }
