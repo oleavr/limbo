@@ -88,6 +88,13 @@ main(void)
 	CHECK(sysctlbyname("net.inet.ip.ttl", &named, &size, NULL, 0) == 0);
 	CHECK(named == ttl);
 
+	int pressure = 0;
+	size = sizeof(pressure);
+	CHECK(sysctlbyname("kern.memorystatus_vm_pressure_level", &pressure,
+			      &size, NULL, 0)
+			== 0);
+	CHECK(pressure == 1 || pressure == 2 || pressure == 4);
+
 	int value = -1;
 	size = sizeof(value);
 	CHECK(sysctlbyname("kern.safeboot", &value, &size, NULL, 0) == 0

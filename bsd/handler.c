@@ -46,13 +46,15 @@
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/fs.h>
 #include <mach-o/fat.h>
 #include <mach-o/loader.h>
-#include <mach/machine/thread_status.h>
 #include <mach/mach.h>
+#include <mach/machine/thread_status.h>
 #include <poll.h>
 #include <pthread.h>
 #include <sched.h>
+#include <semaphore.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
@@ -69,45 +71,43 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
-#include <time.h>
-#include <semaphore.h>
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <sys/un.h>
 #include <sys/wait.h>
-#include <linux/fs.h>
 #include <sys/xattr.h>
+#include <time.h>
 #include <ucontext.h>
 #include <unistd.h>
 
 #include "bsd/credentials.h"
 #include "bsd/hostuuid.h"
 #include "bsd/process.h"
+#include "codesign.h"
 #include "commpage.h"
-#include "fsevents.h"
-#include "icmp.h"
-#include "kctl.h"
-#include "necp.h"
-#include "net.h"
-#include "persona.h"
-#include "persona.h"
-#include "route.h"
-#include "signals.h"
-#include "tty.h"
 #include "fs/at.h"
 #include "fs/bsd_flags.h"
-#include "codesign.h"
 #include "fs/fileid.h"
+#include "fsevents.h"
 #include "handler.h"
+#include "icmp.h"
+#include "kctl.h"
 #include "kevent.h"
+#include "memorystatus.h"
+#include "necp.h"
+#include "net.h"
 #include "osfmk/broker_client.h"
 #include "osfmk/ipc.h"
 #include "osfmk/semaphore.h"
+#include "persona.h"
+#include "route.h"
 #include "shared_cache.h"
+#include "signals.h"
 #include "signo.h"
 #include "syscall.h"
 #include "sysroot.h"
 #include "thread.h"
+#include "tty.h"
 #include "xnu-errno.h"
 
 #define KAUTH_UID_NONE (~(uid_t)0 - 100)
@@ -4491,17 +4491,7 @@ sys_memorystatus_get_level(user_addr_t level)
 	fprintf(stderr, "memorystatus_get_level(%p)\n", (void *)level);
 #endif
 
-	unsigned long long total = 0, available = 0;
-	FILE *meminfo = fopen("/proc/meminfo", "r");
-	if (meminfo != NULL) {
-		char line[256];
-		while (fgets(line, sizeof(line), meminfo) != NULL) {
-			sscanf(line, "MemTotal: %llu kB", &total);
-			sscanf(line, "MemAvailable: %llu kB", &available);
-		}
-		fclose(meminfo);
-	}
-	*(int *)level = (total != 0) ? (int)(available * 100 / total) : 100;
+	*(int *)level = (int)(memorystatus_free_share() / 10);
 	return 0;
 }
 
