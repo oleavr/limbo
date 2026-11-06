@@ -45,6 +45,7 @@
 #include "commpage.h"
 #include "cpuinfo.h"
 #include "handler.h"
+#include "kmsg.h"
 #include "net.h"
 #include "process.h"
 #include "route.h"
@@ -192,6 +193,7 @@ static int read_boottime(void *old, size_t *oldlenp);
 static int read_bootsessionuuid(void *old, size_t *oldlenp);
 static int read_sandbox_sentinel(void *old, size_t *oldlenp);
 static int read_ncpu(void *old, size_t *oldlenp);
+static int read_msgbuf(void *old, size_t *oldlenp);
 static int read_memsize(void *old, size_t *oldlenp);
 #ifdef __x86_64__
 static int read_cpu_brand(void *old, size_t *oldlenp);
@@ -235,6 +237,7 @@ static const struct sysctl_node nodes[] = {
 		{"kern.osversion", {CTL_KERN, KERN_OSVERSION}, SYSCTL_STRING,
 				.string = "26A434"},
 		{"kern.bootargs", {0, 0}, SYSCTL_STRING, .string = ""},
+		{"kern.msgbuf", {0, 0}, SYSCTL_READER, .reader = read_msgbuf},
 		{"kern.bootsessionuuid", {0, 0}, SYSCTL_READER,
 				.reader = read_bootsessionuuid},
 		{"kern.osproductversion", {0, 0}, SYSCTL_STRING,
@@ -829,6 +832,12 @@ read_ncpu(void *old, size_t *oldlenp)
 {
 	return read_number(sysconf(_SC_NPROCESSORS_ONLN), sizeof(int32_t), old,
 			oldlenp);
+}
+
+static int
+read_msgbuf(void *old, size_t *oldlenp)
+{
+	return read_number(KMSG_SIZE, sizeof(int32_t), old, oldlenp);
 }
 
 #ifdef __x86_64__

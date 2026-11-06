@@ -7,12 +7,16 @@
 /* The guest's call chain into the system call, from limbo, whose tests and
  * broker have none */
 extern void syscall_print_trap_chain(void) __attribute__((weak));
+extern void kmsg_log(const char *format, ...) __attribute__((weak));
 static inline void __attribute__ ((noreturn))
 limbo_unimplemented(const char *function, int line)
 {
 	extern long write(int, const void *, unsigned long);
 	extern unsigned long strlen(const char *);
 	extern void abort(void);
+	if (kmsg_log != 0) {
+		kmsg_log("not implemented: %s:%d\n", function, line);
+	}
 	char digits[12];
 	int i = sizeof(digits);
 	digits[--i] = '\n';
