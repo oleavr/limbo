@@ -29,6 +29,8 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -41,7 +43,8 @@
 #define xnu_AF_SYSTEM   32
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-static bool sockets[1024];
+static bool *sockets;
+static size_t socket_count;
 
 int
 kctl_socket(int type)
@@ -53,11 +56,17 @@ kctl_socket(int type)
 	if (fd == -1) {
 		return err_map(errno);
 	}
-	if ((size_t)fd >= sizeof(sockets) / sizeof(*sockets)) {
-		close(fd);
-		return _EMFILE;
-	}
 	pthread_mutex_lock(&lock);
+	if ((size_t)fd >= socket_count) {
+		size_t count = socket_count != 0 ? socket_count : 1024;
+		while (count <= (size_t)fd) {
+			count *= 2;
+		}
+		sockets = realloc(sockets, count * sizeof(*sockets));
+		memset(sockets + socket_count, 0,
+				(count - socket_count) * sizeof(*sockets));
+		socket_count = count;
+	}
 	sockets[fd] = true;
 	pthread_mutex_unlock(&lock);
 	return fd;
@@ -66,8 +75,10 @@ kctl_socket(int type)
 bool
 kctl_is_socket(int fd)
 {
-	return fd >= 0 && (size_t)fd < sizeof(sockets) / sizeof(*sockets)
-			&& sockets[fd];
+	pthread_mutex_lock(&lock);
+	bool is_socket = fd >= 0 && (size_t)fd < socket_count && sockets[fd];
+	pthread_mutex_unlock(&lock);
+	return is_socket;
 }
 
 int
