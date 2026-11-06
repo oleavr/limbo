@@ -163,13 +163,95 @@ struct proc_taskallinfo {
 #define PROC_PIDTASKINFO    4
 
 #define PROC_PIDPATHINFO 11
+#define PROC_PIDVNODEPATHINFO   9
+#define PROC_PIDREGIONPATHINFO2 22
+#define PROC_PIDLISTFILEPORTS   14
 
 #ifndef PROC_PIDPLATFORMINFO
 #define PROC_PIDPLATFORMINFO 30
 #endif
 
-static int pidinfo(int32_t pid, uint32_t flavor, user_addr_t buffer,
-		int32_t buffersize);
+enum {
+	VREG = 1,
+	VDIR = 2,
+	VBLK = 3,
+	VCHR = 4,
+	VLNK = 5,
+	VSOCK = 6,
+	VFIFO = 7,
+};
+
+struct vinfo_stat {
+	uint32_t vst_dev;
+	uint16_t vst_mode;
+	uint16_t vst_nlink;
+	uint64_t vst_ino;
+	uint32_t vst_uid;
+	uint32_t vst_gid;
+	int64_t vst_atime;
+	int64_t vst_atimensec;
+	int64_t vst_mtime;
+	int64_t vst_mtimensec;
+	int64_t vst_ctime;
+	int64_t vst_ctimensec;
+	int64_t vst_birthtime;
+	int64_t vst_birthtimensec;
+	int64_t vst_size;
+	int64_t vst_blocks;
+	int32_t vst_blksize;
+	uint32_t vst_flags;
+	uint32_t vst_gen;
+	uint32_t vst_rdev;
+	int64_t vst_qspare[2];
+};
+
+struct vnode_info_path {
+	struct vinfo_stat vi_stat;
+	int32_t vi_type;
+	int32_t vi_pad;
+	int32_t vi_fsid[2];
+	char vip_path[1024];
+};
+_Static_assert(sizeof(struct vnode_info_path) == 1176, "vnode_info_path");
+
+struct proc_regioninfo {
+	uint32_t pri_protection;
+	uint32_t pri_max_protection;
+	uint32_t pri_inheritance;
+	uint32_t pri_flags;
+	uint64_t pri_offset;
+	uint32_t pri_behavior;
+	uint32_t pri_user_wired_count;
+	uint32_t pri_user_tag;
+	uint32_t pri_pages_resident;
+	uint32_t pri_pages_shared_now_private;
+	uint32_t pri_pages_swapped_out;
+	uint32_t pri_pages_dirtied;
+	uint32_t pri_ref_count;
+	uint32_t pri_shadow_depth;
+	uint32_t pri_share_mode;
+	uint32_t pri_private_pages_resident;
+	uint32_t pri_shared_pages_resident;
+	uint32_t pri_obj_id;
+	uint32_t pri_depth;
+	uint64_t pri_address;
+	uint64_t pri_size;
+};
+_Static_assert(sizeof(struct proc_regioninfo) == 96, "proc_regioninfo");
+
+struct proc_regionwithpathinfo {
+	struct proc_regioninfo prp_prinfo;
+	struct vnode_info_path prp_vip;
+};
+
+static int pidinfo(int32_t pid, uint32_t flavor, uint64_t arg,
+		user_addr_t buffer, int32_t buffersize);
+static bool vnode_info_path(
+		const char *proc_link, struct vnode_info_path *info);
+static void fill_vnode_info(const char *file, const struct stat *st,
+		struct vnode_info_path *info);
+static bool region_with_path(int32_t pid, uint64_t address,
+		struct proc_regionwithpathinfo *info);
 static void uniqidentifierinfo(const struct process *process,
 		struct proc_uniqidentifierinfo *info);
 static void bsdinfo(const struct process *process, struct proc_bsdinfo *info);
@@ -200,7 +282,7 @@ sys_proc_info(int32_t callnum, int32_t pid, uint32_t flavor, uint64_t arg,
 	case PROC_INFO_CALL_LISTPIDS:
 		return listpids(pid, flavor, buffer, buffersize);
 	case PROC_INFO_CALL_PIDINFO:
-		return pidinfo(pid, flavor, buffer, buffersize);
+		return pidinfo(pid, flavor, arg, buffer, buffersize);
 	case PROC_INFO_CALL_PIDFDINFO:
 		return fdinfo(pid, flavor, (int32_t)arg, (void *)buffer,
 				buffersize);
@@ -225,7 +307,8 @@ sys_proc_info(int32_t callnum, int32_t pid, uint32_t flavor, uint64_t arg,
 }
 
 static int
-pidinfo(int32_t pid, uint32_t flavor, user_addr_t buffer, int32_t buffersize)
+pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, user_addr_t buffer,
+		int32_t buffersize)
 {
 	struct process process;
 	if (process_lookup(pid, &process)) {
@@ -311,6 +394,32 @@ pidinfo(int32_t pid, uint32_t flavor, user_addr_t buffer, int32_t buffersize)
 		memcpy(buffer, guest, length);
 		return length;
 	}
+	case PROC_PIDVNODEPATHINFO: {
+		struct proc_vnodepathinfo {
+			struct vnode_info_path pvi_cdir;
+			struct vnode_info_path pvi_rdir;
+		} *info = buffer;
+		if (buffersize < (int32_t)sizeof(*info)) {
+			return _ENOMEM;
+		}
+		char cwd[64];
+		snprintf(cwd, sizeof(cwd), "/proc/%d/cwd", pid);
+		memset(info, 0, sizeof(*info));
+		if (!vnode_info_path(cwd, &info->pvi_cdir)) {
+			return _EPERM;
+		}
+		return sizeof(*info);
+	}
+	case PROC_PIDREGIONPATHINFO2: {
+		struct proc_regionwithpathinfo *info = buffer;
+		if (buffersize < (int32_t)sizeof(*info)) {
+			return _ENOMEM;
+		}
+		return region_with_path(pid, arg, info) ? (int)sizeof(*info)
+							: _EINVAL;
+	}
+	case PROC_PIDLISTFILEPORTS:
+		return 0;
 	case PROC_PIDPLATFORMINFO: {
 		uint32_t platform = codesign_platform(pid);
 		if (buffersize < (int32_t)sizeof(platform)) {
@@ -625,38 +734,6 @@ fdinfo(int32_t pid, uint32_t flavor, int32_t fd, void *buffer,
 	enum {
 		PROC_PIDFDVNODEPATHINFO = 2,
 	};
-	enum {
-		VREG = 1,
-		VDIR = 2,
-		VBLK = 3,
-		VCHR = 4,
-		VLNK = 5,
-		VSOCK = 6,
-		VFIFO = 7,
-	};
-	struct vinfo_stat {
-		uint32_t vst_dev;
-		uint16_t vst_mode;
-		uint16_t vst_nlink;
-		uint64_t vst_ino;
-		uint32_t vst_uid;
-		uint32_t vst_gid;
-		int64_t vst_atime;
-		int64_t vst_atimensec;
-		int64_t vst_mtime;
-		int64_t vst_mtimensec;
-		int64_t vst_ctime;
-		int64_t vst_ctimensec;
-		int64_t vst_birthtime;
-		int64_t vst_birthtimensec;
-		int64_t vst_size;
-		int64_t vst_blocks;
-		int32_t vst_blksize;
-		uint32_t vst_flags;
-		uint32_t vst_gen;
-		uint32_t vst_rdev;
-		int64_t vst_qspare[2];
-	};
 	struct vnode_fdinfowithpath {
 		struct {
 			uint32_t fi_openflags;
@@ -665,13 +742,7 @@ fdinfo(int32_t pid, uint32_t flavor, int32_t fd, void *buffer,
 			int32_t fi_type;
 			uint32_t fi_guardflags;
 		} pfi;
-		struct {
-			struct vinfo_stat vi_stat;
-			int32_t vi_type;
-			int32_t vi_pad;
-			int32_t vi_fsid[2];
-			char vip_path[1024];
-		} pvip;
+		struct vnode_info_path pvip;
 	};
 	_Static_assert(sizeof(struct vnode_fdinfowithpath) == 1200,
 			"vnode_fdinfowithpath");
@@ -685,18 +756,12 @@ fdinfo(int32_t pid, uint32_t flavor, int32_t fd, void *buffer,
 	}
 	char path[64];
 	snprintf(path, sizeof(path), "/proc/%d/fd/%d", pid, fd);
-	char link[PATH_MAX];
-	ssize_t length = readlink(path, link, sizeof(link) - 1);
-	struct stat st;
-	if (length <= 0 || stat(path, &st) == -1) {
-		return _EBADF;
-	}
-	link[length] = '\0';
-	/* Only files have vnodes: a socket or a pipe has none */
-	if (link[0] != '/') {
+	struct vnode_info_path vnode;
+	if (!vnode_info_path(path, &vnode)) {
 		return _EBADF;
 	}
 	memset(info, 0, sizeof(*info));
+	info->pvip = vnode;
 	char flags_path[64];
 	snprintf(flags_path, sizeof(flags_path), "/proc/%d/fdinfo/%d", pid, fd);
 	FILE *file = fopen(flags_path, "r");
@@ -715,33 +780,6 @@ fdinfo(int32_t pid, uint32_t flavor, int32_t fd, void *buffer,
 		fclose(file);
 	}
 	info->pfi.fi_type = 1; /* PROX_FDTYPE_VNODE */
-	struct vinfo_stat *vst = &info->pvip.vi_stat;
-	vst->vst_dev = darwin_device(st.st_dev);
-	vst->vst_mode = st.st_mode;
-	vst->vst_nlink = st.st_nlink;
-	vst->vst_ino = sysroot_file_id(st.st_dev, st.st_ino);
-	vst->vst_uid = st.st_uid;
-	vst->vst_gid = st.st_gid;
-	vst->vst_atime = st.st_atim.tv_sec;
-	vst->vst_atimensec = st.st_atim.tv_nsec;
-	vst->vst_mtime = st.st_mtim.tv_sec;
-	vst->vst_mtimensec = st.st_mtim.tv_nsec;
-	vst->vst_ctime = st.st_ctim.tv_sec;
-	vst->vst_ctimensec = st.st_ctim.tv_nsec;
-	vst->vst_size = st.st_size;
-	vst->vst_blocks = st.st_blocks;
-	vst->vst_blksize = st.st_blksize;
-	vst->vst_rdev = (major(st.st_rdev) << 24) | minor(st.st_rdev);
-	info->pvip.vi_type = S_ISREG(st.st_mode) ? VREG
-			: S_ISDIR(st.st_mode)    ? VDIR
-			: S_ISBLK(st.st_mode)    ? VBLK
-			: S_ISCHR(st.st_mode)    ? VCHR
-			: S_ISLNK(st.st_mode)    ? VLNK
-			: S_ISSOCK(st.st_mode)   ? VSOCK
-						 : VFIFO;
-	info->pvip.vi_fsid[0] = (int32_t)vst->vst_dev;
-	snprintf(info->pvip.vip_path, sizeof(info->pvip.vip_path), "%s",
-			sysroot_guest_path(link));
 	return sizeof(*info);
 }
 
@@ -800,4 +838,100 @@ listfds(int32_t pid, void *buffer, int32_t buffersize)
 		count += 20;
 	}
 	return count * (int32_t)sizeof(*out);
+}
+
+static bool
+vnode_info_path(const char *proc_link, struct vnode_info_path *info)
+{
+	char file[PATH_MAX];
+	ssize_t length = readlink(proc_link, file, sizeof(file) - 1);
+	struct stat st;
+	if (length <= 0 || stat(proc_link, &st) == -1) {
+		return false;
+	}
+	file[length] = '\0';
+	/* Only files have vnodes: a socket or a pipe has none */
+	if (file[0] != '/') {
+		return false;
+	}
+	fill_vnode_info(file, &st, info);
+	return true;
+}
+
+static void
+fill_vnode_info(const char *file, const struct stat *st,
+		struct vnode_info_path *info)
+{
+	memset(info, 0, sizeof(*info));
+	struct vinfo_stat *vst = &info->vi_stat;
+	vst->vst_dev = darwin_device(st->st_dev);
+	vst->vst_mode = st->st_mode;
+	vst->vst_nlink = st->st_nlink;
+	vst->vst_ino = sysroot_file_id(st->st_dev, st->st_ino);
+	vst->vst_uid = st->st_uid;
+	vst->vst_gid = st->st_gid;
+	vst->vst_atime = st->st_atim.tv_sec;
+	vst->vst_atimensec = st->st_atim.tv_nsec;
+	vst->vst_mtime = st->st_mtim.tv_sec;
+	vst->vst_mtimensec = st->st_mtim.tv_nsec;
+	vst->vst_ctime = st->st_ctim.tv_sec;
+	vst->vst_ctimensec = st->st_ctim.tv_nsec;
+	vst->vst_size = st->st_size;
+	vst->vst_blocks = st->st_blocks;
+	vst->vst_blksize = st->st_blksize;
+	vst->vst_rdev = (major(st->st_rdev) << 24) | minor(st->st_rdev);
+	info->vi_type = S_ISREG(st->st_mode)    ? VREG
+			: S_ISDIR(st->st_mode)  ? VDIR
+			: S_ISBLK(st->st_mode)  ? VBLK
+			: S_ISCHR(st->st_mode)  ? VCHR
+			: S_ISLNK(st->st_mode)  ? VLNK
+			: S_ISSOCK(st->st_mode) ? VSOCK
+						: VFIFO;
+	info->vi_fsid[0] = (int32_t)vst->vst_dev;
+	snprintf(info->vip_path, sizeof(info->vip_path), "%s",
+			sysroot_guest_path(file));
+}
+
+static bool
+region_with_path(int32_t pid, uint64_t address,
+		struct proc_regionwithpathinfo *info)
+{
+	char maps_path[64];
+	snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
+	FILE *maps = fopen(maps_path, "re");
+	if (maps == NULL) {
+		return false;
+	}
+	char line[PATH_MAX + 128];
+	bool found = false;
+	while (!found && fgets(line, sizeof(line), maps) != NULL) {
+		unsigned long start, end, offset;
+		char perms[5];
+		int name = 0;
+		sscanf(line, "%lx-%lx %4s %lx %*s %*s %n", &start, &end, perms,
+				&offset, &name);
+		line[strcspn(line, "\n")] = '\0';
+		const char *file = line + name;
+		struct stat st;
+		if (name == 0 || end <= address || file[0] != '/'
+				|| strstr(file, " (deleted)") != NULL
+				|| stat(file, &st) != 0) {
+			continue;
+		}
+		memset(info, 0, sizeof(*info));
+		fill_vnode_info(file, &st, &info->prp_vip);
+		struct proc_regioninfo *region = &info->prp_prinfo;
+		region->pri_protection = (perms[0] == 'r' ? 1 : 0)
+				| (perms[1] == 'w' ? 2 : 0)
+				| (perms[2] == 'x' ? 4 : 0);
+		region->pri_max_protection = 7;
+		region->pri_offset = offset;
+		region->pri_share_mode
+				= perms[3] == 's' ? SM_SHARED : SM_PRIVATE;
+		region->pri_address = start;
+		region->pri_size = end - start;
+		found = true;
+	}
+	fclose(maps);
+	return found;
 }
