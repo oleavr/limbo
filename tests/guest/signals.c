@@ -316,6 +316,42 @@ check_self_pipe(void)
 	close(self_pipe[1]);
 }
 
+static void *
+send_hangup(void *arg)
+{
+	usleep(100000);
+	pthread_kill(*(pthread_t *)arg, SIGHUP);
+	return NULL;
+}
+
+static void
+check_sigwait(void)
+{
+	sigset_t set, old;
+	int sig = 0;
+
+	sigemptyset(&set);
+	sigaddset(&set, SIGUSR1);
+	sigprocmask(SIG_BLOCK, &set, &old);
+	got = 0;
+	raise(SIGUSR1);
+	CHECK(sigwait(&set, &sig) == 0 && sig == SIGUSR1 && got == 0);
+	sigprocmask(SIG_SETMASK, &old, NULL);
+	CHECK(got == 0);
+
+	signal(SIGHUP, SIG_DFL);
+	sigemptyset(&set);
+	sigaddset(&set, SIGHUP);
+	sigaddset(&set, SIGINT);
+	sigprocmask(SIG_BLOCK, &set, &old);
+	pthread_t self = pthread_self(), sender;
+	pthread_create(&sender, NULL, send_hangup, &self);
+	sig = 0;
+	CHECK(sigwait(&set, &sig) == 0 && sig == SIGHUP);
+	pthread_join(sender, NULL);
+	sigprocmask(SIG_SETMASK, &old, NULL);
+}
+
 static void
 check_source(void)
 {
@@ -347,6 +383,7 @@ main(void)
 	check_children();
 	check_restart();
 	check_self_pipe();
+	check_sigwait();
 	check_source();
 	return 0;
 }
