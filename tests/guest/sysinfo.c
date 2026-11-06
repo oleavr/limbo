@@ -49,6 +49,10 @@
 #define HOST_MACHINE  "x86_64"
 #endif
 
+#ifndef PROC_PIDREGIONPATHINFO2
+#define PROC_PIDREGIONPATHINFO2 22
+#endif
+
 int proc_get_cpumon_params(pid_t pid, int *percentage, int *interval);
 
 int
@@ -94,6 +98,23 @@ main(void)
 			      &size, NULL, 0)
 			== 0);
 	CHECK(pressure == 1 || pressure == 2 || pressure == 4);
+
+	struct proc_vnodepathinfo vnodes;
+	CHECK(proc_pidinfo(getpid(), PROC_PIDVNODEPATHINFO, 0, &vnodes,
+			      sizeof(vnodes))
+			== sizeof(vnodes));
+	char cwd[PATH_MAX];
+	CHECK(getcwd(cwd, sizeof(cwd)) != NULL);
+	CHECK(strcmp(vnodes.pvi_cdir.vip_path, cwd) == 0);
+
+	struct proc_regionwithpathinfo mapped;
+	CHECK(proc_pidinfo(getpid(), PROC_PIDREGIONPATHINFO2, 0, &mapped,
+			      sizeof(mapped))
+			== sizeof(mapped));
+	CHECK(mapped.prp_vip.vip_path[0] == '/');
+	CHECK(proc_pidinfo(getpid(), PROC_PIDREGIONPATHINFO2, UINT64_MAX,
+			      &mapped, sizeof(mapped))
+			<= 0);
 
 	int value = -1;
 	size = sizeof(value);
