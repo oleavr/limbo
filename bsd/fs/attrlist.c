@@ -86,6 +86,8 @@ struct reference {
 #define FSOPT_PACK_INVAL_ATTRS  8
 #define FSOPT_ATTR_CMN_EXTENDED 0x20
 
+#define DARWIN_VT_APFS 25
+
 #define ATTR_CMN_NAME               0x00000001
 #define ATTR_CMN_DEVID              0x00000002
 #define ATTR_CMN_FSID               0x00000004
@@ -373,6 +375,11 @@ pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 		memcpy(buffer + offset, &type, sizeof(type));
 		offset += sizeof(type);
 		commonattr &= ~ATTR_CMN_OBJTYPE;
+	}
+
+	if (returned.commonattr & ATTR_CMN_OBJTAG) {
+		offset = pack_u32(buffer, offset, DARWIN_VT_APFS);
+		commonattr &= ~ATTR_CMN_OBJTAG;
 	}
 
 	if (returned.commonattr & ATTR_CMN_OBJID) {
@@ -669,6 +676,7 @@ pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 				.commonattr = ATTR_CMN_NAME | ATTR_CMN_DEVID
 						| ATTR_CMN_FSID
 						| ATTR_CMN_OBJTYPE
+						| ATTR_CMN_OBJTAG
 						| ATTR_CMN_OBJID
 						| ATTR_CMN_PAROBJID
 						| ATTR_CMN_SCRIPT
