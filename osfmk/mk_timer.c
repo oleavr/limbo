@@ -214,10 +214,13 @@ timer_fire(struct mk_timer *timer)
 static void
 timer_wait(uint64_t expire_time)
 {
+	uint64_t now = commpage_absolute_time();
+	if (expire_time <= now) {
+		return;
+	}
 	struct timespec deadline;
 	clock_gettime(CLOCK_MONOTONIC, &deadline);
-	uint64_t delay = commpage_absolute_to_nanoseconds(
-			expire_time - commpage_absolute_time());
+	uint64_t delay = commpage_absolute_to_nanoseconds(expire_time - now);
 	deadline.tv_sec += delay / 1000000000;
 	deadline.tv_nsec += delay % 1000000000;
 	if (deadline.tv_nsec >= 1000000000) {
