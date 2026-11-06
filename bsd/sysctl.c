@@ -330,6 +330,7 @@ static const struct sysctl_node nodes[] = {
 				.string = "Performance"},
 		{"security.mac.lockdown_mode_state", {0, 0}, SYSCTL_INT,
 				.number = 0},
+		{"vfs.generic.noremotehang", {0, 0}, SYSCTL_INT, .number = 0},
 		{"security.mac.amfi.qa_root_certs_allowed", {0, 0}, SYSCTL_INT,
 				.number = 0},
 		{"kern.safeboot", {0, 0}, SYSCTL_INT, .number = 0},
