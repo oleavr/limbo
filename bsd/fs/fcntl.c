@@ -240,8 +240,13 @@ sys_sys_fcntl(int fd, int cmd, long arg)
 	case _F_SINGLE_WRITER:
 	case _F_SETNOSIGPIPE:
 		return 0;
-	case _F_GETPROTECTIONCLASS:
-		return _ENOTSUP;
+	case _F_GETPROTECTIONCLASS: {
+		struct stat file;
+		if (fstat(fd, &file) == -1) {
+			return err_map(errno);
+		}
+		return S_ISDIR(file.st_mode) ? 0 : 3;
+	}
 	case _F_SETPROTECTIONCLASS:
 		return 0;
 	case _F_ASSERT_BG_ACCESS:
