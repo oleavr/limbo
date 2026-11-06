@@ -30,11 +30,14 @@
 #include <mach/mach.h>
 #include <netinet/in.h>
 #include <netinet/ip_var.h>
+#include <pthread.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <string.h>
 #include <sys/resource.h>
 #include <sys/sysctl.h>
 #include <sys/utsname.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 #include <uuid/uuid.h>
@@ -54,6 +57,8 @@
 #endif
 
 int proc_get_cpumon_params(pid_t pid, int *percentage, int *interval);
+
+static void check_main_thread_gone(void);
 
 int
 main(void)
@@ -115,6 +120,8 @@ main(void)
 	CHECK(proc_pidinfo(getpid(), PROC_PIDREGIONPATHINFO2, UINT64_MAX,
 			      &mapped, sizeof(mapped))
 			<= 0);
+
+	check_main_thread_gone();
 
 	int value = -1;
 	size = sizeof(value);
@@ -252,4 +259,53 @@ main(void)
 
 	CHECK(labs(time(NULL) - info.kp_proc.p_starttime.tv_sec) < 60);
 	return 0;
+}
+
+static void *
+linger(void *arg)
+{
+	for (;;) {
+		pause();
+	}
+	return arg;
+}
+
+static void
+check_main_thread_gone(void)
+{
+	int ready[2];
+	CHECK(pipe(ready) == 0);
+	pid_t pid = fork();
+	CHECK(pid >= 0);
+	if (pid == 0) {
+		pthread_t thread;
+		CHECK(pthread_create(&thread, NULL, linger, NULL) == 0);
+		close(ready[1]);
+		pthread_exit(NULL);
+	}
+	close(ready[1]);
+	char byte;
+	CHECK(read(ready[0], &byte, 1) == 0);
+	close(ready[0]);
+	usleep(200000);
+
+	struct proc_fdinfo fds[256];
+	int fds_size = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, fds, sizeof(fds));
+	struct proc_vnodepathinfo paths;
+	memset(&paths, 0, sizeof(paths));
+	int paths_size = proc_pidinfo(
+			pid, PROC_PIDVNODEPATHINFO, 0, &paths, sizeof(paths));
+	CHECK(kill(pid, SIGKILL) == 0);
+
+	CHECK(fds_size > 0);
+	bool found = false;
+	for (int i = 0; i < fds_size / (int)sizeof(fds[0]); i++) {
+		found = found || fds[i].proc_fd == STDERR_FILENO;
+	}
+	CHECK(found);
+	CHECK(paths_size == sizeof(paths));
+	CHECK(paths.pvi_cdir.vip_path[0] == '/');
+
+	int status;
+	CHECK(waitpid(pid, &status, 0) == pid);
 }

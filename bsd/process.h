@@ -56,6 +56,7 @@ void process_start_time(
 		const struct process *process, uint64_t *sec, uint64_t *usec);
 
 uint64_t process_ticks_to_nanoseconds(uint64_t ticks);
+void process_proc_dir(int32_t pid, char *dir, size_t size);
 
 bool process_executable_path(int32_t pid, char *path);
 
