@@ -59,6 +59,7 @@ static void reserve_high_address_space(void);
 #endif
 static uintptr_t build_stack(uint8_t *exe_base, const char *path, int argc,
 		char *argv[], char *envp[]);
+static char *copy_string(char **next, const char *s);
 static int restart_without_aslr(char *argv[], char *envp[]);
 static void raise_file_limit(void);
 
@@ -283,7 +284,20 @@ build_stack(uint8_t *exe_base, const char *path, int argc, char *argv[],
 	for (envc = 0; envp[envc] != NULL; envc++)
 		;
 
-	uintptr_t stack_base = (uintptr_t)VM_USRSTACK64;
+	size_t strings = 0;
+	for (int i = 0; i < argc; i++) {
+		strings += strlen(argv[i]) + 1;
+	}
+	for (uint32_t i = 0; i < envc; i++) {
+		strings += strlen(envp[i]) + 1;
+	}
+	for (uint32_t i = 0; i < applec; i++) {
+		strings += strlen(apple[i]) + 1;
+	}
+	uintptr_t strings_base = ((uintptr_t)VM_USRSTACK64 - strings) & ~0xful;
+	char *next = (char *)strings_base;
+
+	uintptr_t stack_base = strings_base;
 	stack_base -= (applec + 1) * sizeof(void *); /* Apple env pointers */
 	stack_base -= (envc + 1) * sizeof(void *);   /* Env pointers */
 	stack_base -= (argc + 1) * sizeof(void *);   /* Arg pointers */
@@ -297,21 +311,31 @@ build_stack(uint8_t *exe_base, const char *path, int argc, char *argv[],
 
 	/* Arguments */
 	for (int i = 0; i < argc; i++) {
-		*sp++ = (unsigned long)argv[i];
+		*sp++ = (unsigned long)copy_string(&next, argv[i]);
 	}
 	*sp++ = 0; /* End of arguments */
 
 	/* Environment */
 	for (uint32_t i = 0; i < envc; i++) {
-		*sp++ = (unsigned long)envp[i];
+		*sp++ = (unsigned long)copy_string(&next, envp[i]);
 	}
 	*sp++ = 0; /* End of environment */
 
 	/* Apple environment */
 	for (uint32_t i = 0; i < applec; i++) {
-		*sp++ = (unsigned long)apple[i];
+		*sp++ = (unsigned long)copy_string(&next, apple[i]);
+		free(apple[i]);
 	}
 	*sp++ = 0; /* End of environment */
 
 	return stack_base;
+}
+
+static char *
+copy_string(char **next, const char *s)
+{
+	size_t length = strlen(s) + 1;
+	char *copy = memcpy(*next, s, length);
+	*next += length;
+	return copy;
 }
