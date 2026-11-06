@@ -826,14 +826,37 @@ clone_file(int source, int destination)
 	if (fstat(source, &st) == -1) {
 		return 1;
 	}
-	off_t remaining = st.st_size;
-	while (remaining > 0) {
-		ssize_t copied = copy_file_range(
-				source, NULL, destination, NULL, remaining, 0);
-		if (copied <= 0) {
+	off_t offset = 0;
+	while (offset < st.st_size) {
+		ssize_t copied = copy_file_range(source, &(loff_t){offset},
+				destination, &(loff_t){offset},
+				st.st_size - offset, 0);
+		if (copied == -1) {
+			break;
+		}
+		if (copied == 0) {
 			return 1;
 		}
-		remaining -= copied;
+		offset += copied;
+	}
+	static char buffer[1 << 20];
+	while (offset < st.st_size) {
+		size_t size = st.st_size - offset < (off_t)sizeof(buffer)
+				? (size_t)(st.st_size - offset)
+				: sizeof(buffer);
+		ssize_t got = pread(source, buffer, size, offset);
+		if (got <= 0) {
+			return 1;
+		}
+		for (ssize_t done = 0; done < got;) {
+			ssize_t put = pwrite(destination, buffer + done,
+					got - done, offset + done);
+			if (put <= 0) {
+				return 1;
+			}
+			done += put;
+		}
+		offset += got;
 	}
 	return 0;
 }
