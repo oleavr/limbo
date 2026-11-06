@@ -191,6 +191,16 @@ main(void)
 			== (uint32_t)capabilities);
 #endif
 
+	int mib_hang[CTL_MAXNAME];
+	size_t hang_length = CTL_MAXNAME;
+	CHECK(sysctlnametomib("vfs.generic.noremotehang", mib_hang,
+			      &hang_length)
+			== 0);
+	int pid = getpid();
+	CHECK(sysctl(mib_hang, (u_int)hang_length, NULL, NULL, &pid,
+			      sizeof(pid))
+			== 0);
+
 	int percentage = -1, interval = -1;
 	CHECK(proc_get_cpumon_params(getpid(), &percentage, &interval) == 0);
 	CHECK(percentage == 0 && interval == 0);
