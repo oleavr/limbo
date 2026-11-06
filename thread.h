@@ -31,6 +31,7 @@
 #include <pthread.h>
 #include <setjmp.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -79,6 +80,9 @@ struct thread {
 	void *trap_context;
 
 	void *parked_context;
+	bool workqueue;
+	int trap_depth;
+	_Atomic int64_t trap_since;
 };
 
 struct thread *thread_current(void);

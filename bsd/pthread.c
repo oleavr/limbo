@@ -38,6 +38,7 @@
 #include <stdlib.h>
 #include <strings.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "handler.h"
@@ -106,6 +107,8 @@ enum {
 	WORKQ_COOPERATIVE,
 };
 #define WORKQ_STACK_SIZE       (512 * 1024)
+#define WORKQ_CONSTRAINED_MAX  64
+#define WORKQ_BLOCKED_MS       20
 #define WORKQ_KEVENT_LIST_LEN  16
 #define WORKQ_KEVENT_DATA_SIZE (32 * 1024)
 
@@ -140,6 +143,9 @@ struct workq_thread {
 	uint64_t stack_top;
 	struct workq_request request;
 	bool started;
+	struct thread *thread;
+	bool counted;
+	struct workq_thread *next;
 };
 
 static struct {
@@ -160,16 +166,24 @@ static struct {
 	uint32_t constrained;
 
 	long cpus;
+	struct workq_thread *threads;
+	pthread_cond_t monitor_wakeup;
+	bool monitor_started;
 } workq = {
 		.lock = PTHREAD_MUTEX_INITIALIZER,
 		.wakeup = PTHREAD_COND_INITIALIZER,
 		.kqueue_requests_tail = &workq.kqueue_requests,
+		.monitor_wakeup = PTHREAD_COND_INITIALIZER,
 };
 
 static void workq_schedule(void);
 static uint32_t workq_pending(void);
 static bool workq_claim(struct workq_request *request);
 static void workq_spawn(const struct workq_request *request);
+static uint32_t workq_blocked(void);
+static bool workq_starved(void);
+static void *workq_monitor(void *arg);
+static void workq_fork_child(void);
 static bool workq_continue(struct thread *thread, struct thread_state *state);
 static void workq_thread_state(struct workq_thread *wt, uint32_t flags,
 		mach_port_name_t kport, struct thread_state *state);
@@ -338,6 +352,72 @@ workq_schedule(void)
 		workq_spawn(&request);
 		pending--;
 	}
+
+	if (workq_starved()) {
+		if (!workq.monitor_started) {
+			pthread_t monitor;
+			thread_create_own(&monitor, NULL, workq_monitor, NULL);
+			pthread_detach(monitor);
+			workq.monitor_started = true;
+		}
+		pthread_cond_signal(&workq.monitor_wakeup);
+	}
+}
+
+static uint32_t
+workq_blocked(void)
+{
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC_COARSE, &now);
+	int64_t now_ms = (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+	uint32_t blocked = 0;
+	for (struct workq_thread *wt = workq.threads; wt != NULL;
+			wt = wt->next) {
+		int64_t since = atomic_load_explicit(
+				&wt->thread->trap_since, memory_order_relaxed);
+		if (wt->counted && since != 0
+				&& now_ms - since >= WORKQ_BLOCKED_MS) {
+			blocked++;
+		}
+	}
+	return blocked;
+}
+
+static bool
+workq_starved(void)
+{
+	for (uint32_t qos = 0; qos < WORKQ_QOS_COUNT; qos++) {
+		if (workq.requests[qos][WORKQ_CONSTRAINED] != 0
+				|| workq.requests[qos][WORKQ_COOPERATIVE]
+						!= 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void *
+workq_monitor(void *arg)
+{
+	pthread_mutex_lock(&workq.lock);
+	for (;;) {
+		while (!workq_starved()) {
+			pthread_cond_wait(&workq.monitor_wakeup, &workq.lock);
+		}
+		pthread_mutex_unlock(&workq.lock);
+		nanosleep(&(struct timespec){.tv_nsec
+					  = WORKQ_BLOCKED_MS * 1000000L},
+				NULL);
+		pthread_mutex_lock(&workq.lock);
+		workq_schedule();
+	}
+	return NULL;
+}
+
+static void
+workq_fork_child(void)
+{
+	workq.monitor_started = false;
 }
 
 static uint32_t
@@ -372,8 +452,12 @@ workq_claim(struct workq_request *request)
 
 	if (workq.cpus == 0) {
 		workq.cpus = sysconf(_SC_NPROCESSORS_ONLN);
+		pthread_atfork(NULL, NULL, workq_fork_child);
 	}
-	bool constrained_allowed = workq.constrained < workq.cpus;
+	uint32_t blocked = workq.constrained != 0 ? workq_blocked() : 0;
+	bool constrained_allowed
+			= (long)(workq.constrained - blocked) < workq.cpus
+			&& workq.constrained < WORKQ_CONSTRAINED_MAX;
 	for (int32_t qos = WORKQ_QOS_COUNT - 1; qos >= 0; qos--) {
 		if (workq.requests[qos][WORKQ_OVERCOMMIT] > 0) {
 			workq.requests[qos][WORKQ_OVERCOMMIT]--;
@@ -417,8 +501,13 @@ workq_spawn(const struct workq_request *request)
 	wt->stack_top = wt->stack_bottom + WORKQ_STACK_SIZE;
 	wt->self = wt->stack_top;
 	wt->request = *request;
+	wt->counted = !request->overcommit;
+	wt->thread = thread_new(workq_continue, wt);
+	wt->thread->workqueue = true;
+	wt->next = workq.threads;
+	workq.threads = wt;
 
-	thread_start(thread_new(workq_continue, wt), NULL);
+	thread_start(wt->thread, NULL);
 }
 
 static bool
@@ -439,11 +528,15 @@ workq_continue(struct thread *thread, struct thread_state *state)
 	if (!wt->request.overcommit) {
 		workq.constrained--;
 	}
+	wt->counted = false;
 	while (!workq_claim(&wt->request)) {
 		workq.idle++;
 		pthread_cond_wait(&workq.wakeup, &workq.lock);
 		workq.idle--;
 	}
+	wt->counted = !wt->request.overcommit;
+	thread->trap_depth = 0;
+	atomic_store_explicit(&thread->trap_since, 0, memory_order_relaxed);
 	pthread_mutex_unlock(&workq.lock);
 
 	workq_thread_state(wt, workq_flags(&wt->request) | WQ_FLAG_THREAD_REUSE,

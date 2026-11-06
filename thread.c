@@ -40,6 +40,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#include <time.h>
 #include <ucontext.h>
 #include <unistd.h>
 
@@ -343,6 +344,14 @@ void
 thread_enter_trap(void *context, void **outer)
 {
 	struct thread *thread = thread_current();
+	if (thread->workqueue && thread->trap_depth++ == 0) {
+		struct timespec now;
+		clock_gettime(CLOCK_MONOTONIC_COARSE, &now);
+		atomic_store_explicit(&thread->trap_since,
+				(int64_t)now.tv_sec * 1000
+						+ now.tv_nsec / 1000000,
+				memory_order_relaxed);
+	}
 	pthread_mutex_lock(&thread->suspend_lock);
 	*outer = thread->trap_context;
 	thread->trap_context = context;
@@ -363,6 +372,11 @@ thread_leave_trap(void *context, void *outer)
 	}
 	thread->trap_context = outer;
 	pthread_mutex_unlock(&thread->suspend_lock);
+	if (thread->workqueue && thread->trap_depth > 0
+			&& --thread->trap_depth == 0) {
+		atomic_store_explicit(
+				&thread->trap_since, 0, memory_order_relaxed);
+	}
 }
 
 void
