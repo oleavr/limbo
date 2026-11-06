@@ -291,6 +291,8 @@ sys_sys_fcntl(int fd, int cmd, long arg)
 		return 0;
 	case _F_GETNOSIGPIPE:
 		return 0;
+	case _F_CHECK_OPENEVT:
+		return 0;
 	case _F_RECYCLE:
 		return 0;
 	case _F_FLUSH_DATA:
