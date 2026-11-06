@@ -40,6 +40,10 @@
 
 #include "check.h"
 
+mach_port_name_t mk_timer_create(void);
+kern_return_t mk_timer_arm(mach_port_name_t name, uint64_t expire_time);
+kern_return_t mk_timer_destroy(mach_port_name_t name);
+
 typedef struct {
 	mach_msg_header_t header;
 	mach_msg_body_t body;
@@ -59,6 +63,7 @@ static void check_port_sets(void);
 static void check_semaphores(void);
 static void *signal_semaphore(void *arg);
 static void check_time(void);
+static void check_timers(void);
 static void check_memory_entries(void);
 static void check_remaps(void);
 static void check_mincore(void);
@@ -76,6 +81,7 @@ main(void)
 	check_port_sets();
 	check_semaphores();
 	check_time();
+	check_timers();
 	check_memory_entries();
 	check_remaps();
 	check_mincore();
@@ -328,6 +334,27 @@ check_time(void)
 			+ 20000000ULL * timebase.denom / timebase.numer;
 	CHECK(mach_wait_until(deadline) == KERN_SUCCESS);
 	CHECK(mach_absolute_time() >= deadline);
+}
+
+static void
+check_timers(void)
+{
+	mach_port_name_t timer = mk_timer_create();
+	CHECK(MACH_PORT_VALID(timer));
+	for (int round = 0; round < 20000; round++) {
+		CHECK(mk_timer_arm(timer, mach_absolute_time() + round % 240)
+				== KERN_SUCCESS);
+		struct {
+			mach_msg_header_t header;
+			uint64_t unused[3];
+			mach_msg_trailer_t trailer;
+		} expiry;
+		CHECK(mach_msg(&expiry.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT,
+				      0, sizeof(expiry), timer, 1000,
+				      MACH_PORT_NULL)
+				== KERN_SUCCESS);
+	}
+	CHECK(mk_timer_destroy(timer) == KERN_SUCCESS);
 }
 
 static void
