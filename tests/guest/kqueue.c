@@ -29,6 +29,7 @@
 #include <signal.h>
 #include <sys/event.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "check.h"
@@ -36,6 +37,7 @@
 static int kq;
 
 static void *trigger(void *arg);
+static void *waiter(void *arg);
 
 int
 main(void)
@@ -133,7 +135,40 @@ main(void)
 		CHECK(waitpid(children[i], NULL, 0) == children[i]);
 	}
 	CHECK(close(kq) == 0);
+
+	for (int i = 0; i < 20; i++) {
+		CHECK(pipe(fds) == 0);
+		kq = kqueue();
+		CHECK(kq != -1);
+		CHECK(pthread_create(&thread, NULL, waiter, NULL) == 0);
+		usleep(2000);
+		EV_SET(&changes[0], fds[0], EVFILT_READ, EV_ADD | EV_ENABLE, 0,
+				0, NULL);
+		CHECK(kevent(kq, changes, 1, events, 4, &zero) == 0);
+		usleep(2000);
+		CHECK(write(fds[1], "x", 1) == 1);
+		void *waited;
+		CHECK(pthread_join(thread, &waited) == 0);
+		CHECK((intptr_t)waited == fds[0]);
+		CHECK(close(kq) == 0 && close(fds[0]) == 0
+				&& close(fds[1]) == 0);
+	}
 	return 0;
+}
+
+static void *
+waiter(void *arg)
+{
+	struct kevent event;
+	struct timespec seconds = {2, 0}, start, end;
+	CHECK(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
+	CHECK(kevent(kq, NULL, 0, &event, 1, &seconds) == 1);
+	CHECK(clock_gettime(CLOCK_MONOTONIC, &end) == 0);
+	CHECK(event.filter == EVFILT_READ);
+	CHECK((end.tv_sec - start.tv_sec) * 1000000000L
+					+ (end.tv_nsec - start.tv_nsec)
+			< 1000000000L);
+	return (void *)(intptr_t)event.ident;
 }
 
 static void *

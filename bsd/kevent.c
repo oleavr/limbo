@@ -191,6 +191,7 @@ struct kqueue {
 	kqueue_kind_t kind;
 	uint64_t id;
 	int fd;
+	int pollers;
 	struct knote *knotes;
 	bool bound[2];
 	bool requested[2];
@@ -1356,9 +1357,10 @@ kqueue_wait(struct kqueue *kq, struct kevent_qos_s *events, int nevents,
 {
 	uint64_t deadline = (timeout > 0) ? now_monotonic() + timeout : 0;
 	while (true) {
-
-		eventfd_t value;
-		eventfd_read(kq->fd, &value);
+		if (kq->pollers == 0) {
+			eventfd_t value;
+			eventfd_read(kq->fd, &value);
+		}
 		uint8_t *data = NULL;
 		size_t data_size = 0;
 		int count = kqueue_collect(
@@ -1406,11 +1408,11 @@ kqueue_poll(struct kqueue *kq, int timeout)
 		}
 	}
 
+	kq->pollers++;
 	pthread_mutex_unlock(&lock);
 	poll(fds, used, timeout);
-	eventfd_t value;
-	eventfd_read(kq->fd, &value);
 	pthread_mutex_lock(&lock);
+	kq->pollers--;
 	free(fds);
 }
 
