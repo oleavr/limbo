@@ -83,6 +83,8 @@ static kern_return_t remap_copy(mach_vm_address_t *target_address,
 		mach_vm_size_t size, mach_vm_offset_t mask, int flags,
 		mach_vm_address_t src_address, vm_prot_t *protection);
 static vm_prot_t region_protection(mach_vm_address_t address);
+static void region_top_info(mach_vm_address_t address, mach_vm_size_t size,
+		bool shared, vm_region_top_info_t info);
 static bool region_find(mach_vm_address_t address, mach_vm_address_t *start,
 		mach_vm_size_t *size, vm_prot_t *protection, bool *shared,
 		uint64_t *offset);
@@ -900,7 +902,9 @@ mach_vm_region(vm_map_read_t target_task, mach_vm_address_t *address,
 #endif
 	bool narrow = flavor == VM_REGION_BASIC_INFO
 			&& *infoCnt >= VM_REGION_BASIC_INFO_COUNT;
-	if (!narrow
+	bool top = flavor == VM_REGION_TOP_INFO
+			&& *infoCnt >= VM_REGION_TOP_INFO_COUNT;
+	if (!narrow && !top
 			&& (flavor != VM_REGION_BASIC_INFO_64
 					|| *infoCnt < VM_REGION_BASIC_INFO_COUNT_64)) {
 		unimplemented();
@@ -912,7 +916,10 @@ mach_vm_region(vm_map_read_t target_task, mach_vm_address_t *address,
 			    &offset)) {
 		return KERN_INVALID_ADDRESS;
 	}
-	if (narrow) {
+	if (top) {
+		region_top_info(*address, *size, shared, (void *)info);
+		*infoCnt = VM_REGION_TOP_INFO_COUNT;
+	} else if (narrow) {
 		vm_region_basic_info_data_t *basic = (void *)info;
 		*basic = (vm_region_basic_info_data_t){
 				.protection = protection,
@@ -937,6 +944,36 @@ mach_vm_region(vm_map_read_t target_task, mach_vm_address_t *address,
 		*object_name = MACH_PORT_NULL;
 	}
 	return KERN_SUCCESS;
+}
+
+static void
+region_top_info(mach_vm_address_t address, mach_vm_size_t size, bool shared,
+		vm_region_top_info_t info)
+{
+	long host_page = sysconf(_SC_PAGESIZE);
+	unsigned char vector[4096];
+	uint64_t resident = 0;
+	for (uint64_t at = 0; at < size; at += sizeof(vector) * host_page) {
+		uint64_t length = size - at;
+		if (length > sizeof(vector) * host_page) {
+			length = sizeof(vector) * host_page;
+		}
+		mincore((void *)(uintptr_t)(address + at), length, vector);
+		for (uint64_t i = 0; i < (length + host_page - 1) / host_page;
+				i++) {
+			resident += vector[i] & 1;
+		}
+	}
+	unsigned pages = (unsigned)(resident * host_page / (PAGE_MASK + 1));
+	*info = (vm_region_top_info_data_t){
+			.obj_id = (unsigned)(address / (PAGE_MASK + 1)),
+			.ref_count = 1,
+			.private_pages_resident = shared ? 0 : pages,
+			.shared_pages_resident = shared ? pages : 0,
+			.share_mode = shared    ? SM_SHARED
+					: pages ? SM_PRIVATE
+						: SM_EMPTY,
+	};
 }
 
 static bool
