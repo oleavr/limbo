@@ -61,6 +61,7 @@ static void check_time(void);
 static void check_memory_entries(void);
 static void check_remaps(void);
 static void check_mincore(void);
+static void check_regions(void);
 static void check_shared_range_entries(void);
 static void check_exception_ports(void);
 static void check_vouchers(void);
@@ -77,6 +78,7 @@ main(void)
 	check_memory_entries();
 	check_remaps();
 	check_mincore();
+	check_regions();
 	check_exception_ports();
 	check_vouchers();
 	check_destroy();
@@ -124,6 +126,33 @@ check_mincore(void)
 	CHECK(!(vec[3] & MINCORE_INCORE));
 	CHECK(vec[4] == 0x5a);
 	CHECK(mach_vm_deallocate(mach_task_self(), address, 4 * page)
+			== KERN_SUCCESS);
+}
+
+static void
+check_regions(void)
+{
+	mach_vm_address_t address = 0;
+	CHECK(mach_vm_allocate(mach_task_self(), &address, 4096,
+			      VM_FLAGS_ANYWHERE)
+			== KERN_SUCCESS);
+	CHECK(mach_vm_protect(mach_task_self(), address, 4096, FALSE,
+			      VM_PROT_READ)
+			== KERN_SUCCESS);
+
+	mach_vm_address_t found = address;
+	mach_vm_size_t size = 0;
+	vm_region_basic_info_data_t basic;
+	mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT;
+	mach_port_t object;
+	CHECK(mach_vm_region(mach_task_self(), &found, &size,
+			      VM_REGION_BASIC_INFO, (vm_region_info_t)&basic,
+			      &count, &object)
+			== KERN_SUCCESS);
+	CHECK(found == address && size >= 4096);
+	CHECK(basic.protection == VM_PROT_READ);
+	CHECK(count == VM_REGION_BASIC_INFO_COUNT);
+	CHECK(mach_vm_deallocate(mach_task_self(), address, 4096)
 			== KERN_SUCCESS);
 }
 
