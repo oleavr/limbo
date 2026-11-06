@@ -34,6 +34,7 @@
 #include <mach/mach_voucher.h>
 #include <pthread.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 #include "check.h"
@@ -59,6 +60,7 @@ static void *signal_semaphore(void *arg);
 static void check_time(void);
 static void check_memory_entries(void);
 static void check_remaps(void);
+static void check_mincore(void);
 static void check_shared_range_entries(void);
 static void check_exception_ports(void);
 static void check_vouchers(void);
@@ -74,6 +76,7 @@ main(void)
 	check_time();
 	check_memory_entries();
 	check_remaps();
+	check_mincore();
 	check_exception_ports();
 	check_vouchers();
 	check_destroy();
@@ -97,6 +100,31 @@ check_destroy(void)
 	mach_port_type_t type;
 	CHECK(mach_port_type(mach_task_self(), port, &type)
 			== KERN_INVALID_NAME);
+}
+
+static void
+check_mincore(void)
+{
+#ifdef __x86_64__
+	const vm_size_t page = 4096;
+#else
+	const vm_size_t page = 16384;
+#endif
+	mach_vm_address_t address = 0;
+	CHECK(mach_vm_allocate(mach_task_self(), &address, 4 * page,
+			      VM_FLAGS_ANYWHERE)
+			== KERN_SUCCESS);
+	((volatile char *)address)[0] = 1;
+	((volatile char *)address)[2 * page + 100] = 1;
+	char vec[5] = {0, 0, 0, 0, 0x5a};
+	CHECK(mincore((void *)address, 4 * page, vec) == 0);
+	CHECK(vec[0] & MINCORE_INCORE);
+	CHECK(!(vec[1] & MINCORE_INCORE));
+	CHECK(vec[2] & MINCORE_INCORE);
+	CHECK(!(vec[3] & MINCORE_INCORE));
+	CHECK(vec[4] == 0x5a);
+	CHECK(mach_vm_deallocate(mach_task_self(), address, 4 * page)
+			== KERN_SUCCESS);
 }
 
 static void
