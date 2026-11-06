@@ -28,6 +28,8 @@
 #include <errno.h>
 #include <libproc.h>
 #include <mach/mach.h>
+#include <netinet/in.h>
+#include <netinet/ip_var.h>
 #include <stdbool.h>
 #include <string.h>
 #include <sys/resource.h>
@@ -75,6 +77,14 @@ main(void)
 	size = sizeof(target);
 	CHECK(sysctlbyname("hw.target", target, &size, NULL, 0) == 0);
 #endif
+
+	int ttl_mib[4] = {CTL_NET, PF_INET, IPPROTO_IP, IPCTL_DEFTTL};
+	int ttl = 0, named = 0;
+	size = sizeof(ttl);
+	CHECK(sysctl(ttl_mib, 4, &ttl, &size, NULL, 0) == 0 && ttl > 0);
+	size = sizeof(named);
+	CHECK(sysctlbyname("net.inet.ip.ttl", &named, &size, NULL, 0) == 0);
+	CHECK(named == ttl);
 
 	struct kinfo_proc info;
 	size = sizeof(info);
