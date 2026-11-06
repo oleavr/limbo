@@ -183,6 +183,20 @@ main(void)
 			== KERN_SUCCESS);
 	CHECK(basic.cpu_type == HOST_CPU_TYPE && basic.avail_cpus > 0);
 
+	int msgbuf_size = 0;
+	size = sizeof(msgbuf_size);
+	CHECK(sysctlbyname("kern.msgbuf", &msgbuf_size, &size, NULL, 0) == 0);
+	CHECK(msgbuf_size > 0);
+	static char messages[256 * 1024];
+	errno = 0;
+	int given = proc_kmsgbuf(messages, sizeof(messages));
+	if (geteuid() != 0) {
+		CHECK(given == 0 && errno == EPERM);
+	} else {
+		CHECK(given >= 2 && messages[given - 1] == '\0'
+				&& messages[given - 2] == '\n');
+	}
+
 #ifdef __x86_64__
 	uint64_t capabilities = *(volatile uint64_t *)0x7fffffe00010ULL;
 	CHECK((capabilities & 0x204) == 0x204);

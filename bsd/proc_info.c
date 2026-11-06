@@ -42,6 +42,7 @@
 #include "fs/device.h"
 #include "handler.h"
 #include "kevent.h"
+#include "kmsg.h"
 #include "osfmk/task.h"
 #include "process.h"
 #include "sysroot.h"
@@ -50,6 +51,7 @@
 #define PROC_INFO_CALL_LISTPIDS        0x1
 #define PROC_INFO_CALL_PIDINFO         0x2
 #define PROC_INFO_CALL_PIDFDINFO       0x3
+#define PROC_INFO_CALL_KERNMSGBUF      0x4
 #define PROC_INFO_CALL_SETCONTROL      0x5
 #define PROC_INFO_CALL_DIRTYCONTROL    0x8
 #define PROC_INFO_CALL_PIDRUSAGE       0x9
@@ -202,6 +204,11 @@ sys_proc_info(int32_t callnum, int32_t pid, uint32_t flavor, uint64_t arg,
 	case PROC_INFO_CALL_PIDFDINFO:
 		return fdinfo(pid, flavor, (int32_t)arg, (void *)buffer,
 				buffersize);
+	case PROC_INFO_CALL_KERNMSGBUF:
+		if (geteuid() != 0) {
+			return _EPERM;
+		}
+		return kmsg_read((char *)buffer, (uint32_t)buffersize);
 	case PROC_INFO_CALL_SETCONTROL:
 		return setcontrol(flavor, buffer, buffersize);
 	case PROC_INFO_CALL_SET_DYLD_IMAGES:
