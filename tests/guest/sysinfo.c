@@ -25,6 +25,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <errno.h>
 #include <libproc.h>
 #include <mach/mach.h>
 #include <stdbool.h>
@@ -83,6 +84,34 @@ main(void)
 	CHECK(info.kp_proc.p_pid == getpid());
 	CHECK(info.kp_eproc.e_ppid == getppid());
 	CHECK(strcmp(info.kp_proc.p_comm, "sysinfo") == 0);
+	CHECK(((info.kp_proc.p_flag & P_CONTROLT) != 0)
+			== (info.kp_eproc.e_tdev != NODEV));
+
+	int lists[][4] = {
+			{CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0},
+			{CTL_KERN, KERN_PROC, KERN_PROC_UID, (int)geteuid()},
+			{CTL_KERN, KERN_PROC, KERN_PROC_RUID, (int)getuid()},
+			{CTL_KERN, KERN_PROC, KERN_PROC_PGRP, getpgrp()},
+	};
+	static struct kinfo_proc procs[4096];
+	for (size_t l = 0; l < sizeof(lists) / sizeof(lists[0]); l++) {
+		u_int length = lists[l][2] == KERN_PROC_ALL ? 3 : 4;
+		size = 0;
+		CHECK(sysctl(lists[l], length, NULL, &size, NULL, 0) == 0);
+		CHECK(size >= sizeof(procs[0]) && size % sizeof(procs[0]) == 0);
+		size = sizeof(procs);
+		CHECK(sysctl(lists[l], length, procs, &size, NULL, 0) == 0);
+		CHECK(size >= sizeof(procs[0]) && size % sizeof(procs[0]) == 0);
+		bool listed = false;
+		for (size_t i = 0; i < size / sizeof(procs[0]); i++) {
+			listed = listed || procs[i].kp_proc.p_pid == getpid();
+		}
+		CHECK(listed);
+	}
+	size = sizeof(procs[0]);
+	CHECK(sysctl(lists[0], 3, procs, &size, NULL, 0) == -1
+			&& errno == ENOMEM);
+	CHECK(size == sizeof(procs[0]));
 
 	struct proc_bsdinfo bsdinfo;
 	CHECK(proc_pidinfo(getpid(), PROC_PIDTBSDINFO, 0, &bsdinfo,

@@ -31,10 +31,13 @@
 #endif
 
 #include <ctype.h>
+#include <dirent.h>
 #include <limits.h>
 #include <mach/mach.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -103,10 +106,17 @@
 #define KERN_OSVERSION  65
 #define KERN_PROCARGS2  49
 
-#define KERN_PROC_PID 1
+#define KERN_PROC_ALL     0
+#define KERN_PROC_PID     1
+#define KERN_PROC_PGRP    2
+#define KERN_PROC_SESSION 3
+#define KERN_PROC_TTY     4
+#define KERN_PROC_UID     5
+#define KERN_PROC_RUID    6
 
 #define SRUN   2
-#define P_LP64 0x4
+#define P_CONTROLT 0x2
+#define P_LP64     0x4
 
 #define HW_MACHINE   1
 #define HW_MODEL     2
@@ -319,6 +329,12 @@ static const struct sysctl_node nodes[] = {
 };
 
 static int read_kinfo_proc(int32_t pid, void *old, size_t *oldlenp);
+static int list_kinfo_proc(
+		int32_t what, int32_t arg, void *old, size_t *oldlenp);
+static bool kinfo_proc_matches(
+		const struct process *process, int32_t what, int32_t arg);
+static void fill_kinfo_proc(const struct process *process,
+		struct __darwin_kinfo_proc *info);
 static int read_procargs2(int32_t pid, void *old, size_t *oldlenp);
 static const struct sysctl_node *lookup_oid(const int *name, uint32_t namelen);
 static int name2oid(
@@ -372,6 +388,14 @@ sys_sysctl(int *name, uint32_t namelen, void *old, size_t *oldlenp, void *new,
 	if (namelen == 4 && name[0] == CTL_KERN && name[1] == KERN_PROC
 			&& name[2] == KERN_PROC_PID) {
 		return read_kinfo_proc(name[3], old, oldlenp);
+	}
+	if (name[0] == CTL_KERN && name[1] == KERN_PROC
+			&& ((namelen == 3 && name[2] == KERN_PROC_ALL)
+					|| (namelen == 4
+							&& name[2] >= KERN_PROC_ALL
+							&& name[2] <= KERN_PROC_RUID))) {
+		return list_kinfo_proc(name[2], namelen == 4 ? name[3] : 0, old,
+				oldlenp);
 	}
 	if (namelen == 3 && name[0] == CTL_KERN && name[1] == KERN_PROCARGS2) {
 		return read_procargs2(name[2], old, oldlenp);
@@ -478,29 +502,96 @@ read_kinfo_proc(int32_t pid, void *old, size_t *oldlenp)
 		return 0;
 	}
 
-	struct __darwin_kinfo_proc info = {
+	struct __darwin_kinfo_proc info;
+	fill_kinfo_proc(&process, &info);
+	return read_bytes(&info, sizeof(info), old, oldlenp);
+}
+
+static int
+list_kinfo_proc(int32_t what, int32_t arg, void *old, size_t *oldlenp)
+{
+	DIR *proc = opendir("/proc");
+	size_t size = 0;
+	bool full = false;
+	struct dirent *entry;
+	while ((entry = readdir(proc)) != NULL) {
+		char *end;
+		long pid = strtol(entry->d_name, &end, 10);
+		struct process process;
+		if (*end != '\0' || pid <= 0
+				|| process_lookup((int32_t)pid, &process) != 0
+				|| !kinfo_proc_matches(&process, what, arg)) {
+			continue;
+		}
+		if (old != NULL) {
+			if (size + sizeof(struct __darwin_kinfo_proc)
+					> *oldlenp) {
+				full = true;
+				break;
+			}
+			struct __darwin_kinfo_proc info;
+			fill_kinfo_proc(&process, &info);
+			memcpy((uint8_t *)old + size, &info, sizeof(info));
+		}
+		size += sizeof(struct __darwin_kinfo_proc);
+	}
+	closedir(proc);
+	*oldlenp = old != NULL ? size
+			       : size + 5 * sizeof(struct __darwin_kinfo_proc);
+	return full ? _ENOMEM : 0;
+}
+
+static bool
+kinfo_proc_matches(const struct process *process, int32_t what, int32_t arg)
+{
+	switch (what) {
+	case KERN_PROC_ALL:
+		return true;
+	case KERN_PROC_PID:
+		return process->pid == arg;
+	case KERN_PROC_PGRP:
+		return process->pgid == arg;
+	case KERN_PROC_SESSION:
+		return process->session == arg;
+	case KERN_PROC_TTY:
+		return process_terminal(process) == arg;
+	case KERN_PROC_UID:
+		return process->uid[1] == (uint32_t)arg;
+	case KERN_PROC_RUID:
+		return process->uid[0] == (uint32_t)arg;
+	default:
+		return false;
+	}
+}
+
+static void
+fill_kinfo_proc(const struct process *process, struct __darwin_kinfo_proc *info)
+{
+	*info = (struct __darwin_kinfo_proc){
 			.p_flag = P_LP64,
 			.p_stat = SRUN,
-			.p_pid = process.pid,
-			.p_nice = process.nice,
-			.p_ruid = process.uid[0],
-			.p_svuid = process.uid[2],
-			.p_rgid = process.gid[0],
-			.p_svgid = process.gid[2],
-			.cr_uid = process.uid[1],
+			.p_pid = process->pid,
+			.p_nice = process->nice,
+			.p_ruid = process->uid[0],
+			.p_svuid = process->uid[2],
+			.p_rgid = process->gid[0],
+			.p_svgid = process->gid[2],
+			.cr_uid = process->uid[1],
 			.cr_ngroups = 1,
-			.cr_groups = {process.gid[1]},
-			.e_ppid = process.ppid,
-			.e_pgid = process.pgid,
-			.e_tdev = process_terminal(&process),
-			.e_tpgid = process.tpgid,
+			.cr_groups = {process->gid[1]},
+			.e_ppid = process->ppid,
+			.e_pgid = process->pgid,
+			.e_tdev = process_terminal(process),
+			.e_tpgid = process->tpgid,
 	};
 	uint64_t sec, usec;
-	process_start_time(&process, &sec, &usec);
-	info.p_starttime.tv_sec = sec;
-	info.p_starttime.tv_usec = usec;
-	memcpy(info.p_comm, process.comm, sizeof(process.comm));
-	return read_bytes(&info, sizeof(info), old, oldlenp);
+	process_start_time(process, &sec, &usec);
+	info->p_starttime.tv_sec = sec;
+	info->p_starttime.tv_usec = usec;
+	memcpy(info->p_comm, process->comm, sizeof(process->comm));
+	if (info->e_tdev != -1) {
+		info->p_flag |= P_CONTROLT;
+	}
 }
 
 static const struct sysctl_node *
