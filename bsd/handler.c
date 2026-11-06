@@ -4295,8 +4295,14 @@ sys_memorystatus_control(uint32_t command, int32_t pid, uint32_t flags,
 			(void *)command, (void *)pid, (void *)flags,
 			(void *)buffer, (void *)buffersize);
 #endif
+	enum { MEMORYSTATUS_CMD_GET_MEMLIMIT_PROPERTIES = 8 };
 	if (buffer != NULL) {
 		memset(buffer, 0, buffersize);
+	}
+	if (command == MEMORYSTATUS_CMD_GET_MEMLIMIT_PROPERTIES) {
+		int32_t *limits = buffer;
+		limits[0] = -1;
+		limits[2] = -1;
 	}
 	return 0;
 }
