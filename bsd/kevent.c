@@ -191,6 +191,8 @@ struct kqueue {
 	kqueue_kind_t kind;
 	uint64_t id;
 	int fd;
+	int *dups;
+	int dup_count;
 	int pollers;
 	struct knote *knotes;
 	bool bound[2];
@@ -356,8 +358,25 @@ fd_kqueue_lookup(int fd)
 		if (kq->fd == fd) {
 			return kq;
 		}
+		for (int i = 0; i != kq->dup_count; i++) {
+			if (kq->dups[i] == fd) {
+				return kq;
+			}
+		}
 	}
 	return NULL;
+}
+
+void
+kevent_dup(int from, int to)
+{
+	pthread_mutex_lock(&lock);
+	struct kqueue *kq = fd_kqueue_lookup(from);
+	if (kq != NULL) {
+		kq->dups = realloc(kq->dups, (kq->dup_count + 1) * sizeof(int));
+		kq->dups[kq->dup_count++] = to;
+	}
+	pthread_mutex_unlock(&lock);
 }
 
 int
@@ -1587,11 +1606,26 @@ kevent_close(int fd)
 	pthread_mutex_lock(&lock);
 	for (struct kqueue **p = &fd_kqueues; *p != NULL; p = &(*p)->next) {
 		struct kqueue *kq = *p;
+		bool dup = false;
+		for (int i = 0; i != kq->dup_count && !dup; i++) {
+			if (kq->dups[i] == fd) {
+				kq->dups[i] = kq->dups[--kq->dup_count];
+				dup = true;
+			}
+		}
+		if (dup) {
+			break;
+		}
+		if (kq->fd == fd && kq->dup_count != 0) {
+			kq->fd = kq->dups[--kq->dup_count];
+			break;
+		}
 		if (kq->fd == fd) {
 			*p = kq->next;
 			while (kq->knotes != NULL) {
 				knote_detach(kq->knotes);
 			}
+			free(kq->dups);
 			free(kq);
 			break;
 		}

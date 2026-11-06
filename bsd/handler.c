@@ -976,7 +976,12 @@ sys_sys_dup(uint32_t fd)
 #ifdef ENABLE_STRACE
 	fprintf(stderr, "sys_dup(%p)\n", (void *)fd);
 #endif
-	return errno_map(dup(fd));
+	int copy = dup(fd);
+	if (copy == -1) {
+		return err_map(errno);
+	}
+	kevent_dup(fd, copy);
+	return copy;
 }
 
 int
@@ -1577,7 +1582,17 @@ sys_sys_dup2(uint32_t from, uint32_t to)
 #ifdef ENABLE_STRACE
 	fprintf(stderr, "sys_dup2(%p, %p)\n", (void *)from, (void *)to);
 #endif
-	return errno_map(dup2(from, to));
+	if (from != to && fcntl((int)from, F_GETFD) != -1) {
+		kevent_close((int)to);
+	}
+	int copy = dup2(from, to);
+	if (copy == -1) {
+		return err_map(errno);
+	}
+	if (from != to) {
+		kevent_dup((int)from, copy);
+	}
+	return copy;
 }
 
 static int select_guest(int nd, uint32_t *in, uint32_t *ou, uint32_t *ex,

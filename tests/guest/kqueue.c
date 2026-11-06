@@ -25,6 +25,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
 #include <sys/event.h>
@@ -39,9 +40,34 @@ static int kq;
 static void *trigger(void *arg);
 static void *waiter(void *arg);
 
+static void
+check_dup(void)
+{
+	int queue = kqueue();
+	CHECK(queue != -1);
+	int copy = fcntl(queue, F_DUPFD_CLOEXEC, 3);
+	CHECK(copy != -1 && copy != queue);
+	struct kevent change, event;
+	EV_SET(&change, 7, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, NULL);
+	CHECK(kevent(copy, &change, 1, NULL, 0, NULL) == 0);
+	EV_SET(&change, 7, EVFILT_USER, 0, NOTE_TRIGGER, 0, NULL);
+	CHECK(kevent(queue, &change, 1, NULL, 0, NULL) == 0);
+	struct timespec timeout = {1, 0};
+	CHECK(kevent(copy, NULL, 0, &event, 1, &timeout) == 1);
+	CHECK(event.ident == 7 && event.filter == EVFILT_USER);
+	CHECK(close(queue) == 0);
+	int second = dup(copy);
+	CHECK(second != -1);
+	CHECK(close(copy) == 0);
+	CHECK(kevent(second, &change, 1, NULL, 0, NULL) == 0);
+	CHECK(kevent(second, NULL, 0, &event, 1, &timeout) == 1);
+	CHECK(close(second) == 0);
+}
+
 int
 main(void)
 {
+	check_dup();
 	int fds[2];
 	CHECK(pipe(fds) == 0);
 	kq = kqueue();
