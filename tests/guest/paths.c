@@ -44,7 +44,8 @@ main(void)
 {
 	struct stat st;
 	CHECK(stat("/usr/lib/dyld", &st) == 0 && S_ISREG(st.st_mode));
-	CHECK(stat("/System/Library/dyld", &st) == 0 && S_ISDIR(st.st_mode));
+	CHECK(stat("/System/Cryptexes/OS/System/Library/dyld", &st) == 0
+			&& S_ISDIR(st.st_mode));
 	CHECK(directory_contains("/", "System"));
 	CHECK(directory_contains("/usr/lib", "dyld"));
 
