@@ -42,6 +42,7 @@
 #include <unistd.h>
 
 #include "bsd/codesign.h"
+#include "bsd/kevent.h"
 #include "bsd/xnu-errno.h"
 #include "sysroot.h"
 
@@ -229,9 +230,16 @@ sys_sys_fcntl(int fd, int cmd, long arg)
 		return 0;
 	} break;
 	case _F_DUPFD:
-		return errno_map(fcntl(fd, F_DUPFD, arg));
-	case _F_DUPFD_CLOEXEC:
-		return errno_map(fcntl(fd, F_DUPFD_CLOEXEC, arg));
+	case _F_DUPFD_CLOEXEC: {
+		int copy = fcntl(fd,
+				cmd == _F_DUPFD ? F_DUPFD : F_DUPFD_CLOEXEC,
+				arg);
+		if (copy == -1) {
+			return err_map(errno);
+		}
+		kevent_dup(fd, copy);
+		return copy;
+	}
 	case _F_GETFD:
 		return errno_map(fcntl(fd, F_GETFD));
 	case _F_SETFD:
