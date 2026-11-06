@@ -2563,6 +2563,7 @@ sys_pathconf(char *path, int name)
 #define XNU_PC_FILESIZEBITS    18
 #define XNU_PC_SYMLINK_MAX     24
 #define XNU_PC_XATTR_SIZE_BITS 26
+#define XNU_PC_MIN_HOLE_SIZE   27
 
 static int
 fpathconf_value(int fd, int name)
@@ -2573,6 +2574,8 @@ fpathconf_value(int fd, int name)
 		return 1;
 	case XNU_PC_XATTR_SIZE_BITS:
 		return 32;
+	case XNU_PC_MIN_HOLE_SIZE:
+		return 1;
 	}
 
 	int linux_name;
@@ -2750,6 +2753,8 @@ sys_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t pos)
 #define _SEEK_SET 0
 #define _SEEK_CUR 1
 #define _SEEK_END 2
+#define _SEEK_HOLE 3
+#define _SEEK_DATA 4
 
 off_t
 sys_lseek(int fd, off_t offset, int whence)
@@ -2768,6 +2773,12 @@ sys_lseek(int fd, off_t offset, int whence)
 		break;
 	case _SEEK_END:
 		flags = SEEK_END;
+		break;
+	case _SEEK_HOLE:
+		flags = SEEK_HOLE;
+		break;
+	case _SEEK_DATA:
+		flags = SEEK_DATA;
 		break;
 	default:
 		unimplemented();
