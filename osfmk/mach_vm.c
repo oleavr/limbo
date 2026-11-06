@@ -358,10 +358,18 @@ _kernelrpc_mach_vm_map(vm_task_entry_t target_task, mach_vm_address_t *address,
 		if (entry == NULL) {
 			unimplemented();
 		}
+		mach_vm_size_t in_page = 0;
+		if (flags & VM_FLAGS_RETURN_DATA_ADDR) {
+			memory_object_offset_t data
+					= entry->data_offset + offset;
+			offset = data & ~(memory_object_offset_t)PAGE_MASK;
+			in_page = data - offset;
+			size += in_page;
+		}
 		kern_return_t kr = map_entry(address, size, mask, flags, entry,
 				offset, copy, cur_protection);
-		if (kr == KERN_SUCCESS && (flags & VM_FLAGS_RETURN_DATA_ADDR)) {
-			*address += entry->data_offset;
+		if (kr == KERN_SUCCESS) {
+			*address += in_page;
 		}
 #ifdef ENABLE_STRACE
 		fprintf(stderr,
