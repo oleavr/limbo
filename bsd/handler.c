@@ -3690,7 +3690,7 @@ sys___sigwait(user_addr_t set, user_addr_t sig)
 #ifdef ENABLE_STRACE
 	fprintf(stderr, "__sigwait(%p, %p)\n", (void *)set, (void *)sig);
 #endif
-	unimplemented();
+	return signals_sigwait(*(const uint32_t *)set, (int *)sig);
 }
 
 int

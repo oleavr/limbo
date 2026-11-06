@@ -273,6 +273,8 @@ static bool interrupted_host_call(const ucontext_t *uc);
 static void kick(void);
 static bool default_ignores(int sig);
 static void *relay_main(void *arg);
+static int take_pending(uint32_t *held, uint32_t set);
+static int take_process_pending(uint32_t set);
 static bool deliver(ucontext_t *uc, int sig, const siginfo_t *info);
 static void build_frame(struct darwin_sigframe *frame, const ucontext_t *uc,
 		int sig, const siginfo_t *info, bool onstack);
@@ -708,6 +710,75 @@ signals_wait_begin(uint32_t mask, sigset_t *previous, sigset_t *set)
 	sigset_to_linux(mask, set);
 	sigdelset(set, SIGSYS);
 	return true;
+}
+
+int
+signals_sigwait(uint32_t set, int *signal)
+{
+	set &= ~cantmask;
+	if (set == 0) {
+		return _EINVAL;
+	}
+	sigset_t host_set, previous;
+	sigset_to_linux(set, &host_set);
+	for (;;) {
+		int sig = take_pending(&thread_pending, set);
+		if (sig == 0) {
+			sig = take_process_pending(set);
+		}
+		if (sig != 0) {
+			*signal = sig;
+			return 0;
+		}
+		if (thread_pending != 0) {
+			return _EINTR;
+		}
+		pthread_sigmask(SIG_BLOCK, &host_set, &previous);
+		siginfo_t info;
+		int host = sigwaitinfo(&host_set, &info);
+		pthread_sigmask(SIG_SETMASK, &previous, NULL);
+		if (host > 0) {
+			sig = signo_from_linux(host);
+			if (sig > 0 && sig < DARWIN_NSIG
+					&& (set & (1u << (sig - 1)))) {
+				if (watch_counts[sig] != 0 && relay_fd != -1) {
+					atomic_fetch_add(&sent_counts[sig], 1);
+					eventfd_write(relay_fd, 1);
+				}
+				*signal = sig;
+				return 0;
+			}
+		} else if (errno != EINTR) {
+			return err_map(errno);
+		}
+	}
+}
+
+static int
+take_pending(uint32_t *held, uint32_t set)
+{
+	uint32_t waiting = *held & set;
+	if (waiting == 0) {
+		return 0;
+	}
+	int sig = __builtin_ctz(waiting) + 1;
+	*held &= ~(1u << (sig - 1));
+	return sig;
+}
+
+static int
+take_process_pending(uint32_t set)
+{
+	uint32_t waiting = atomic_load(&process_pending) & set;
+	for (int sig = 1; waiting != 0 && sig < DARWIN_NSIG; sig++) {
+		uint32_t bit = 1u << (sig - 1);
+		if ((waiting & bit)
+				&& (atomic_fetch_and(&process_pending, ~bit)
+						& bit)) {
+			return sig;
+		}
+	}
+	return 0;
 }
 
 void
