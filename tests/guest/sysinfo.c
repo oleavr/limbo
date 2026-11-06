@@ -86,6 +86,20 @@ main(void)
 	CHECK(sysctlbyname("net.inet.ip.ttl", &named, &size, NULL, 0) == 0);
 	CHECK(named == ttl);
 
+	int value = -1;
+	size = sizeof(value);
+	CHECK(sysctlbyname("kern.safeboot", &value, &size, NULL, 0) == 0
+			&& value == 0);
+	value = -1;
+	CHECK(sysctlbyname("security.mac.amfi.qa_root_certs_allowed", &value,
+			      &size, NULL,
+			      0) == 0
+			&& value == 0);
+	value = -1;
+	CHECK(sysctlbyname("vfs.generic.root_unmounted_cleanly", &value, &size,
+			      NULL, 0) == 0
+			&& value == 1);
+
 	struct kinfo_proc info;
 	size = sizeof(info);
 	int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};

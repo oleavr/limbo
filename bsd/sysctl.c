@@ -330,6 +330,11 @@ static const struct sysctl_node nodes[] = {
 				.string = "Performance"},
 		{"security.mac.lockdown_mode_state", {0, 0}, SYSCTL_INT,
 				.number = 0},
+		{"security.mac.amfi.qa_root_certs_allowed", {0, 0}, SYSCTL_INT,
+				.number = 0},
+		{"kern.safeboot", {0, 0}, SYSCTL_INT, .number = 0},
+		{"vfs.generic.root_unmounted_cleanly", {0, 0}, SYSCTL_INT,
+				.number = 1},
 
 		{"security.mac.sandbox.sentinel", {0, 0}, SYSCTL_READER,
 				.reader = read_sandbox_sentinel},
