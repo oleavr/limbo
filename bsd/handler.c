@@ -1398,6 +1398,13 @@ sys_madvise(void *addr, size_t len, int behav)
 	}
 }
 
+#ifdef __x86_64__
+#define MINCORE_GUEST_PAGE 4096UL
+#else
+#define MINCORE_GUEST_PAGE 16384UL
+#endif
+#define _MINCORE_INCORE 0x1
+
 int
 sys_mincore(user_addr_t addr, user_size_t len, user_addr_t vec)
 {
@@ -1405,7 +1412,27 @@ sys_mincore(user_addr_t addr, user_size_t len, user_addr_t vec)
 	fprintf(stderr, "mincore(%p, %p, %p)\n", (void *)addr, (void *)len,
 			(void *)vec);
 #endif
-	unimplemented();
+	uintptr_t start = (uintptr_t)addr & ~(MINCORE_GUEST_PAGE - 1);
+	size_t count = ((uintptr_t)addr + len - start + MINCORE_GUEST_PAGE - 1)
+			/ MINCORE_GUEST_PAGE;
+	size_t per_guest = MINCORE_GUEST_PAGE / (size_t)sysconf(_SC_PAGESIZE);
+	unsigned char *host = malloc(count * per_guest);
+	if (mincore((void *)start, count * MINCORE_GUEST_PAGE, host) == -1) {
+		int error = errno;
+		free(host);
+		return err_map(error);
+	}
+	unsigned char *out = vec;
+	for (size_t i = 0; i < count; i++) {
+		out[i] = 0;
+		for (size_t j = 0; j < per_guest; j++) {
+			if (host[i * per_guest + j] & 1) {
+				out[i] = _MINCORE_INCORE;
+			}
+		}
+	}
+	free(host);
+	return 0;
 }
 
 int
