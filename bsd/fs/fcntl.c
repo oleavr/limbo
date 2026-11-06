@@ -116,6 +116,8 @@
 #define _F_ADDFILESIGS_INFO         103
 #define _F_ADDFILESUPPL             104
 #define _F_GETSIGSINFO              105
+#define _F_ASSERT_BG_ACCESS         108
+#define _F_RELEASE_BG_ACCESS        109
 
 #define _MAXPATHLEN 1024
 
@@ -241,6 +243,9 @@ sys_sys_fcntl(int fd, int cmd, long arg)
 	case _F_GETPROTECTIONCLASS:
 		return _ENOTSUP;
 	case _F_SETPROTECTIONCLASS:
+		return 0;
+	case _F_ASSERT_BG_ACCESS:
+	case _F_RELEASE_BG_ACCESS:
 		return 0;
 	case _F_GETPATH: {
 		char link[48], path[PATH_MAX];
