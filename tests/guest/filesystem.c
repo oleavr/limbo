@@ -171,6 +171,7 @@ check_directories(void)
 
 	struct stat st;
 	CHECK(fstatat(dirfd, "file7", &st, 0) == 0 && S_ISREG(st.st_mode));
+	CHECK(fstatat(dirfd, NULL, &st, AT_FDONLY) == 0 && S_ISDIR(st.st_mode));
 	CHECK(faccessat(dirfd, "file7", R_OK, 0) == 0);
 	for (int i = 0; i < 100; i++) {
 		char name[16];
