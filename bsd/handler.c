@@ -4749,7 +4749,7 @@ sys_guarded_open_dprotected_np(user_addr_t path, void *guard,
 			(void *)flags, (void *)dpclass, (void *)dpflags,
 			(void *)mode);
 #endif
-	unimplemented();
+	return sys_open_dprotected_np(path, flags, dpclass, dpflags, mode);
 }
 
 user_ssize_t
