@@ -29,6 +29,7 @@
 #define _GNU_SOURCE
 #endif
 
+#include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
@@ -53,6 +54,8 @@ boot_id(char boot[40])
 	}
 }
 
+static int open_file(const char *path);
+
 void *
 boot_state_begin(struct boot_state *state)
 {
@@ -60,9 +63,7 @@ boot_state_begin(struct boot_state *state)
 	if (state->fd == -1) {
 		char buffer[PATH_MAX];
 		const char *path = sysroot_host_path(state->path, 0, buffer);
-		state->fd = path == NULL
-				? -1
-				: open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0666);
+		state->fd = path == NULL ? -1 : open_file(path);
 		struct stat st;
 
 		if (state->fd != -1 && fstat(state->fd, &st) == 0
@@ -87,6 +88,20 @@ boot_state_begin(struct boot_state *state)
 		memcpy(header->boot, boot, sizeof(boot));
 	}
 	return state->data;
+}
+
+static int
+open_file(const char *path)
+{
+	int fd = open(path, O_RDWR | O_CLOEXEC);
+	if (fd != -1 || errno != ENOENT) {
+		return fd;
+	}
+	fd = open(path, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
+	if (fd == -1 && errno == EEXIST) {
+		fd = open(path, O_RDWR | O_CLOEXEC);
+	}
+	return fd;
 }
 
 void
