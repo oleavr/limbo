@@ -436,5 +436,9 @@ sys_fstatat64(int fd, user_addr_t path, user_addr_t ub, int flag)
 	fprintf(stderr, "fstatat64(%p, \"%s\", %p, %p)\n", (void *)fd, (char *)path,
 			(void *)ub, (void *)flag);
 #endif
+	enum { _AT_FDONLY = 0x400 };
+	if (flag & _AT_FDONLY) {
+		return stat_at(fd, "", AT_EMPTY_PATH, ub);
+	}
 	return stat_at(at_fd(fd), path, at_flags(flag), ub);
 }
