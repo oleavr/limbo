@@ -152,6 +152,16 @@ check_regions(void)
 	CHECK(found == address && size >= 4096);
 	CHECK(basic.protection == VM_PROT_READ);
 	CHECK(count == VM_REGION_BASIC_INFO_COUNT);
+
+	found = address;
+	vm_region_top_info_data_t top;
+	count = VM_REGION_TOP_INFO_COUNT;
+	CHECK(mach_vm_region(mach_task_self(), &found, &size,
+			      VM_REGION_TOP_INFO, (vm_region_info_t)&top,
+			      &count, &object)
+			== KERN_SUCCESS);
+	CHECK(count == VM_REGION_TOP_INFO_COUNT);
+	CHECK(top.share_mode == SM_EMPTY || top.share_mode == SM_PRIVATE);
 	CHECK(mach_vm_deallocate(mach_task_self(), address, 4096)
 			== KERN_SUCCESS);
 }
