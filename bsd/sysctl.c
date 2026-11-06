@@ -77,6 +77,10 @@
 #define CTL_VM     2
 #define CTL_HW     6
 
+#define xnu_PF_INET    2
+#define xnu_IPPROTO_IP 0
+#define IPCTL_DEFTTL   3
+
 #define VM_SWAPUSAGE 5
 
 #define CTL_SYSCTL_NAME     1
@@ -197,6 +201,7 @@ static int read_cpu_frequency(void *old, size_t *oldlenp);
 #endif
 static int read_cpusubtype(void *old, size_t *oldlenp);
 static int read_swapusage(void *old, size_t *oldlenp);
+static int read_ip_ttl(void *old, size_t *oldlenp);
 
 static const struct sysctl_node nodes[] = {
 		{"kern.ostype", {CTL_KERN, KERN_OSTYPE}, SYSCTL_STRING,
@@ -251,6 +256,8 @@ static const struct sysctl_node nodes[] = {
 				.number = 1},
 		{"vm.swapusage", {CTL_VM, VM_SWAPUSAGE}, SYSCTL_READER,
 				.reader = read_swapusage},
+		{"net.inet.ip.ttl", {0, 0}, SYSCTL_READER,
+				.reader = read_ip_ttl},
 
 		{"sysctl.proc_cputype", {0, 0}, SYSCTL_INT,
 				.number = HOST_CPU_TYPE},
@@ -411,6 +418,13 @@ sys_sysctl(int *name, uint32_t namelen, void *old, size_t *oldlenp, void *new,
 			&& name[2] == 0 && name[4] != NET_RT_IFLIST
 			&& name[4] != NET_RT_IFLIST2) {
 		return route_dump(name[4], name[3], name[5], old, oldlenp);
+	}
+
+	if (namelen == 4 && name[0] == CTL_NET && name[1] == xnu_PF_INET
+			&& name[2] == xnu_IPPROTO_IP
+			&& name[3] == IPCTL_DEFTTL) {
+		return read_node(lookup_name("net.inet.ip.ttl", 15), old,
+				oldlenp);
 	}
 
 	const struct sysctl_node *node = lookup_oid(name, namelen);
@@ -876,6 +890,16 @@ read_swapusage(void *old, size_t *oldlenp)
 	}
 	usage.used = usage.total - usage.avail;
 	return read_bytes(&usage, sizeof(usage), old, oldlenp);
+}
+
+static int
+read_ip_ttl(void *old, size_t *oldlenp)
+{
+	int ttl;
+	FILE *file = fopen("/proc/sys/net/ipv4/ip_default_ttl", "re");
+	fscanf(file, "%d", &ttl);
+	fclose(file);
+	return read_number(ttl, sizeof(int32_t), old, oldlenp);
 }
 
 static int
