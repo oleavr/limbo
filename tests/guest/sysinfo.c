@@ -143,6 +143,7 @@ main(void)
 			== sizeof(bsdinfo));
 	CHECK(bsdinfo.pbi_pid == (uint32_t)getpid());
 	CHECK(bsdinfo.pbi_uid == geteuid());
+	CHECK(bsdinfo.pbi_nfiles > (uint32_t)STDERR_FILENO);
 
 	int fds_size = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, NULL, 0);
 	CHECK(fds_size > 0);

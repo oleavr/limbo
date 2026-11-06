@@ -171,6 +171,7 @@ static int pidinfo(int32_t pid, uint32_t flavor, user_addr_t buffer,
 static void uniqidentifierinfo(const struct process *process,
 		struct proc_uniqidentifierinfo *info);
 static void bsdinfo(const struct process *process, struct proc_bsdinfo *info);
+static uint32_t file_table_size(int32_t pid);
 static int listfds(int32_t pid, void *buffer, int32_t buffersize);
 static int fdinfo(int32_t pid, uint32_t flavor, int32_t fd, void *buffer,
 		int32_t buffersize);
@@ -363,8 +364,27 @@ bsdinfo(const struct process *process, struct proc_bsdinfo *info)
 	info->e_tdev = process_terminal(process);
 	info->e_tpgid = process->tpgid;
 	info->pbi_nice = process->nice;
+	info->pbi_nfiles = file_table_size(process->pid);
 	process_start_time(process, &info->pbi_start_tvsec,
 			&info->pbi_start_tvusec);
+}
+
+static uint32_t
+file_table_size(int32_t pid)
+{
+	char path[64];
+	snprintf(path, sizeof(path), "/proc/%d/fd", pid);
+	DIR *dir = opendir(path);
+	uint32_t size = 0;
+	struct dirent *entry;
+	while ((entry = readdir(dir)) != NULL) {
+		if (entry->d_name[0] != '.') {
+			uint32_t fd = (uint32_t)atoi(entry->d_name);
+			size = fd + 1 > size ? fd + 1 : size;
+		}
+	}
+	closedir(dir);
+	return size;
 }
 
 static void
