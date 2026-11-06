@@ -134,23 +134,47 @@ static int fix_eh_frame_personalities(int f,
 #endif
 static int write_all(int f, const void *data, size_t size, uint64_t offset);
 
+static const char *
+find_cache(const char *name, char path[PATH_MAX], char *buffer)
+{
+	static const char *const folders[] = {
+			"/System/Cryptexes/OS/System/Library/dyld",
+			"/System/Library/dyld",
+	};
+	for (size_t i = 0; i < sizeof(folders) / sizeof(folders[0]); i++) {
+		snprintf(path, PATH_MAX, "%s/%s", folders[i], name);
+		const char *host_path = sysroot_host_path(path, 0, buffer);
+		if (host_path != NULL && access(host_path, F_OK) == 0) {
+			return host_path;
+		}
+	}
+	return NULL;
+}
+
 int
 shared_cache_mmap(void)
 {
-	char buffer[PATH_MAX];
+	char path[PATH_MAX], buffer[PATH_MAX];
 #ifdef __x86_64__
-	const char *path = "/System/Library/dyld/dyld_shared_cache_x86_64";
-	const char *host_path = sysroot_host_path(path, 0, buffer);
-	if (access(host_path, F_OK) != 0) {
-		path = "/System/Library/dyld/dyld_shared_cache_x86_64h";
-		host_path = sysroot_host_path(path, 0, buffer);
+	const char *host_path
+			= find_cache("dyld_shared_cache_x86_64", path, buffer);
+	if (host_path == NULL) {
+		host_path = find_cache(
+				"dyld_shared_cache_x86_64h", path, buffer);
 		shared_cache_cpu_subtype = CPU_SUBTYPE_X86_64_H;
 	}
 #else
-	const char *path = "/System/Library/dyld/dyld_shared_cache_arm64e";
-	const char *host_path = sysroot_host_path(path, 0, buffer);
+	const char *host_path
+			= find_cache("dyld_shared_cache_arm64e", path, buffer);
 	shared_cache_cpu_subtype = CPU_SUBTYPE_ARM64E;
 #endif
+	if (host_path == NULL) {
+		fprintf(stderr,
+				"limbo: no shared cache in the sysroot's "
+				"System/Cryptexes/OS/System/Library/dyld or "
+				"System/Library/dyld\n");
+		return 1;
+	}
 
 	int f = open(host_path, O_RDONLY);
 	if (f == -1) {
