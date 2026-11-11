@@ -67,6 +67,7 @@ enum trace_type {
 	TRACE_SYSCALL_ENTER,
 	TRACE_SYSCALL_RETURN,
 	TRACE_STRING,
+	TRACE_ROUTINE,
 };
 
 struct trace_record {
@@ -116,5 +117,12 @@ void trace_syscall_enter(uint32_t syscall_class, uint32_t number,
 		const uint64_t arguments[6]);
 void trace_syscall_return(uint32_t syscall_class, uint32_t number,
 		int64_t result, enum trace_outcome outcome);
+struct trace_routine {
+	struct trace_record record;
+	int32_t id;
+	int32_t result;
+};
+
 void trace_string(const char *string);
 void trace_path(const char *guest, const char *host);
+void trace_routine(int32_t id, int32_t result);

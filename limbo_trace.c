@@ -81,6 +81,7 @@ static void print_start(const struct event *event);
 static void print_call(uint32_t index);
 static void print_return(const struct event *event);
 static void print_string(const struct event *event);
+static void print_routine(const struct event *event);
 static void print_prefix(const struct event *event, uint32_t tid);
 static void print_arguments(const char *format, const uint64_t *arguments,
 		size_t count, uint32_t index);
@@ -181,7 +182,8 @@ collect(uint32_t process)
 				open = added;
 			} else if (record->type == TRACE_STRING) {
 				events[added].link = open;
-			} else if (open != NONE) {
+			} else if (record->type == TRACE_SYSCALL_RETURN
+					&& open != NONE) {
 				events[added].link = open;
 				events[open].link = added;
 				open = NONE;
@@ -231,6 +233,8 @@ print_event(uint32_t index)
 		print_return(event);
 	} else if (event->record->type == TRACE_STRING && !linked) {
 		print_string(event);
+	} else if (event->record->type == TRACE_ROUTINE) {
+		print_routine(event);
 	}
 }
 
@@ -336,6 +340,22 @@ print_string(const struct event *event)
 		printf(" -> \"%s\"", string->bytes + string->size + 1);
 	}
 	printf("\n");
+}
+
+static void
+print_routine(const struct event *event)
+{
+	const struct trace_routine *routine = (const void *)event->record;
+	const char *name = (size_t)routine->id < LENGTH(routine_names)
+			? routine_names[routine->id]
+			: NULL;
+	print_prefix(event, routine->record.tid);
+	if (name != NULL) {
+		printf("%s", name);
+	} else {
+		printf("routine#%d", routine->id);
+	}
+	printf(" = %d\n", routine->result);
 }
 
 static void
