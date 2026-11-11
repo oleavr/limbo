@@ -3190,6 +3190,7 @@ sys_shm_open(const char *name, int oflag, int mode)
 	fprintf(stderr, "shm_open(\"%s\", %p, %p)\n", name, (void *)oflag,
 			(void *)mode);
 #endif
+	trace_string(name);
 	return errno_map(shm_open(name, open_flags(oflag), mode));
 }
 
@@ -3199,6 +3200,7 @@ sys_shm_unlink(const char *name)
 #ifdef ENABLE_STRACE
 	fprintf(stderr, "shm_unlink(\"%s\")\n", name);
 #endif
+	trace_string(name);
 	return errno_map(shm_unlink(name));
 }
 
@@ -3214,6 +3216,7 @@ sys_sem_open(const char *name, int oflag, int mode, int value)
 	fprintf(stderr, "sem_open(\"%s\", %p, %p, %p)\n", name,
 			(void *)oflag, (void *)mode, (void *)value);
 #endif
+	trace_string(name);
 	sem_t *sem = sem_open(name, open_flags(oflag) & (O_CREAT | O_EXCL),
 			(mode_t)mode, (unsigned int)value);
 	if (sem == SEM_FAILED) {
@@ -3261,6 +3264,7 @@ sys_sem_unlink(const char *name)
 #ifdef ENABLE_STRACE
 	fprintf(stderr, "sem_unlink(\"%s\")\n", name);
 #endif
+	trace_string(name);
 	return errno_map(sem_unlink(name));
 }
 

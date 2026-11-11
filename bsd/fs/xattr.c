@@ -42,6 +42,7 @@
 #include "bsd/xnu-errno.h"
 #include "bsd_flags.h"
 #include "sysroot.h"
+#include "trace.h"
 
 typedef void *user_addr_t;
 typedef ssize_t user_ssize_t;
@@ -188,6 +189,7 @@ static const char *
 host_name(const char *name, char *buffer)
 {
 	snprintf(buffer, XATTR_NAME_MAX + 1, LINUX_NAMESPACE "%s", name);
+	trace_path(name, buffer);
 	return buffer;
 }
 
