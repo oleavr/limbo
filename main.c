@@ -49,6 +49,7 @@
 #include "syscall.h"
 #include "sysroot.h"
 #include "thread.h"
+#include "trace.h"
 
 /* Temporary TLS for dyld */
 static char dyld_ls[0x1000];
@@ -249,6 +250,8 @@ run(int argc, char *argv[], char *envp[])
 			.tpidr = (dylinker_path != NULL) ? (uint64_t)dyld_ls : 0,
 	};
 #endif
+	trace_start(sysroot_guest_path(named != NULL ? named : argv[1]),
+			argv + 2);
 	thread_enter(&state);
 error:
 	exit(1);

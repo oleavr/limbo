@@ -107,6 +107,7 @@
 #include "syscall.h"
 #include "sysroot.h"
 #include "thread.h"
+#include "trace.h"
 #include "tty.h"
 #include "xnu-errno.h"
 
@@ -247,6 +248,7 @@ sys_fork(void)
 	}
 	if (pid == 0) {
 		syscall_dispatch_enable();
+		trace_fork_child();
 		broker_client_reset();
 		signals_fork_child();
 	}

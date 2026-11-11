@@ -62,6 +62,7 @@
 #include "osfmk/handler.h"
 #include "syscall.h"
 #include "thread.h"
+#include "trace.h"
 
 /* Never allow system calls from outside our binary region */
 static const uint8_t selector = SYSCALL_DISPATCH_FILTER_BLOCK;
@@ -445,13 +446,18 @@ handle_syscall(int sig, siginfo_t *info, void *ucontext)
 	thread_enter_trap(context, &outer_trap);
 
 	unsigned long syscall = info->si_syscall;
+	const uint64_t arguments[] = {arg1, arg2, arg3, arg4, arg5, arg6};
 	if (signals_trap_enter(context)) {
 		regs[REG_RIP] -= 2;
 		regs[REG_RAX] = (greg_t)syscall;
 	} else if (syscall >= SYSCALL_CLASS_MACH
 			&& syscall < SYSCALL_CLASS_UNIX) {
-		regs[REG_RAX] = sys_osfmk(syscall - SYSCALL_CLASS_MACH, arg1,
-				arg2, arg3, arg4, arg5, arg6, sp);
+		unsigned long number = syscall - SYSCALL_CLASS_MACH;
+		trace_syscall_enter(TRACE_CLASS_MACH, number, arguments);
+		regs[REG_RAX] = sys_osfmk(
+				number, arg1, arg2, arg3, arg4, arg5, arg6, sp);
+		trace_syscall_return(TRACE_CLASS_MACH, number, regs[REG_RAX],
+				TRACE_RAW_RESULT);
 	} else if (syscall >= SYSCALL_CLASS_UNIX
 			&& syscall < SYSCALL_CLASS_MDEP) {
 		/* SIGABRT, which Darwin numbers as Linux does */
@@ -460,21 +466,26 @@ handle_syscall(int sig, siginfo_t *info, void *ucontext)
 				|| number == BSD_SYS_abort_with_payload) {
 			syscall_print_guest_chain(&context->uc_mcontext);
 		}
+		trace_syscall_enter(TRACE_CLASS_BSD, number, arguments);
 		int64_t result = sys_bsd(syscall - SYSCALL_CLASS_UNIX, arg1,
 				arg2, arg3, arg4, arg5, arg6, sp);
+		enum trace_outcome outcome = TRACE_RESULT;
 		if (context_kept) {
 			context_kept = false;
 			rdx_pending = false;
+			outcome = TRACE_KEPT_CONTEXT;
 		} else if (result == _EINTR
 				&& signals_restart(
 						syscall - SYSCALL_CLASS_UNIX)) {
 			regs[REG_RIP] -= 2;
 			regs[REG_RAX] = (greg_t)syscall;
 			rdx_pending = false;
+			outcome = TRACE_RESTARTED;
 		} else if (returns_raw_result(syscall - SYSCALL_CLASS_UNIX,
 					   arg1)) {
 			regs[REG_EFL] &= ~X86_EFLAGS_CF;
 			regs[REG_RAX] = result;
+			outcome = TRACE_RAW_RESULT;
 		} else {
 			set_bsd_result(regs, result);
 		}
@@ -482,10 +493,15 @@ handle_syscall(int sig, siginfo_t *info, void *ucontext)
 			regs[REG_RDX] = rdx_value;
 			rdx_pending = false;
 		}
+		trace_syscall_return(TRACE_CLASS_BSD, number, result, outcome);
 	} else if (syscall >= SYSCALL_CLASS_MDEP
 			&& syscall < SYSCALL_CLASS_DIAG) {
-		regs[REG_RAX] = sys_mdep(syscall - SYSCALL_CLASS_MDEP, arg1,
-				arg2, arg3, arg4, arg5, arg6, sp);
+		unsigned long number = syscall - SYSCALL_CLASS_MDEP;
+		trace_syscall_enter(TRACE_CLASS_MDEP, number, arguments);
+		regs[REG_RAX] = sys_mdep(
+				number, arg1, arg2, arg3, arg4, arg5, arg6, sp);
+		trace_syscall_return(TRACE_CLASS_MDEP, number, regs[REG_RAX],
+				TRACE_RAW_RESULT);
 	} else {
 		fprintf(stderr, "limbo: missing system call %#lx\n", syscall);
 		abort();
@@ -613,34 +629,46 @@ dispatch_syscall(mcontext_t *mc)
 
 	uint64_t *overflow = (uint64_t *)mc->sp;
 	uint64_t sp[] = {0, regs[6], regs[7], overflow[0], overflow[1]};
+	const uint64_t arguments[] = {arg1, arg2, arg3, arg4, arg5, arg6};
 
 	int64_t number = (int64_t)regs[16];
 	if (number < 0) {
+		trace_syscall_enter(TRACE_CLASS_MACH, -number, arguments);
 		regs[0] = sys_osfmk((unsigned long)-number, arg1, arg2, arg3,
 				arg4, arg5, arg6, sp);
+		trace_syscall_return(TRACE_CLASS_MACH, -number, regs[0],
+				TRACE_RAW_RESULT);
 	} else if ((uint64_t)number & SYSCALL_CLASS_MDEP_ARM64) {
+		trace_syscall_enter(TRACE_CLASS_MDEP, number, arguments);
 		regs[0] = sys_mdep((unsigned long)number, arg1, arg2, arg3,
 				arg4, arg5, arg6, sp);
+		trace_syscall_return(TRACE_CLASS_MDEP, number, regs[0],
+				TRACE_RAW_RESULT);
 	} else {
 		/* SIGABRT, which Darwin numbers as Linux does */
 		if ((number == BSD_SYS___pthread_kill && arg2 == SIGABRT)
 				|| number == BSD_SYS_abort_with_payload) {
 			syscall_print_guest_chain(mc);
 		}
+		trace_syscall_enter(TRACE_CLASS_BSD, number, arguments);
 		int64_t result = sys_bsd((unsigned long)number, arg1, arg2,
 				arg3, arg4, arg5, arg6, sp);
+		enum trace_outcome outcome = TRACE_RESULT;
 		if (context_kept) {
 			context_kept = false;
 			x1_pending = false;
+			outcome = TRACE_KEPT_CONTEXT;
 		} else if (result == _EINTR
 				&& signals_restart((unsigned long)number)) {
 			regs[0] = arg1;
 			regs[1] = arg2;
 			mc->pc -= 4;
 			x1_pending = false;
+			outcome = TRACE_RESTARTED;
 		} else if (returns_raw_result((unsigned long)number, arg1)) {
 			mc->pstate &= ~PSTATE_C;
 			regs[0] = result;
+			outcome = TRACE_RAW_RESULT;
 		} else {
 			set_bsd_result(mc, result);
 		}
@@ -648,6 +676,7 @@ dispatch_syscall(mcontext_t *mc)
 			regs[1] = x1_value;
 			x1_pending = false;
 		}
+		trace_syscall_return(TRACE_CLASS_BSD, number, result, outcome);
 	}
 }
 #endif
