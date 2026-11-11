@@ -6,7 +6,7 @@ limbo-trace - Print what Limbo recorded of its programs
 
 # SYNOPSIS
 
-_limbo-trace_ [*-r*] _path_...++
+_limbo-trace_ [*-fr*] _path_...++
 _limbo-trace_ *-s* on|off _path_...
 
 # DESCRIPTION
@@ -39,6 +39,11 @@ _path_, or for every program of a directory and those yet to start there.
 Switched off, a program keeps its file and records nothing.
 
 # OPTIONS
+
+*-f*
+	Keep printing records as they are made. A call that has not returned
+	when it is printed ends in _..._, and its return follows on a line of
+	its own.
 
 *-r*
 	After a call, print the paths it named with what they resolved to on

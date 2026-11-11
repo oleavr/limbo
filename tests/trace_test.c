@@ -123,7 +123,7 @@ test_records(void)
 			== 0);
 	CHECK(header->dropped == 0);
 
-	struct trace_run run = trace_ring_copy(&file, 0);
+	struct trace_run run = trace_ring_copy(&file, 0, 0);
 	CHECK(run.start == 0);
 	uint64_t position = 0;
 
@@ -173,6 +173,14 @@ test_records(void)
 	CHECK(trace_run_next(&run, &position) == NULL);
 	CHECK(position == run.end);
 	free(run.bytes);
+
+	trace_syscall_enter(TRACE_CLASS_BSD, 6, arguments);
+	run = trace_ring_copy(&file, 0, position);
+	CHECK(run.start == position);
+	enter = (const void *)trace_run_next(&run, &position);
+	CHECK(enter->number == 6);
+	CHECK(trace_run_next(&run, &position) == NULL);
+	free(run.bytes);
 	trace_file_close(&file);
 }
 
@@ -199,7 +207,7 @@ test_switch(void)
 static uint64_t
 written(const struct trace_file *file)
 {
-	struct trace_run run = trace_ring_copy(file, 0);
+	struct trace_run run = trace_ring_copy(file, 0, 0);
 	free(run.bytes);
 	return run.end;
 }
@@ -218,7 +226,7 @@ test_wrap(void)
 
 	struct trace_file file;
 	open_trace(&file, getpid(), 0);
-	struct trace_run run = trace_ring_copy(&file, 0);
+	struct trace_run run = trace_ring_copy(&file, 0, 0);
 	CHECK(run.start != 0 && run.start % TRACE_BLOCK_SIZE == 0);
 	CHECK(run.end - run.start <= RING_SIZE);
 	CHECK(run.end - run.start > RING_SIZE - 3 * TRACE_BLOCK_SIZE);
@@ -316,7 +324,7 @@ test_fork(void)
 	open_trace(&file, child, 0);
 	CHECK(file.header->parent == getpid());
 	CHECK(strcmp(file.header->program, "/bin/program") == 0);
-	struct trace_run run = trace_ring_copy(&file, 0);
+	struct trace_run run = trace_ring_copy(&file, 0, 0);
 	uint64_t position = 0;
 	const struct trace_syscall_enter *enter
 			= (const void *)trace_run_next(&run, &position);
@@ -340,7 +348,7 @@ test_exec(const char *self)
 	trace_file_close(&file);
 	open_trace(&file, child, 1);
 	CHECK(strcmp(file.header->program, "/second") == 0);
-	struct trace_run run = trace_ring_copy(&file, 0);
+	struct trace_run run = trace_ring_copy(&file, 0, 0);
 	uint64_t position = 0;
 	CHECK(trace_run_next(&run, &position)->type == TRACE_STRING);
 	free(run.bytes);
@@ -397,7 +405,7 @@ static uint64_t
 count_calls(const struct trace_file *file, uint32_t ring,
 		uint32_t syscall_class)
 {
-	struct trace_run run = trace_ring_copy(file, ring);
+	struct trace_run run = trace_ring_copy(file, ring, 0);
 	uint64_t position = run.start, calls = 0, expected = 0;
 	const struct trace_record *record;
 	while ((record = trace_run_next(&run, &position)) != NULL) {
