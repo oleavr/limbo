@@ -10,11 +10,6 @@ assert(cc.has_header_symbol('sys/prctl.h', 'PR_SET_SYSCALL_USER_DISPATCH'), 'PR_
 
 config = configuration_data()
 
-strace = not get_option('strace').disabled()
-if strace
-  config.set('ENABLE_STRACE', 1)
-endif
-
 configure_file(
   input: 'config.h.in',
   output: 'config.h',

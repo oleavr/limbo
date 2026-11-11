@@ -54,9 +54,6 @@ static const uint32_t active_config = CSR_ALLOW_TASK_FOR_PID;
 static int
 csr_check(void *useraddr, void *usersize)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "csr_check(%p, %p)\n", useraddr, usersize);
-#endif
 	if ((uint64_t)usersize != 4) {
 		return err_map(EINVAL);
 	}
@@ -77,10 +74,6 @@ csr_get_active_config(void *useraddr, void *usersize)
 int
 sys_csrctl(uint32_t op, user_addr_t useraddr, user_addr_t usersize)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "csrctl(%p, %p, %p)\n", (void *)op, (void *)useraddr,
-			(void *)usersize);
-#endif
 	switch (op) {
 	case CSR_SYSCALL_CHECK:
 		return csr_check(useraddr, usersize);

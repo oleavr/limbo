@@ -41,10 +41,6 @@ int arch_prctl(int code, unsigned long addr);
 static int
 sys_thread_set_tsd_base(uint64_t thread, uint64_t tsd_base)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "thread_set_tsd_base(%p, %p)\n", (void *)thread,
-			(void *)tsd_base);
-#endif
 #ifdef __x86_64__
 	arch_prctl(ARCH_SET_GS, thread);
 #else
@@ -66,12 +62,6 @@ sys_mdep(unsigned long syscall, uint64_t arg1, uint64_t arg2, uint64_t arg3,
 		return sys_thread_set_tsd_base(arg1, arg2);
 #endif
 	default:
-#ifdef ENABLE_STRACE
-		fprintf(stderr,
-				">> Missing machine-dependent system call: "
-				"%#lx\n",
-				syscall);
-#endif
 		abort();
 	}
 }

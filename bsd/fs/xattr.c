@@ -61,11 +61,6 @@ user_ssize_t
 sys_getxattr(user_addr_t path, user_addr_t attrname, user_addr_t value,
 		size_t size, uint32_t position, int options)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getxattr(\"%s\", \"%s\", %p, %p, %p, %p)\n",
-			(char *)path, (char *)attrname, (void *)value,
-			(void *)size, (void *)position, (void *)options);
-#endif
 	char path_buffer[PATH_MAX], name[XATTR_NAME_MAX + 1];
 	const char *p = host_path(path, options, path_buffer);
 	const char *n = host_name(attrname, name);
@@ -78,11 +73,6 @@ user_ssize_t
 sys_fgetxattr(int fd, user_addr_t attrname, user_addr_t value, size_t size,
 		uint32_t position, int options)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "fgetxattr(%p, \"%s\", %p, %p, %p, %p)\n", (void *)fd,
-			(char *)attrname, (void *)value, (void *)size,
-			(void *)position, (void *)options);
-#endif
 	char name[XATTR_NAME_MAX + 1];
 	return xattr_result(
 			fgetxattr(fd, host_name(attrname, name), value, size));
@@ -92,11 +82,6 @@ int
 sys_setxattr(user_addr_t path, user_addr_t attrname, user_addr_t value,
 		size_t size, uint32_t position, int options)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "setxattr(\"%s\", \"%s\", %p, %p, %p, %p)\n",
-			(char *)path, (char *)attrname, (void *)value,
-			(void *)size, (void *)position, (void *)options);
-#endif
 	char path_buffer[PATH_MAX], name[XATTR_NAME_MAX + 1];
 	const char *p = host_path(path, options, path_buffer);
 	const char *n = host_name(attrname, name);
@@ -109,11 +94,6 @@ int
 sys_fsetxattr(int fd, user_addr_t attrname, user_addr_t value, size_t size,
 		uint32_t position, int options)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "fsetxattr(%p, \"%s\", %p, %p, %p, %p)\n", (void *)fd,
-			(char *)attrname, (void *)value, (void *)size,
-			(void *)position, (void *)options);
-#endif
 	char name[XATTR_NAME_MAX + 1];
 	return xattr_result(fsetxattr(
 			fd, host_name(attrname, name), value, size, 0));
@@ -122,10 +102,6 @@ sys_fsetxattr(int fd, user_addr_t attrname, user_addr_t value, size_t size,
 int
 sys_removexattr(user_addr_t path, user_addr_t attrname, int options)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "removexattr(\"%s\", \"%s\", %p)\n", (char *)path,
-			(char *)attrname, (void *)options);
-#endif
 	char path_buffer[PATH_MAX], name[XATTR_NAME_MAX + 1];
 	const char *p = host_path(path, options, path_buffer);
 	const char *n = host_name(attrname, name);
@@ -136,10 +112,6 @@ sys_removexattr(user_addr_t path, user_addr_t attrname, int options)
 int
 sys_fremovexattr(int fd, user_addr_t attrname, int options)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "fremovexattr(%p, \"%s\", %p)\n", (void *)fd,
-			(char *)attrname, (void *)options);
-#endif
 	char name[XATTR_NAME_MAX + 1];
 	return xattr_result(fremovexattr(fd, host_name(attrname, name)));
 }
@@ -148,10 +120,6 @@ user_ssize_t
 sys_listxattr(user_addr_t path, user_addr_t namebuf, size_t bufsize,
 		int options)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "listxattr(\"%s\", %p, %p, %p)\n", (char *)path,
-			(void *)namebuf, (void *)bufsize, (void *)options);
-#endif
 	char path_buffer[PATH_MAX];
 	const char *p = host_path(path, options, path_buffer);
 	char *names = malloc(XATTR_LIST_MAX);
@@ -166,10 +134,6 @@ sys_listxattr(user_addr_t path, user_addr_t namebuf, size_t bufsize,
 user_ssize_t
 sys_flistxattr(int fd, user_addr_t namebuf, size_t bufsize, int options)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "flistxattr(%p, %p, %p, %p)\n", (void *)fd,
-			(void *)namebuf, (void *)bufsize, (void *)options);
-#endif
 	char *names = malloc(XATTR_LIST_MAX);
 	user_ssize_t result = list_result(flistxattr(fd, names, XATTR_LIST_MAX),
 			names, namebuf, bufsize);

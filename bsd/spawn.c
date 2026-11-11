@@ -120,13 +120,6 @@ int
 sys_posix_spawn(void *pid, const char *path, void *adesc, char **argv,
 		char **envp)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "posix_spawn(%p, \"%s\", %p, %p, %p)\n", pid, path,
-			adesc, (void *)argv, (void *)envp);
-	for (char **arg = argv; *arg != NULL; arg++) {
-		fprintf(stderr, "  argv: \"%s\"\n", *arg);
-	}
-#endif
 	const struct darwin_spawn_args *args = adesc;
 	const struct darwin_spawnattr *attrp
 			= (args != NULL) ? args->attrp : NULL;

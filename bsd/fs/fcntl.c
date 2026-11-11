@@ -215,10 +215,6 @@ static bool is_package_name(const char *name, size_t length);
 int
 sys_sys_fcntl(int fd, int cmd, long arg)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sys_fcntl(%p, %p, %p)\n", (void *)fd, (void *)cmd,
-			(void *)arg);
-#endif
 	switch (cmd) {
 	case _F_ADDSIGS:
 	case _F_ADDFILESIGS:

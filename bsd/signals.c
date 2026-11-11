@@ -331,10 +331,6 @@ signals_init(void)
 int
 sys_sigaction(int signum, void *nsa, void *osa)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sigaction(%p, %p, %p)\n", (void *)signum, (void *)nsa,
-			(void *)osa);
-#endif
 	if (signum <= 0 || signum >= DARWIN_NSIG) {
 		return _EINVAL;
 	}
@@ -1055,11 +1051,6 @@ restore_frame(ucontext_t *uc, const struct darwin_ucontext *duc)
 int
 sys_sigreturn(void *uctx, int infostyle, user_addr_t token)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sigreturn(%p, %p, %p)\n", (void *)uctx,
-			(void *)infostyle, (void *)token);
-#endif
-
 	if ((uint32_t)infostyle == UC_SET_ALT_STACK
 			|| (uint32_t)infostyle == UC_RESET_ALT_STACK) {
 		return 0;
@@ -1076,9 +1067,6 @@ sys_sigreturn(void *uctx, int infostyle, user_addr_t token)
 int
 sys_sigaltstack(void *nss, void *oss)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sigaltstack(%p, %p)\n", (void *)nss, (void *)oss);
-#endif
 	ucontext_t *trap = syscall_trap_context();
 	bool onstack = trap != NULL && on_altstack(context_sp(trap));
 	struct darwin_stack old = guest_altstack;
@@ -1116,9 +1104,6 @@ sys_sigaltstack(void *nss, void *oss)
 int
 sys_sigpending(void *osv)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sigpending(%p)\n", (void *)osv);
-#endif
 	sigset_t host;
 	sigpending(&host);
 	*(uint32_t *)osv = sigset_from_linux(&host) | thread_pending
