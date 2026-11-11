@@ -33,11 +33,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 #include "trace_reader.h"
 
+static const struct trace_ring *ring_at(
+		const struct trace_file *file, uint32_t index);
 static uint64_t oldest_kept(const struct trace_ring *ring, uint64_t capacity);
 
 int
@@ -48,22 +49,20 @@ trace_file_open(struct trace_file *file, const char *path, int flags)
 	if (fd == -1) {
 		return -1;
 	}
-	struct stat status;
-	fstat(fd, &status);
-	const struct trace_header *header = mmap(
-			NULL, status.st_size, protection, MAP_SHARED, fd, 0);
+	struct trace_header header;
+	bool is_trace = pread(fd, &header, sizeof(header), 0) == sizeof(header)
+			&& memcmp(header.magic, TRACE_MAGIC,
+					   sizeof(header.magic))
+					== 0
+			&& header.version == TRACE_VERSION;
+	if (is_trace) {
+		file->size = TRACE_DATA_OFFSET
+				+ (size_t)TRACE_RING_COUNT * header.ring_size;
+		file->header = mmap(NULL, file->size, protection, MAP_SHARED,
+				fd, 0);
+	}
 	close(fd);
-	if (header == MAP_FAILED) {
-		return -1;
-	}
-	if (memcmp(header->magic, TRACE_MAGIC, sizeof(header->magic)) != 0
-			|| header->version != TRACE_VERSION) {
-		munmap((void *)header, status.st_size);
-		return -1;
-	}
-	file->header = header;
-	file->size = status.st_size;
-	return 0;
+	return is_trace ? 0 : -1;
 }
 
 void
@@ -72,21 +71,30 @@ trace_file_close(struct trace_file *file)
 	munmap((void *)file->header, file->size);
 }
 
-struct trace_run
-trace_ring_copy(const struct trace_file *file, uint32_t index)
+bool
+trace_ring_used(const struct trace_file *file, uint32_t index)
 {
-	const uint8_t *base = (const uint8_t *)file->header;
-	const struct trace_ring *ring = (const void *)(base + TRACE_TABLE_OFFSET
-			+ index * sizeof(*ring));
+	const struct trace_ring *ring = ring_at(file, index);
+	return ring->owner != 0 || ring->written != 0;
+}
+
+struct trace_run
+trace_ring_copy(const struct trace_file *file, uint32_t index, uint64_t from)
+{
+	const struct trace_ring *ring = ring_at(file, index);
 	uint64_t capacity = file->header->ring_size;
-	uint64_t data_offset = TRACE_DATA_OFFSET + index * capacity;
-	struct trace_run run = {0};
-	if (data_offset + capacity > file->size) {
+	const uint8_t *data = (const uint8_t *)file->header + TRACE_DATA_OFFSET
+			+ index * capacity;
+	struct trace_run run = {.start = from, .end = from};
+	uint64_t kept = oldest_kept(ring, capacity);
+	uint64_t written = atomic_load_explicit(
+			&ring->written, memory_order_acquire);
+	if (written == from) {
 		return run;
 	}
 
-	run.start = oldest_kept(ring, capacity);
-	run.end = atomic_load_explicit(&ring->written, memory_order_acquire);
+	run.start = kept > from ? kept : from;
+	run.end = written;
 	run.bytes = malloc(run.end - run.start);
 	for (uint64_t position = run.start; position < run.end;) {
 		uint64_t offset = position % capacity;
@@ -94,18 +102,30 @@ trace_ring_copy(const struct trace_file *file, uint32_t index)
 		if (length > capacity - offset) {
 			length = capacity - offset;
 		}
-		memcpy(run.bytes + (position - run.start),
-				base + data_offset + offset, length);
+		memcpy(run.bytes + (position - run.start), data + offset,
+				length);
 		position += length;
 	}
 
-	uint64_t kept = oldest_kept(ring, capacity);
+	kept = oldest_kept(ring, capacity);
 	if (kept > run.end) {
 		kept = run.end;
 	}
-	memmove(run.bytes, run.bytes + (kept - run.start), run.end - kept);
-	run.start = kept;
+	if (kept > run.start) {
+		memmove(run.bytes, run.bytes + (kept - run.start),
+				run.end - kept);
+		run.start = kept;
+	}
 	return run;
+}
+
+static const struct trace_ring *
+ring_at(const struct trace_file *file, uint32_t index)
+{
+	const uint8_t *base = (const uint8_t *)file->header;
+	const struct trace_ring *table
+			= (const void *)(base + TRACE_TABLE_OFFSET);
+	return &table[index];
 }
 
 static uint64_t

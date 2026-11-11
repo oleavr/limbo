@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -15,7 +16,13 @@ def main():
     trace.mkdir()
     env = dict(os.environ, LIMBO_TRACE=str(trace))
     run = [sys.executable, runner, limbo, source, outdir]
-    result = subprocess.run(run, env=env)
+    followed = Path(outdir) / "traced.followed"
+    with open(followed, "w") as output:
+        follower = subprocess.Popen([limbo_trace, "-f", trace], stdout=output)
+        result = subprocess.run(run, env=env)
+        time.sleep(0.5)
+        follower.terminate()
+        follower.wait()
     if result.returncode != 0:
         sys.exit(result.returncode)
 
@@ -49,6 +56,12 @@ def main():
                    + started.format(parent, " spawned")).group(1)
     find(rf" traced\[{spawned}\] exit\(0x5\) \.\.\.$")
     find(rf" traced\[{parent}\] exit\(0\) \.\.\.$")
+
+    lines = [line for line in followed.read_text().splitlines()
+             if " traced[" in line]
+    find(rf' traced\[{parent}\] .*"/no/such/file"')
+    find(rf" traced\[{parent}\] exit\(0\)")
+    lines = print_trace()
 
     subprocess.run([limbo_trace, "-s", "off", trace], check=True)
     subprocess.run(run, env=env, check=True)

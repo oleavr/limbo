@@ -27,6 +27,7 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -45,6 +46,8 @@ struct trace_run {
 
 int trace_file_open(struct trace_file *file, const char *path, int flags);
 void trace_file_close(struct trace_file *file);
-struct trace_run trace_ring_copy(const struct trace_file *file, uint32_t index);
+bool trace_ring_used(const struct trace_file *file, uint32_t index);
+struct trace_run trace_ring_copy(
+		const struct trace_file *file, uint32_t index, uint64_t from);
 const struct trace_record *trace_run_next(
 		const struct trace_run *run, uint64_t *position);

@@ -32,10 +32,12 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <search.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "trace_names.h"
@@ -46,29 +48,37 @@
 #define ARM64_MDEP   0x80000000
 #define X86_64_MDEP  3
 #define NANOSECONDS  1000000000
+#define FOLLOW_PAUSE 100000
 #define LARGE_RESULT (1ULL << 32)
 #define LENGTH(a)    (sizeof(a) / sizeof((a)[0]))
 
 struct process {
 	struct trace_file file;
 	const char *name;
-	uint64_t overwritten;
+	uint64_t read[TRACE_RING_COUNT];
+	bool started;
 };
 
 struct event {
 	const struct trace_record *record;
 	uint64_t time;
+	uint64_t overwritten;
 	uint32_t process;
 	uint32_t ring;
 	uint32_t link;
+	bool start;
 	bool printed;
 };
 
+static void *opened;
 static struct process *processes;
 static uint32_t process_count;
 static struct event *events;
 static uint32_t event_count, event_capacity;
+static uint8_t **copies;
+static uint32_t copy_count, copy_capacity;
 static uint32_t ring_count;
+static uint64_t round_start;
 static bool resolved;
 static bool switched_on;
 
@@ -76,12 +86,15 @@ static void switch_recording(const char *path);
 static void visit(const char *path, void (*visit_file)(const char *path));
 static void switch_file(const char *path);
 static void add_file(const char *path);
-static void collect(uint32_t process);
+static int compare_paths(const void *a, const void *b);
+static void print_records(void);
+static void collect(uint32_t index);
+static void keep_copy(uint8_t *copy);
 static uint32_t add_event(const struct trace_record *record, uint64_t time,
 		uint32_t process, uint32_t ring);
 static int compare(const void *a, const void *b);
 static void print_event(uint32_t index);
-static void print_start(const struct event *event);
+static void print_process(const struct event *event);
 static void print_call(uint32_t index);
 static void print_return(const struct event *event);
 static void print_string(const struct event *event);
@@ -97,14 +110,18 @@ static uint32_t next_string(uint32_t index, uint32_t after);
 static void print_result(const struct trace_syscall_return *returned);
 static const char *call_format(const struct event *event,
 		uint32_t syscall_class, uint32_t number);
+static uint64_t now(void);
 
 int
 main(int argc, char *argv[])
 {
 	const char *recording = NULL;
+	bool follow = false;
 	int option;
-	while ((option = getopt(argc, argv, "rs:")) != -1) {
-		if (option == 'r') {
+	while ((option = getopt(argc, argv, "frs:")) != -1) {
+		if (option == 'f') {
+			follow = true;
+		} else if (option == 'r') {
 			resolved = true;
 		} else if (option == 's') {
 			recording = optarg;
@@ -112,7 +129,7 @@ main(int argc, char *argv[])
 	}
 	if (optind == argc) {
 		fprintf(stderr,
-				"Usage: limbo-trace [-r] [-s on|off] "
+				"Usage: limbo-trace [-fr] [-s on|off] "
 				"path...\n");
 		return 1;
 	}
@@ -124,20 +141,12 @@ main(int argc, char *argv[])
 		return 0;
 	}
 
-	for (int i = optind; i < argc; i++) {
-		visit(argv[i], add_file);
-	}
-	for (uint32_t i = 0; i < process_count; i++) {
-		collect(i);
-	}
-	uint32_t *order = malloc(event_count * sizeof(*order));
-	for (uint32_t i = 0; i < event_count; i++) {
-		order[i] = i;
-	}
-	qsort(order, event_count, sizeof(*order), compare);
-	for (uint32_t i = 0; i < event_count; i++) {
-		print_event(order[i]);
-	}
+	do {
+		for (int i = optind; i < argc; i++) {
+			visit(argv[i], add_file);
+		}
+		print_records();
+	} while (follow && usleep(FOLLOW_PAUSE) == 0);
 	return 0;
 }
 
@@ -158,15 +167,19 @@ static void
 visit(const char *path, void (*visit_file)(const char *path))
 {
 	struct dirent **entries;
-	int count = scandir(path, &entries, NULL, versionsort);
+	int count = scandir(path, &entries, NULL, NULL);
 	if (count == -1) {
 		visit_file(path);
+		return;
 	}
 	for (int i = 0; i < count; i++) {
 		char *file;
 		asprintf(&file, "%s/%s", path, entries[i]->d_name);
 		visit_file(file);
+		free(file);
+		free(entries[i]);
 	}
+	free(entries);
 }
 
 static void
@@ -183,9 +196,11 @@ static void
 add_file(const char *path)
 {
 	struct trace_file file;
-	if (trace_file_open(&file, path, O_RDONLY) == -1) {
+	if (tfind(path, &opened, compare_paths) != NULL
+			|| trace_file_open(&file, path, O_RDONLY) == -1) {
 		return;
 	}
+	tsearch(strdup(path), &opened, compare_paths);
 	const char *slash = strrchr(file.header->program, '/');
 	processes = realloc(
 			processes, (process_count + 1) * sizeof(*processes));
@@ -196,22 +211,58 @@ add_file(const char *path)
 	};
 }
 
-static void
-collect(uint32_t process)
+static int
+compare_paths(const void *a, const void *b)
 {
-	const struct trace_file *file = &processes[process].file;
-	add_event(NULL, file->header->start, process, NONE);
+	return strcmp(a, b);
+}
 
-	for (uint32_t i = 0; i < TRACE_RING_COUNT; i++) {
-		struct trace_run run = trace_ring_copy(file, i);
-		processes[process].overwritten += run.start;
+static void
+print_records(void)
+{
+	event_count = 0;
+	ring_count = 0;
+	round_start = now();
+	for (uint32_t i = 0; i < process_count; i++) {
+		collect(i);
+	}
+
+	uint32_t *order = malloc(event_count * sizeof(*order));
+	for (uint32_t i = 0; i < event_count; i++) {
+		order[i] = i;
+	}
+	qsort(order, event_count, sizeof(*order), compare);
+	for (uint32_t i = 0; i < event_count; i++) {
+		print_event(order[i]);
+	}
+	fflush(stdout);
+
+	free(order);
+	while (copy_count != 0) {
+		free(copies[--copy_count]);
+	}
+}
+
+static void
+collect(uint32_t index)
+{
+	struct process *process = &processes[index];
+	const struct trace_file *file = &process->file;
+	uint64_t overwritten = 0;
+	for (uint32_t i = 0; i < TRACE_RING_COUNT && trace_ring_used(file, i);
+			i++) {
+		struct trace_run run
+				= trace_ring_copy(file, i, process->read[i]);
+		overwritten += run.start - process->read[i];
+		process->read[i] = run.end;
+		keep_copy(run.bytes);
 		uint32_t ring = ring_count++;
 		uint32_t open = NONE;
 		uint64_t position = run.start;
 		const struct trace_record *record;
 		while ((record = trace_run_next(&run, &position)) != NULL) {
 			uint32_t added = add_event(
-					record, record->time, process, ring);
+					record, record->time, index, ring);
 			if (open != NONE
 					&& events[open].record->tid
 							!= record->tid) {
@@ -229,6 +280,25 @@ collect(uint32_t process)
 			}
 		}
 	}
+
+	if (!process->started || overwritten != 0) {
+		uint64_t time = process->started ? round_start
+						 : file->header->start;
+		uint32_t added = add_event(NULL, time, index, NONE);
+		events[added].start = !process->started;
+		events[added].overwritten = overwritten;
+		process->started = true;
+	}
+}
+
+static void
+keep_copy(uint8_t *copy)
+{
+	if (copy_count == copy_capacity) {
+		copy_capacity = 2 * copy_capacity + 1024;
+		copies = realloc(copies, copy_capacity * sizeof(*copies));
+	}
+	copies[copy_count++] = copy;
 }
 
 static uint32_t
@@ -265,7 +335,7 @@ print_event(uint32_t index)
 	const struct event *event = &events[index];
 	bool linked = event->link != NONE;
 	if (event->record == NULL) {
-		print_start(event);
+		print_process(event);
 	} else if (event->record->type == TRACE_SYSCALL_ENTER) {
 		print_call(index);
 	} else if (event->record->type == TRACE_SYSCALL_RETURN && !linked) {
@@ -281,21 +351,24 @@ print_event(uint32_t index)
 }
 
 static void
-print_start(const struct event *event)
+print_process(const struct event *event)
 {
-	const struct process *process = &processes[event->process];
-	const struct trace_header *header = process->file.header;
+	const struct trace_header *header
+			= processes[event->process].file.header;
 	print_prefix(event, header->pid);
-	printf("+++ started by %d: %s", header->parent, header->program);
-	for (size_t i = 0; i < header->arguments_size;
-			i += strlen(header->arguments + i) + 1) {
-		printf(" %s", header->arguments + i);
+	printf("+++");
+	if (event->start) {
+		printf(" started by %d: %s", header->parent, header->program);
+		for (size_t i = 0; i < header->arguments_size;
+				i += strlen(header->arguments + i) + 1) {
+			printf(" %s", header->arguments + i);
+		}
 	}
-	if (process->overwritten != 0) {
+	if (event->overwritten != 0) {
 		printf(" (%" PRIu64 " bytes of records overwritten)",
-				process->overwritten);
+				event->overwritten);
 	}
-	if (header->dropped != 0) {
+	if (event->start && header->dropped != 0) {
 		printf(" (%" PRIu32 " records dropped)", header->dropped);
 	}
 	printf(" +++\n");
@@ -554,4 +627,12 @@ call_format(const struct event *event, uint32_t syscall_class, uint32_t number)
 	default:
 		return number == mdep ? mdep_call : NULL;
 	}
+}
+
+static uint64_t
+now(void)
+{
+	struct timespec time;
+	clock_gettime(CLOCK_MONOTONIC, &time);
+	return (uint64_t)time.tv_sec * NANOSECONDS + time.tv_nsec;
 }
