@@ -216,6 +216,16 @@ trace_path(const char *guest, const char *host)
 	append(TRACE_STRING, &string->record, aligned_size);
 }
 
+void
+trace_routine(int32_t id, int32_t result)
+{
+	if (header == NULL) {
+		return;
+	}
+	struct trace_routine routine = {.id = id, .result = result};
+	append(TRACE_ROUTINE, &routine.record, sizeof(routine));
+}
+
 static void
 append(enum trace_type type, struct trace_record *record, size_t size)
 {

@@ -27,6 +27,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <mach/mach.h>
 #include <spawn.h>
 #include <stdlib.h>
 #include <sys/wait.h>
@@ -44,6 +45,10 @@ main(int argc, char *argv[])
 	}
 	CHECK(getenv("LIMBO_TRACE") != NULL);
 	CHECK(open("/no/such/file", O_RDONLY) == -1 && errno == ENOENT);
+	integer_t info;
+	mach_msg_type_number_t count = 1;
+	CHECK(task_info(mach_task_self(), 9999, &info, &count)
+			== KERN_INVALID_ARGUMENT);
 
 	pid_t child = fork();
 	CHECK(child != -1);

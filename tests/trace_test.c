@@ -99,6 +99,7 @@ test_records(void)
 	trace_syscall_enter(TRACE_CLASS_BSD, 5, arguments);
 	trace_path(guest, "/sysroot/guest");
 	trace_string(name);
+	trace_routine(3405, 4);
 	trace_syscall_return(TRACE_CLASS_BSD, 5, -2, TRACE_RESULT);
 
 	struct trace_file file;
@@ -141,6 +142,11 @@ test_records(void)
 	CHECK(string->address == (uintptr_t)name);
 	CHECK(strcmp(string->bytes, name) == 0);
 	CHECK(string->host_size == 0);
+
+	const struct trace_routine *routine
+			= (const void *)trace_run_next(&run, &position);
+	CHECK(routine->record.type == TRACE_ROUTINE);
+	CHECK(routine->id == 3405 && routine->result == 4);
 
 	const struct trace_syscall_return *returned
 			= (const void *)trace_run_next(&run, &position);

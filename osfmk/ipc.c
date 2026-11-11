@@ -43,11 +43,12 @@
 
 #include "broker.h"
 #include "broker_client.h"
-#include "libinfo.h"
-#include "mach_vm.h"
-#include "xpc_bootstrap.h"
 #include "bsd/kevent.h"
 #include "ipc.h"
+#include "libinfo.h"
+#include "mach_vm.h"
+#include "trace.h"
+#include "xpc_bootstrap.h"
 
 typedef enum {
 	IPC_USER,
@@ -1059,6 +1060,8 @@ kobject_server(mach_msg_header_t *request)
 		reply->RetCode = MIG_BAD_ID;
 	} else {
 		routine(request, &reply->Head);
+		bool complex = reply->Head.msgh_bits & MACH_MSGH_BITS_COMPLEX;
+		trace_routine(id, complex ? KERN_SUCCESS : reply->RetCode);
 	}
 
 	if (!(reply->Head.msgh_bits & MACH_MSGH_BITS_COMPLEX)

@@ -24,7 +24,9 @@ its process and, where it is not the first, its thread. Then follow the system
 call, its result and how long it took. A call that failed shows the name of
 XNU's error. A call ends in _..._ when it had not returned as the file was
 read, and a line that starts with _..._ is the return of a call whose start
-was no longer in the file. A line in _+++_ tells of a process that started.
+was no longer in the file. A name with a result alone is the routine of a
+kernel object that served a Mach message. A line in _+++_ tells of a process
+that started.
 
 The files can be read while their programs run and after they have gone.
 Each thread keeps its latest records and overwrites the oldest; the line of a
