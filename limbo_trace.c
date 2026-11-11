@@ -86,6 +86,7 @@ static void print_call(uint32_t index);
 static void print_return(const struct event *event);
 static void print_string(const struct event *event);
 static void print_routine(const struct event *event);
+static void print_message(const struct event *event);
 static void print_prefix(const struct event *event, uint32_t tid);
 static void print_arguments(const char *format, const uint64_t *arguments,
 		size_t count, uint32_t index);
@@ -273,6 +274,9 @@ print_event(uint32_t index)
 		print_string(event);
 	} else if (event->record->type == TRACE_ROUTINE) {
 		print_routine(event);
+	} else if (event->record->type == TRACE_MESSAGE_SENT
+			|| event->record->type == TRACE_MESSAGE_RECEIVED) {
+		print_message(event);
 	}
 }
 
@@ -394,6 +398,25 @@ print_routine(const struct event *event)
 		printf("routine#%d", routine->id);
 	}
 	printf(" = %d\n", routine->result);
+}
+
+static void
+print_message(const struct event *event)
+{
+	const struct trace_message *message = (const void *)event->record;
+	const mach_msg_header_t *header = &message->header;
+	bool sent = message->record.type == TRACE_MESSAGE_SENT;
+	print_prefix(event, message->record.tid);
+	printf("%s %d %s %#x, reply %#x, %u bytes%s\n",
+			sent ? "send" : "receive", header->msgh_id,
+			sent ? "to" : "on",
+			sent ? header->msgh_remote_port
+			     : header->msgh_local_port,
+			sent ? header->msgh_local_port
+			     : header->msgh_remote_port,
+			header->msgh_size,
+			header->msgh_bits & MACH_MSGH_BITS_COMPLEX ? ", complex"
+								   : "");
 }
 
 static void

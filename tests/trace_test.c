@@ -105,6 +105,8 @@ test_records(void)
 	trace_path(guest, "/sysroot/guest");
 	trace_string(name);
 	trace_routine(3405, 4);
+	const mach_msg_header_t sent = {.msgh_remote_port = 7, .msgh_id = 3405};
+	trace_message(TRACE_MESSAGE_SENT, &sent, 48);
 	trace_syscall_return(TRACE_CLASS_BSD, 5, -2, TRACE_RESULT);
 
 	struct trace_file file;
@@ -153,6 +155,13 @@ test_records(void)
 			= (const void *)trace_run_next(&run, &position);
 	CHECK(routine->record.type == TRACE_ROUTINE);
 	CHECK(routine->id == 3405 && routine->result == 4);
+
+	const struct trace_message *message
+			= (const void *)trace_run_next(&run, &position);
+	CHECK(message->record.type == TRACE_MESSAGE_SENT);
+	CHECK(message->header.msgh_remote_port == 7);
+	CHECK(message->header.msgh_id == 3405);
+	CHECK(message->header.msgh_size == 48);
 
 	const struct trace_syscall_return *returned
 			= (const void *)trace_run_next(&run, &position);

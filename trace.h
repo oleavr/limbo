@@ -27,6 +27,7 @@
 
 #pragma once
 
+#include <mach/message.h>
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -70,6 +71,8 @@ enum trace_type {
 	TRACE_SYSCALL_RETURN,
 	TRACE_STRING,
 	TRACE_ROUTINE,
+	TRACE_MESSAGE_SENT,
+	TRACE_MESSAGE_RECEIVED,
 };
 
 struct trace_record {
@@ -125,6 +128,13 @@ struct trace_routine {
 	int32_t result;
 };
 
+struct trace_message {
+	struct trace_record record;
+	mach_msg_header_t header;
+};
+
 void trace_string(const char *string);
 void trace_path(const char *guest, const char *host);
 void trace_routine(int32_t id, int32_t result);
+void trace_message(enum trace_type type, const mach_msg_header_t *header,
+		mach_msg_size_t size);
