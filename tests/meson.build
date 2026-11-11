@@ -11,6 +11,14 @@ signo_test = executable('signo_test',
 )
 test('signo', signo_test, suite: 'unit')
 
+trace_test = executable('trace_test',
+  sources: ['trace_test.c', '../trace.c', '../trace_reader.c'],
+  include_directories: include_dir,
+  dependencies: [thread_dep],
+  c_args: ['-Wno-unused-parameter'],
+)
+test('trace', trace_test, suite: 'unit', workdir: meson.current_build_dir())
+
 python = import('python').find_installation('python3')
 runner = files('run-guest.py')
 
