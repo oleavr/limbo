@@ -87,6 +87,18 @@ limbo_broker = executable('limbo-broker',
   install: true,
 )
 
+limbo_trace = executable('limbo-trace',
+  sources: [
+    'limbo_trace.c',
+    'trace_reader.c',
+  ],
+  include_directories: include_dir,
+  link_args: [
+    '-static'
+  ],
+  install: true,
+)
+
 scdoc = find_program('scdoc', native: true, required: false)
 
 if scdoc.found()
@@ -96,6 +108,7 @@ if scdoc.found()
   pages = [
     'cache-lookup.1.scd',
     'limbo.1.scd',
+    'limbo-trace.1.scd',
   ]
 
   foreach page : pages
