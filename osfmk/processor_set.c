@@ -44,10 +44,6 @@ host_processor_sets(host_priv_t host_priv,
 		processor_set_name_array_t *processor_sets,
 		mach_msg_type_number_t *processor_setsCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "host_processor_sets(%p, %p, %p)\n", (void *)host_priv,
-			(void *)processor_sets, (void *)processor_setsCnt);
-#endif
 	mach_vm_address_t address = 0;
 	if (_kernelrpc_mach_vm_allocate(0, &address, sizeof(mach_port_name_t),
 			    VM_FLAGS_ANYWHERE)
@@ -92,11 +88,6 @@ processor_set_statistics(processor_set_name_t pset,
 		processor_set_flavor_t flavor, processor_set_info_t info_out,
 		mach_msg_type_number_t *info_outCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "processor_set_statistics(%p, %p, %p, %p)\n",
-			(void *)(uintptr_t)pset, (void *)(intptr_t)flavor,
-			(void *)info_out, (void *)info_outCnt);
-#endif
 	if (flavor != PROCESSOR_SET_LOAD_INFO
 			|| *info_outCnt < PROCESSOR_SET_LOAD_INFO_COUNT) {
 		return KERN_INVALID_ARGUMENT;
@@ -120,11 +111,6 @@ processor_set_info(processor_set_name_t set_name, int flavor, host_t *host,
 		processor_set_info_t info_out,
 		mach_msg_type_number_t *info_outCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "processor_set_info(%p, %p, %p, %p, %p)\n",
-			(void *)(uintptr_t)set_name, (void *)(intptr_t)flavor,
-			(void *)host, (void *)info_out, (void *)info_outCnt);
-#endif
 	if (flavor != PROCESSOR_SET_BASIC_INFO
 			|| *info_outCnt < PROCESSOR_SET_BASIC_INFO_COUNT) {
 		return KERN_INVALID_ARGUMENT;

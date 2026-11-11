@@ -148,9 +148,6 @@ sys_nosys(void)
 int
 sys_identitysvc(int opcode, void *message)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "identitysvc(%#x, %p)\n", opcode, message);
-#endif
 	switch (opcode) {
 	case KAUTH_GET_CACHE_SIZES:
 
@@ -178,18 +175,12 @@ sys_identitysvc(int opcode, void *message)
 int
 sys_necp_open(int flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "necp_open(%p)\n", (void *)flags);
-#endif
 	return necp_open(flags);
 }
 
 int
 sys_necp_session_open(int flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "necp_session_open(%p)\n", (void *)flags);
-#endif
 	return necp_session_open(flags);
 }
 
@@ -197,11 +188,6 @@ long
 sys_necp_session_action(int fd, uint32_t action, uint8_t *in, size_t in_length,
 		uint8_t *out, size_t out_length)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "necp_session_action(%p, %u, %p, %p, %p, %p)\n",
-			(void *)fd, action, (void *)in, (void *)in_length,
-			(void *)out, (void *)out_length);
-#endif
 	return necp_session_action(fd, action, in, in_length, out, out_length);
 }
 
@@ -209,11 +195,6 @@ long
 sys_necp_client_action(int fd, uint32_t action, uint8_t *client_id,
 		size_t client_id_len, uint8_t *buffer, size_t buffer_size)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "necp_client_action(%p, %u, %p, %p, %p, %p)\n",
-			(void *)fd, action, client_id, (void *)client_id_len,
-			buffer, (void *)buffer_size);
-#endif
 	return necp_client_action(fd, action, client_id, client_id_len, buffer,
 			buffer_size);
 }
@@ -221,26 +202,17 @@ sys_necp_client_action(int fd, uint32_t action, uint8_t *client_id,
 int
 sys_enosys(void)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "enosys(%#lx)\n", current_syscall);
-#endif
 	return _ENOSYS;
 }
 
 int __attribute__((noreturn)) sys_exit(int rval)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "exit(%#x)\n", rval);
-#endif
 	_exit(rval);
 }
 
 int
 sys_fork(void)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "fork()\n");
-#endif
 	pid_t parent = getpid();
 	pid_t pid = fork();
 	if (pid == -1) {
@@ -259,10 +231,6 @@ sys_fork(void)
 user_ssize_t
 sys_read(int fd, user_addr_t cbuf, user_size_t nbyte)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "read(%p, %p, %p)\n", (void *)fd, (void *)cbuf,
-			(void *)nbyte);
-#endif
 	if (net_is_bpf(fd)) {
 		return net_bpf_read(fd, cbuf, nbyte);
 	}
@@ -275,13 +243,6 @@ sys_read(int fd, user_addr_t cbuf, user_size_t nbyte)
 user_ssize_t
 sys_write(int fd, user_addr_t cbuf, user_size_t nbyte)
 {
-#ifdef ENABLE_STRACE
-	/* Do not clutter output on stdout and stderr */
-	if (fd != 1 && fd != 2) {
-		fprintf(stderr, "write(%p, %p, %p)\n", (void *)fd, (void *)cbuf,
-				(void *)nbyte);
-	}
-#endif
 	if (route_is_socket(fd)) {
 		return route_write(fd, cbuf, nbyte);
 	}
@@ -335,10 +296,6 @@ static int keep_bsd_flags(int fd, int flags);
 int
 sys_open(user_addr_t path, int flags, int mode)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "open(\"%s\", %p, %p)\n", (char *)path, (void *)flags,
-			(void *)mode);
-#endif
 	if (path == NULL) {
 		return _EFAULT;
 	}
@@ -406,9 +363,6 @@ open_flags(int flags)
 int
 sys_sys_close(int fd)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sys_close(%p)\n", (void *)fd);
-#endif
 	kevent_close(fd);
 	net_close(fd);
 	route_close(fd);
@@ -422,10 +376,6 @@ sys_sys_close(int fd)
 int
 sys_wait4(int pid, user_addr_t status, int options, user_addr_t rusage)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "wait4(%p, %p, %p, %p)\n", (void *)pid, (void *)status,
-			(void *)options, (void *)rusage);
-#endif
 	struct rusage usage;
 	int result = wait4(pid, status, wait_options(options), &usage);
 	if (result == -1) {
@@ -474,9 +424,6 @@ wait_options(int options)
 int
 sys_link(user_addr_t oldpath, user_addr_t newpath)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "link(%p, %p)\n", (void *)oldpath, (void *)newpath);
-#endif
 	char old_buffer[PATH_MAX], new_buffer[PATH_MAX];
 	return errno_map(link(sysroot_host_path(oldpath, AT_SYMLINK_NOFOLLOW,
 					      old_buffer),
@@ -487,9 +434,6 @@ sys_link(user_addr_t oldpath, user_addr_t newpath)
 int
 sys_unlink(user_addr_t path)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "unlink(\"%s\")\n", (char *)path);
-#endif
 	char buffer[PATH_MAX];
 	return errno_map(unlink(
 			sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer)));
@@ -498,9 +442,6 @@ sys_unlink(user_addr_t path)
 int
 sys_chdir(user_addr_t path)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "chdir(\"%s\")\n", (char *)path);
-#endif
 	char buffer[PATH_MAX];
 	return errno_map(chdir(sysroot_host_path(path, 0, buffer)));
 }
@@ -508,28 +449,18 @@ sys_chdir(user_addr_t path)
 int
 sys_fchdir(int fd)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "fchdir(%p)\n", (void *)fd);
-#endif
 	return errno_map(fchdir(fd));
 }
 
 int
 sys_mknod(user_addr_t path, int mode, int dev)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mknod(%p, %p, %p)\n", (void *)path, (void *)mode,
-			(void *)dev);
-#endif
 	unimplemented();
 }
 
 int
 sys_chmod(user_addr_t path, int mode)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "chmod(%p, %p)\n", (void *)path, (void *)mode);
-#endif
 	char buffer[PATH_MAX];
 	return errno_map(chmod(sysroot_host_path(path, 0, buffer), mode));
 }
@@ -537,10 +468,6 @@ sys_chmod(user_addr_t path, int mode)
 int
 sys_chown(user_addr_t path, int uid, int gid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "chown(%p, %p, %p)\n", (void *)path, (void *)uid,
-			(void *)gid);
-#endif
 	char buffer[PATH_MAX];
 	return errno_map(chown(sysroot_host_path(path, 0, buffer), uid, gid));
 }
@@ -548,46 +475,30 @@ sys_chown(user_addr_t path, int uid, int gid)
 int
 sys_getpid(void)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getpid()\n");
-#endif
 	return getpid();
 }
 
 int
 sys_setuid(void *uid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "setuid(%p)\n", (void *)uid);
-#endif
 	return credentials_setuid((uid_t)(uintptr_t)uid);
 }
 
 int
 sys_getuid(void)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getuid()\n");
-#endif
 	return getuid();
 }
 
 int
 sys_geteuid(void)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "geteuid()\n");
-#endif
 	return geteuid();
 }
 
 int
 sys_ptrace(int req, uint64_t pid, void *addr, int data)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "ptrace(%p, %p, %p, %p)\n", (void *)req, (void *)pid,
-			(void *)addr, (void *)data);
-#endif
 	if (req == PT_DENY_ATTACH) {
 		return 0;
 	}
@@ -678,10 +589,6 @@ control_to_guest(struct msghdr *host, struct xnu_msghdr *guest)
 int
 sys_recvmsg(int s, void *msg, int flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "recvmsg(%p, %p, %p)\n", (void *)s, (void *)msg,
-			(void *)flags);
-#endif
 	struct xnu_msghdr *guest = msg;
 	struct sockaddr_storage address;
 	if (icmp_is_socket(s)) {
@@ -746,10 +653,6 @@ sys_recvmsg(int s, void *msg, int flags)
 int
 sys_sendmsg(int s, void *msg, int flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sendmsg(%p, %p, %p)\n", (void *)s, (void *)msg,
-			(void *)flags);
-#endif
 	const struct xnu_msghdr *guest = msg;
 	if (route_is_socket(s)) {
 		return (int)route_writev(s, guest->msg_iov, guest->msg_iovlen);
@@ -782,11 +685,6 @@ int
 sys_recvfrom(int s, void *buf, size_t len, int flags, void *from,
 		int *fromlenaddr)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "recvfrom(%p, %p, %p, %p, %p, %p)\n", (void *)s,
-			(void *)buf, (void *)len, (void *)flags, (void *)from,
-			(void *)fromlenaddr);
-#endif
 	struct sockaddr_storage host;
 	socklen_t host_len = sizeof(host);
 	ssize_t received;
@@ -816,10 +714,6 @@ sys_recvfrom(int s, void *buf, size_t len, int flags, void *from,
 int
 sys_accept(int s, void *name, void *anamelen)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "accept(%p, %p, %p)\n", (void *)s, (void *)name,
-			(void *)anamelen);
-#endif
 	struct sockaddr_storage host;
 	socklen_t host_len = sizeof(host);
 	int result = accept4(s, name != NULL ? (struct sockaddr *)&host : NULL,
@@ -839,10 +733,6 @@ sys_accept(int s, void *name, void *anamelen)
 int
 sys_getpeername(int fdes, void *asa, void *alen)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getpeername(%p, %p, %p)\n", (void *)fdes, (void *)asa,
-			(void *)alen);
-#endif
 	struct sockaddr_storage host;
 	socklen_t host_len = sizeof(host);
 	int result = getpeername(fdes, (struct sockaddr *)&host, &host_len);
@@ -861,10 +751,6 @@ sys_getpeername(int fdes, void *asa, void *alen)
 int
 sys_getsockname(int fdes, void *asa, void *alen)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getsockname(%p, %p, %p)\n", (void *)fdes, (void *)asa,
-			(void *)alen);
-#endif
 	struct sockaddr_storage host;
 	socklen_t host_len = sizeof(host);
 	int result = getsockname(fdes, (struct sockaddr *)&host, &host_len);
@@ -888,9 +774,6 @@ sys_getsockname(int fdes, void *asa, void *alen)
 int
 sys_access(user_addr_t path, int flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "access(\"%s\", %#x)\n", (char *)path, flags);
-#endif
 	int cflags = 0;
 	if (flags & _F_OK)
 		cflags |= F_OK;
@@ -908,9 +791,6 @@ sys_access(user_addr_t path, int flags)
 int
 sys_chflags(char *path, int flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "chflags(\"%s\", %p)\n", path, (void *)flags);
-#endif
 	char buffer[PATH_MAX];
 	int fd = open(sysroot_host_path(path, 0, buffer), O_PATH | O_CLOEXEC);
 	if (fd == -1) {
@@ -924,9 +804,6 @@ sys_chflags(char *path, int flags)
 int
 sys_fchflags(int fd, int flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "fchflags(%p, %p)\n", (void *)fd, (void *)flags);
-#endif
 	return keep_bsd_flags(fd, flags);
 }
 
@@ -942,9 +819,6 @@ keep_bsd_flags(int fd, int flags)
 int
 sys_sync(void)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sync()\n");
-#endif
 	sync();
 	return 0;
 }
@@ -952,10 +826,6 @@ sys_sync(void)
 int
 sys_kill(int pid, int signum, int posix)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "kill(%p, %p, %p)\n", (void *)pid, (void *)signum,
-			(void *)posix);
-#endif
 	int linux_signum = signo_to_linux(signum);
 	if (signum != 0 && linux_signum == 0) {
 		return _EINVAL;
@@ -966,18 +836,12 @@ sys_kill(int pid, int signum, int posix)
 int
 sys_getppid(void)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getppid()\n");
-#endif
 	return getppid();
 }
 
 int
 sys_sys_dup(uint32_t fd)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sys_dup(%p)\n", (void *)fd);
-#endif
 	int copy = dup(fd);
 	if (copy == -1) {
 		return err_map(errno);
@@ -989,9 +853,6 @@ sys_sys_dup(uint32_t fd)
 int
 sys_pipe(int pipefd[2])
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "pipe()\n");
-#endif
 	int fds[2];
 	if (pipe(fds) == -1) {
 		return err_map(errno);
@@ -1005,9 +866,6 @@ sys_pipe(int pipefd[2])
 int
 sys_pipe2(int pipefd[2], int flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "pipe2(%p, %p)\n", (void *)pipefd, (void *)flags);
-#endif
 	if (flags & ~(_O_NONBLOCK | _O_CLOEXEC | _O_CLOFORK)) {
 		return _EINVAL;
 	}
@@ -1030,42 +888,26 @@ sys_pipe2(int pipefd[2], int flags)
 int
 sys_getegid(void)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getegid()\n");
-#endif
 	return getegid();
 }
 
 int
 sys_getgid(void)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getgid()\n");
-#endif
 	return getgid();
 }
 
 int
 sys_sigprocmask(int how, user_addr_t mask, user_addr_t omask)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sigprocmask(%p, %p, %p)\n", (void *)how, (void *)mask,
-			(void *)omask);
-#endif
 	return signals_mask(how, mask, omask);
 }
 
 int
 sys_getlogin(char *namebuf, uint32_t namelen)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getlogin(%p, %p)\n", (void *)namebuf, (void *)namelen);
-#endif
 	char *name = getlogin();
 	if (name == NULL) {
-#ifdef ENABLE_STRACE
-		perror("getlogin");
-#endif
 		return err_map(errno);
 	}
 
@@ -1080,9 +922,6 @@ sys_getlogin(char *namebuf, uint32_t namelen)
 int
 sys_setlogin(char *namebuf)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "setlogin(%p)\n", (void *)namebuf);
-#endif
 	/* Not supported */
 	return 0;
 }
@@ -1090,9 +929,6 @@ sys_setlogin(char *namebuf)
 int
 sys_acct(char *path)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "acct(%p)\n", (void *)path);
-#endif
 	return errno_map(acct(path));
 }
 
@@ -1136,10 +972,6 @@ copy_address(struct sockaddr_storage *address, socklen_t length, uint64_t to,
 int
 sys_ioctl(int fd, uint64_t com, void *data)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "ioctl(%p, %p, %p)\n", (void *)fd, (void *)com,
-			(void *)data);
-#endif
 	if (com == xnu_SIOCGCONNINFO) {
 		return connection_info(fd, data);
 	}
@@ -1180,9 +1012,6 @@ sys_ioctl(int fd, uint64_t com, void *data)
 	if (fcntl(fd, F_GETFD) == -1) {
 		return errno_map(-1);
 	}
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "  ioctl: %#llx not done\n", (unsigned long long)com);
-#endif
 	return 0;
 }
 
@@ -1252,9 +1081,6 @@ interface_of(const struct sockaddr_storage *address)
 int
 sys_reboot(int opt, char *msg)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "reboot(%p, %p)\n", (void *)opt, (void *)msg);
-#endif
 	/* Not supported */
 	return 0;
 }
@@ -1262,9 +1088,6 @@ sys_reboot(int opt, char *msg)
 int
 sys_revoke(char *path)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "revoke(%p)\n", (void *)path);
-#endif
 	/* Not supported */
 	return 0;
 }
@@ -1272,9 +1095,6 @@ sys_revoke(char *path)
 int
 sys_symlink(char *path, char *link)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "symlink(%p, %p)\n", (void *)path, (void *)link);
-#endif
 	char buffer[PATH_MAX];
 	return errno_map(symlink(path,
 			sysroot_host_path(link, AT_SYMLINK_NOFOLLOW, buffer)));
@@ -1283,10 +1103,6 @@ sys_symlink(char *path, char *link)
 int
 sys_readlink(char *path, char *buf, int count)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "readlink(%p, %p, %p)\n", (void *)path, (void *)buf,
-			(void *)count);
-#endif
 	char buffer[PATH_MAX];
 	return errno_map(readlink(
 			sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer),
@@ -1296,10 +1112,6 @@ sys_readlink(char *path, char *buf, int count)
 int
 sys_execve(char *fname, char **argp, char **envp)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "execve(%s, %p, %p)\n", fname, (void *)argp,
-			(void *)envp);
-#endif
 	char buffer[PATH_MAX];
 	char **script_argv;
 	const char *executable;
@@ -1318,18 +1130,12 @@ sys_execve(char *fname, char **argp, char **envp)
 int
 sys_umask(int newmask)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "umask(%p)\n", (void *)newmask);
-#endif
 	return errno_map(umask(newmask));
 }
 
 int
 sys_chroot(user_addr_t path)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "chroot(%p)\n", (void *)path);
-#endif
 	return errno_map(chroot((char *)path));
 }
 
@@ -1340,10 +1146,6 @@ sys_chroot(user_addr_t path)
 int
 sys_msync(void *addr, size_t len, int flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "msync(%p, %p, %p)\n", (void *)addr, (void *)len,
-			(void *)flags);
-#endif
 	int linux_flags = ((flags & _MS_ASYNC) ? MS_ASYNC : 0)
 			| ((flags & _MS_INVALIDATE) ? MS_INVALIDATE : 0)
 			| ((flags & _MS_SYNC) ? MS_SYNC : 0);
@@ -1353,28 +1155,18 @@ sys_msync(void *addr, size_t len, int flags)
 int
 sys_vfork(void)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "vfork()\n");
-#endif
 	unimplemented();
 }
 
 int
 sys_munmap(void *addr, size_t len)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "munmap(%p, %p)\n", (void *)addr, (void *)len);
-#endif
 	return munmap(addr, len);
 }
 
 int
 sys_mprotect(void *addr, size_t len, int prot)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mprotect(%p, %p, %p)\n", (void *)addr, (void *)len,
-			(void *)prot);
-#endif
 	/* TODO: Be responsible and convert the protection properly */
 	return errno_map(mprotect(addr, len, prot));
 }
@@ -1388,10 +1180,6 @@ sys_mprotect(void *addr, size_t len, int prot)
 int
 sys_madvise(void *addr, size_t len, int behav)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "madvise(%p, %p, %p)\n", (void *)addr, (void *)len,
-			(void *)behav);
-#endif
 	switch (behav) {
 	case _MADV_NORMAL:
 	case _MADV_RANDOM:
@@ -1417,10 +1205,6 @@ sys_madvise(void *addr, size_t len, int behav)
 int
 sys_mincore(user_addr_t addr, user_size_t len, user_addr_t vec)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mincore(%p, %p, %p)\n", (void *)addr, (void *)len,
-			(void *)vec);
-#endif
 	uintptr_t start = (uintptr_t)addr & ~(MINCORE_GUEST_PAGE - 1);
 	size_t count = ((uintptr_t)addr + len - start + MINCORE_GUEST_PAGE - 1)
 			/ MINCORE_GUEST_PAGE;
@@ -1447,10 +1231,6 @@ sys_mincore(user_addr_t addr, user_size_t len, user_addr_t vec)
 int
 sys_getgroups(uint32_t gidsetsize, void *gidset)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getgroups(%p, %p)\n", (void *)gidsetsize,
-			(void *)gidset);
-#endif
 	gid_t groups[NGROUPS_MAX];
 	int count = getgroups(gidsetsize > NGROUPS_MAX ? NGROUPS_MAX
 						       : (int)gidsetsize,
@@ -1467,28 +1247,18 @@ sys_getgroups(uint32_t gidsetsize, void *gidset)
 int
 sys_setgroups(uint32_t gidsetsize, void *gidset)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "setgroups(%p, %p)\n", (void *)gidsetsize,
-			(void *)gidset);
-#endif
 	return credentials_setgroups(gidsetsize, gidset);
 }
 
 int
 sys_getpgrp(void)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getpgrp()\n");
-#endif
 	return getpgrp();
 }
 
 int
 sys_setpgid(int pid, int pgid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "setpgid(%p, %p)\n", (void *)pid, (void *)pgid);
-#endif
 	return errno_map(setpgid(pid, pgid));
 }
 
@@ -1508,10 +1278,6 @@ static void itimerval_from_linux(const struct itimerval *from,
 int
 sys_setitimer(uint32_t which, void *itv, void *oitv)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "setitimer(%p, %p, %p)\n", (void *)which, (void *)itv,
-			(void *)oitv);
-#endif
 	if (which > ITIMER_PROF) {
 		return _EINVAL;
 	}
@@ -1536,9 +1302,6 @@ sys_setitimer(uint32_t which, void *itv, void *oitv)
 int
 sys_swapon(void)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "swapon()\n");
-#endif
 	/* Not supported */
 	return 0;
 }
@@ -1546,9 +1309,6 @@ sys_swapon(void)
 int
 sys_getitimer(uint32_t which, void *itv)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getitimer(%p, %p)\n", (void *)which, (void *)itv);
-#endif
 	if (which > ITIMER_PROF) {
 		return _EINVAL;
 	}
@@ -1574,18 +1334,12 @@ itimerval_from_linux(const struct itimerval *from,
 int
 sys_sys_getdtablesize(void)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sys_getdtablesize()\n");
-#endif
 	return getdtablesize();
 }
 
 int
 sys_sys_dup2(uint32_t from, uint32_t to)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sys_dup2(%p, %p)\n", (void *)from, (void *)to);
-#endif
 	if (from != to && fcntl((int)from, F_GETFD) != -1) {
 		kevent_close((int)to);
 	}
@@ -1605,10 +1359,6 @@ static int select_guest(int nd, uint32_t *in, uint32_t *ou, uint32_t *ex,
 int
 sys_select(int nd, uint32_t *in, uint32_t *ou, uint32_t *ex, void *tv)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "select(%p, %p, %p, %p, %p)\n", (void *)nd, (void *)in,
-			(void *)ou, (void *)ex, (void *)tv);
-#endif
 	struct {
 		int64_t tv_sec;
 		int32_t tv_usec;
@@ -1672,20 +1422,12 @@ select_guest(int nd, uint32_t *in, uint32_t *ou, uint32_t *ex,
 int
 sys_fsync(int fd)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "fsync(%p)\n", (void *)fd);
-#endif
 	return errno_map(fsync(fd));
 }
 
 int
 sys_setpriority(int which, void *who, int prio)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "setpriority(%p, %p, %p)\n", (void *)which, (void *)who,
-			(void *)prio);
-#endif
-
 	if (which <= PRIO_USER) {
 		return errno_map(setpriority(which, (id_t)(uintptr_t)who, prio));
 	}
@@ -1858,10 +1600,6 @@ translate_sockopt(int level, int name, int *host_level, int *host_name)
 int
 sys_socket(int domain, int type, int protocol)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "socket(%p, %p, %p)\n", (void *)domain, (void *)type,
-			(void *)protocol);
-#endif
 	if (domain == xnu_PF_SYSTEM && protocol == xnu_SYSPROTO_EVENT) {
 		return route_socket(true, 0);
 	}
@@ -1894,10 +1632,6 @@ struct xnu_sockaddr_un {
 int
 sys_connect(int s, void *name, void *namelen)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "connect(%p, %p, %p)\n", (void *)s, (void *)name,
-			(void *)namelen);
-#endif
 	socklen_t length = (socklen_t)(uintptr_t)namelen;
 	if (kctl_is_socket(s)) {
 		return kctl_connect(s, name, length);
@@ -1970,9 +1704,6 @@ host_unix_address(const void *name, socklen_t length,
 int
 sys_getpriority(int which, void *who)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getpriority(%p, %p)\n", (void *)which, (void *)who);
-#endif
 	if (which > PRIO_USER) {
 		return 0;
 	}
@@ -1987,10 +1718,6 @@ sys_getpriority(int which, void *who)
 int
 sys_bind(int s, void *name, void *namelen)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "bind(%p, %p, %p)\n", (void *)s, (void *)name,
-			(void *)namelen);
-#endif
 	const struct xnu_sockaddr_un *address = name;
 	socklen_t length = (socklen_t)(uintptr_t)namelen;
 	if (length < 2) {
@@ -2021,11 +1748,6 @@ sys_bind(int s, void *name, void *namelen)
 int
 sys_setsockopt(int s, int level, int name, void *val, void *valsize)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "setsockopt(%p, %p, %p, %p, %p)\n", (void *)s,
-			(void *)level, (void *)name, (void *)val,
-			(void *)valsize);
-#endif
 	int host_level, host_name;
 	if (!translate_sockopt(level, name, &host_level, &host_name)) {
 		return 0;
@@ -2037,28 +1759,18 @@ sys_setsockopt(int s, int level, int name, void *val, void *valsize)
 int
 sys_listen(int s, int backlog)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "listen(%p, %p)\n", (void *)s, (void *)backlog);
-#endif
 	return errno_map(listen(s, backlog));
 }
 
 int
 sys_sigsuspend(uint32_t mask)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sigsuspend(%p)\n", (void *)(uintptr_t)mask);
-#endif
 	return signals_suspend(mask);
 }
 
 int
 sys_gettimeofday(void *tp, void *tzp, uint64_t *mach_absolute_time)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "gettimeofday(%p, %p, %p)\n", (void *)tp, (void *)tzp,
-			(void *)mach_absolute_time);
-#endif
 	if (tp != NULL) {
 		struct timeval now;
 		gettimeofday(&now, NULL);
@@ -2078,9 +1790,6 @@ sys_gettimeofday(void *tp, void *tzp, uint64_t *mach_absolute_time)
 int
 sys_getrusage(int who, void *rusage)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getrusage(%p, %p)\n", (void *)who, (void *)rusage);
-#endif
 	struct rusage usage;
 	if (getrusage(who, &usage) == -1) {
 		return err_map(errno);
@@ -2093,11 +1802,6 @@ sys_getrusage(int who, void *rusage)
 int
 sys_getsockopt(int s, int level, int name, void *val, void *avalsize)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getsockopt(%p, %p, %p, %p, %p)\n", (void *)s,
-			(void *)level, (void *)name, (void *)val,
-			(void *)avalsize);
-#endif
 	uint32_t *size = avalsize;
 	int host_level, host_name;
 	if (translate_sockopt(level, name, &host_level, &host_name)) {
@@ -2115,20 +1819,12 @@ sys_getsockopt(int s, int level, int name, void *val, void *avalsize)
 user_ssize_t
 sys_readv(int fd, void *iovp, uint32_t iovcnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "readv(%p, %p, %p)\n", (void *)fd, (void *)iovp,
-			(void *)iovcnt);
-#endif
 	return errno_map(readv(fd, iovp, iovcnt));
 }
 
 user_ssize_t
 sys_writev(int fd, void *iovp, uint32_t iovcnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "writev(%p, %p, %p)\n", (void *)fd, (void *)iovp,
-			(void *)iovcnt);
-#endif
 	if (route_is_socket(fd)) {
 		return route_writev(fd, iovp, iovcnt);
 	}
@@ -2138,37 +1834,24 @@ sys_writev(int fd, void *iovp, uint32_t iovcnt)
 int
 sys_settimeofday(void *tv, void *tzp)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "settimeofday(%p, %p)\n", (void *)tv, (void *)tzp);
-#endif
 	unimplemented();
 }
 
 int
 sys_fchown(int fd, int uid, int gid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "fchown(%p, %p, %p)\n", (void *)fd, (void *)uid,
-			(void *)gid);
-#endif
 	return errno_map(fchown(fd, uid, gid));
 }
 
 int
 sys_fchmod(int fd, int mode)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "fchmod(%p, %p)\n", (void *)fd, (void *)mode);
-#endif
 	return errno_map(fchmod(fd, mode));
 }
 
 int
 sys_setreuid(void *ruid, void *euid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "setreuid(%p, %p)\n", (void *)ruid, (void *)euid);
-#endif
 	return credentials_setreuid(
 			(uid_t)(uintptr_t)ruid, (uid_t)(uintptr_t)euid);
 }
@@ -2176,9 +1859,6 @@ sys_setreuid(void *ruid, void *euid)
 int
 sys_setregid(void *rgid, void *egid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "setregid(%p, %p)\n", (void *)rgid, (void *)egid);
-#endif
 	return credentials_setregid(
 			(gid_t)(uintptr_t)rgid, (gid_t)(uintptr_t)egid);
 }
@@ -2186,9 +1866,6 @@ sys_setregid(void *rgid, void *egid)
 int
 sys_rename(char *from, char *to)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "rename(\"%s\", \"%s\")\n", from, to);
-#endif
 	char from_buffer[PATH_MAX], to_buffer[PATH_MAX];
 	return errno_map(rename(sysroot_host_path(from, AT_SYMLINK_NOFOLLOW,
 						from_buffer),
@@ -2198,18 +1875,12 @@ sys_rename(char *from, char *to)
 int
 sys_sys_flock(int fd, int how)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sys_flock(%p, %p)\n", (void *)fd, (void *)how);
-#endif
 	return errno_map(flock(fd, how));
 }
 
 int
 sys_mkfifo(user_addr_t path, int mode)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mkfifo(%p, %p)\n", (void *)path, (void *)mode);
-#endif
 	char buffer[PATH_MAX];
 	return errno_map(mkfifo(
 			sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer),
@@ -2219,11 +1890,6 @@ sys_mkfifo(user_addr_t path, int mode)
 int
 sys_sendto(int s, void *buf, size_t len, int flags, void *to, void *tolen)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sendto(%p, %p, %p, %p, %p, %p)\n", (void *)s,
-			(void *)buf, (void *)len, (void *)flags, (void *)to,
-			(void *)tolen);
-#endif
 	if (route_is_socket(s)) {
 		return route_write(s, buf, len);
 	}
@@ -2246,9 +1912,6 @@ sys_sendto(int s, void *buf, size_t len, int flags, void *to, void *tolen)
 int
 sys_shutdown(int s, int how)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "shutdown(%p, %p)\n", (void *)s, (void *)how);
-#endif
 	/* Not supported */
 	return 0;
 }
@@ -2256,10 +1919,6 @@ sys_shutdown(int s, int how)
 int
 sys_socketpair(int domain, int type, int protocol, int *rsv)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "socketpair(%p, %p, %p, %p)\n", (void *)domain,
-			(void *)type, (void *)protocol, (void *)rsv);
-#endif
 	if (domain != xnu_PF_UNIX || protocol != 0
 			|| (type != xnu_SOCK_STREAM && type != xnu_SOCK_DGRAM)) {
 		unimplemented();
@@ -2272,9 +1931,6 @@ sys_socketpair(int domain, int type, int protocol, int *rsv)
 int
 sys_mkdir(user_addr_t path, int mode)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mkdir(\"%s\", %p)\n", (char *)path, (void *)mode);
-#endif
 	char buffer[PATH_MAX];
 	return errno_map(mkdir(
 			sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer),
@@ -2300,9 +1956,6 @@ last_component_is_dot(const char *path)
 int
 sys_rmdir(char *path)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "rmdir(%p)\n", (void *)path);
-#endif
 	if (last_component_is_dot(path)) {
 		return _EINVAL;
 	}
@@ -2314,9 +1967,6 @@ sys_rmdir(char *path)
 int
 sys_utimes(char *path, void *tptr)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "utimes(%p, %p)\n", (void *)path, (void *)tptr);
-#endif
 	char buffer[PATH_MAX];
 	struct timeval times[2];
 	return errno_map(utimes(sysroot_host_path(path, 0, buffer),
@@ -2341,9 +1991,6 @@ convert_timevals(const void *tptr, struct timeval *times)
 int
 sys_futimes(int fd, void *tptr)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "futimes(%p, %p)\n", (void *)fd, (void *)tptr);
-#endif
 	struct timeval times[2];
 	return errno_map(futimes(fd, convert_timevals(tptr, times)));
 }
@@ -2351,67 +1998,41 @@ sys_futimes(int fd, void *tptr)
 int
 sys_adjtime(void *delta, void *olddelta)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "adjtime(%p, %p)\n", (void *)delta, (void *)olddelta);
-#endif
 	unimplemented();
 }
 
 int
 sys_gethostuuid(unsigned char *uuid_buf, void *timeoutp)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "gethostuuid(%p, %p)\n", (void *)uuid_buf,
-			(void *)timeoutp);
-#endif
 	if (!host_uuid(uuid_buf)) {
 		return _EIO;
 	}
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "  host uuid: %s\n", host_uuid_string());
-#endif
 	return 0;
 }
 
 int
 sys_setsid(void)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "setsid()\n");
-#endif
 	return errno_map(setsid());
 }
 
 int
 sys_getpgid(uint64_t pid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getpgid(%p)\n", (void *)pid);
-#endif
 	return errno_map(getpgid(pid));
 }
 
 int
 sys_setprivexec(int flag)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "setprivexec(%p)\n", (void *)flag);
-#endif
 	unimplemented();
 }
 
 user_ssize_t
 sys_pread(int fd, user_addr_t buf, user_size_t nbyte, off_t offset)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "pread(%p, %p, %p, %p)\n", (void *)fd, (void *)buf,
-			(void *)nbyte, (void *)offset);
-#endif
 	ssize_t n = pread(fd, buf, nbyte, offset);
 	if (n < 0) {
-#ifdef ENABLE_STRACE
-		perror("pread");
-#endif
 		return err_map(errno);
 	}
 	return n;
@@ -2420,15 +2041,8 @@ sys_pread(int fd, user_addr_t buf, user_size_t nbyte, off_t offset)
 user_ssize_t
 sys_pwrite(int fd, user_addr_t buf, user_size_t nbyte, off_t offset)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "pwrite(%p, %p, %p, %p)\n", (void *)fd, (void *)buf,
-			(void *)nbyte, (void *)offset);
-#endif
 	ssize_t n = pwrite(fd, buf, nbyte, offset);
 	if (n < 0) {
-#ifdef ENABLE_STRACE
-		perror("pwrite");
-#endif
 		return err_map(errno);
 	}
 	return n;
@@ -2437,29 +2051,18 @@ sys_pwrite(int fd, user_addr_t buf, user_size_t nbyte, off_t offset)
 int
 sys_unmount(user_addr_t path, int flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "unmount(%p, %p)\n", (void *)path, (void *)flags);
-#endif
 	unimplemented();
 }
 
 int
 sys_quotactl(const char *path, int cmd, int uid, void *arg)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "quotactl(%p, %p, %p, %p)\n", (void *)path, (void *)cmd,
-			(void *)uid, (void *)arg);
-#endif
 	return _ENOTSUP;
 }
 
 int
 sys_mount(char *type, char *path, int flags, void *data)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mount(%p, %p, %p, %p)\n", (void *)type, (void *)path,
-			(void *)flags, (void *)data);
-#endif
 	unimplemented();
 }
 
@@ -2467,10 +2070,6 @@ int
 sys_csops(uint64_t pid, uint32_t ops, user_addr_t useraddr,
 		user_size_t usersize)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "csops(%p, %p, %p, %p)\n", (void *)pid, (void *)ops,
-			(void *)useraddr, (void *)usersize);
-#endif
 	return codesign_ops((int32_t)pid, ops, useraddr, usersize);
 }
 
@@ -2478,41 +2077,24 @@ int
 sys_csops_audittoken(uint64_t pid, uint32_t ops, user_addr_t useraddr,
 		user_size_t usersize, user_addr_t uaudittoken)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "csops_audittoken(%p, %p, %p, %p, %p)\n", (void *)pid,
-			(void *)ops, (void *)useraddr, (void *)usersize,
-			(void *)uaudittoken);
-#endif
 	return codesign_ops((int32_t)pid, ops, useraddr, usersize);
 }
 
 int
 sys_waitid(void *idtype, void *id, void *infop, int options)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "waitid(%p, %p, %p, %p)\n", (void *)idtype, (void *)id,
-			(void *)infop, (void *)options);
-#endif
 	unimplemented();
 }
 
 int
 sys_kdebug_typefilter(void **addr, size_t *size)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "kdebug_typefilter(%p, %p)\n", (void *)addr,
-			(void *)size);
-#endif
 	unimplemented();
 }
 
 uint64_t
 sys_kdebug_trace_string(uint32_t debugid, uint64_t str_id, const char *str)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "kdebug_trace_string(%p, %p, %p)\n", (void *)debugid,
-			(void *)str_id, (void *)str);
-#endif
 	unimplemented();
 }
 
@@ -2520,10 +2102,6 @@ int
 sys_kdebug_trace64(uint32_t code, uint64_t arg1, uint64_t arg2, uint64_t arg3,
 		uint64_t arg4)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "kdebug_trace64(%p, %p, %p, %p, %p)\n", (void *)code,
-			(void *)arg1, (void *)arg2, (void *)arg3, (void *)arg4);
-#endif
 	unimplemented();
 }
 
@@ -2531,47 +2109,30 @@ int
 sys_kdebug_trace(uint32_t code, uint64_t arg1, uint64_t arg2, uint64_t arg3,
 		uint64_t arg4)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "kdebug_trace(%p, %p, %p, %p, %p)\n", (void *)code,
-			(void *)arg1, (void *)arg2, (void *)arg3, (void *)arg4);
-#endif
 	return 0;
 }
 
 int
 sys_setgid(void *gid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "setgid(%p)\n", (void *)gid);
-#endif
 	return credentials_setgid((gid_t)(uintptr_t)gid);
 }
 
 int
 sys_setegid(void *egid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "setegid(%p)\n", (void *)egid);
-#endif
 	return credentials_setegid((gid_t)(uintptr_t)egid);
 }
 
 int
 sys_seteuid(void *euid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "seteuid(%p)\n", (void *)euid);
-#endif
 	return credentials_seteuid((uid_t)(uintptr_t)euid);
 }
 
 int
 sys_thread_selfcounts(int type, user_addr_t buf, user_size_t nbytes)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "thread_selfcounts(%p, %p, %p)\n", (void *)type,
-			(void *)buf, (void *)nbytes);
-#endif
 	if (buf == NULL) {
 		return _EINVAL;
 	}
@@ -2582,18 +2143,12 @@ sys_thread_selfcounts(int type, user_addr_t buf, user_size_t nbytes)
 int
 sys_fdatasync(int fd)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "fdatasync(%p)\n", (void *)fd);
-#endif
 	unimplemented();
 }
 
 int
 sys_pathconf(char *path, int name)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "pathconf(\"%s\", %d)\n", path, name);
-#endif
 	char buffer[PATH_MAX];
 	int fd = open(sysroot_host_path(path, 0, buffer), O_PATH);
 	if (fd == -1) {
@@ -2646,18 +2201,12 @@ fpathconf_value(int fd, int name)
 int
 sys_sys_fpathconf(int fd, int name)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sys_fpathconf(%d, %d)\n", fd, name);
-#endif
 	return fpathconf_value(fd, name);
 }
 
 int
 sys_getrlimit(uint32_t which, void *rlp)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getrlimit(%p, %p)\n", (void *)which, (void *)rlp);
-#endif
 	int resource = rlimit_resource(which);
 	if (resource == -1) {
 		return _EINVAL;
@@ -2711,9 +2260,6 @@ rlimit_from_darwin(uint64_t value)
 int
 sys_setrlimit(uint32_t which, void *rlp)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "setrlimit(%p, %p)\n", (void *)which, (void *)rlp);
-#endif
 	int resource = rlimit_resource(which);
 	if (resource == -1) {
 		return _EINVAL;
@@ -2758,11 +2304,6 @@ map_page_aligned(size_t len, int prot, int tflags, int fd, off_t pos)
 user_addr_t
 sys_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t pos)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mmap(%p, %p, %p, %p, %p, %p)\n", (void *)addr,
-			(void *)len, (void *)prot, (void *)flags, (void *)fd,
-			(void *)pos);
-#endif
 	int tflags = 0;
 	if (flags & 1)
 		tflags |= MAP_SHARED;
@@ -2788,9 +2329,6 @@ sys_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t pos)
 	}
 #endif
 	if (r == MAP_FAILED) {
-#ifdef ENABLE_STRACE
-		perror("mmap");
-#endif
 		return (void *)err_map(errno);
 	}
 	return r;
@@ -2805,10 +2343,6 @@ sys_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t pos)
 off_t
 sys_lseek(int fd, off_t offset, int whence)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "lseek(%p, %p, %p)\n", (void *)fd, (void *)offset,
-			(void *)whence);
-#endif
 	int flags = 0;
 	switch (whence) {
 	case _SEEK_SET:
@@ -2836,9 +2370,6 @@ sys_lseek(int fd, off_t offset, int whence)
 int
 sys_truncate(char *path, off_t length)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "truncate(%p, %p)\n", (void *)path, (void *)length);
-#endif
 	char buffer[PATH_MAX];
 	return errno_map(truncate(sysroot_host_path(path, 0, buffer), length));
 }
@@ -2846,19 +2377,12 @@ sys_truncate(char *path, off_t length)
 int
 sys_ftruncate(int fd, off_t length)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "ftruncate(%p, %p)\n", (void *)fd, (void *)length);
-#endif
 	return errno_map(ftruncate(fd, length));
 }
 
 int
 sys_mlock(void *addr, size_t len)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mlock(%p, %p)\n", (void *)addr, (void *)len);
-#endif
-
 	if (mlock(addr, len) == -1 && errno != ENOMEM && errno != EPERM) {
 		return errno_map(-1);
 	}
@@ -2868,18 +2392,12 @@ sys_mlock(void *addr, size_t len)
 int
 sys_munlock(void *addr, size_t len)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "munlock(%p, %p)\n", (void *)addr, (void *)len);
-#endif
 	return errno_map(munlock(addr, len));
 }
 
 int
 sys_undelete(user_addr_t path)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "undelete(%p)\n", (void *)path);
-#endif
 	unimplemented();
 }
 
@@ -2887,11 +2405,6 @@ int
 sys_open_dprotected_np(
 		user_addr_t path, int flags, int class, int dpflags, int mode)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "open_dprotected_np(\"%s\", %p, %p, %p, %p)\n",
-			(char *)path, (void *)flags, (void *)class,
-			(void *)dpflags, (void *)mode);
-#endif
 	char buffer[PATH_MAX];
 	return errno_map(open(
 			sysroot_host_path(path, open_follow(flags), buffer),
@@ -2902,21 +2415,12 @@ user_ssize_t
 sys_fsgetpath_ext(user_addr_t buf, size_t bufsize, user_addr_t fsid,
 		uint64_t objid, uint32_t options)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "fsgetpath_ext(%p, %p, %p, %p, %p)\n", (void *)buf,
-			(void *)bufsize, (void *)fsid, (void *)objid,
-			(void *)options);
-#endif
 	return fileid_path(objid, buf, bufsize);
 }
 
 int
 sys_exchangedata(const char *path1, const char *path2, uint64_t options)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "exchangedata(%p, %p, %p)\n", (void *)path1,
-			(void *)path2, (void *)options);
-#endif
 	unimplemented();
 }
 
@@ -2924,40 +2428,24 @@ int
 sys_searchfs(const char *path, void *searchblock, uint32_t *nummatches,
 		uint32_t scriptcode, uint32_t options, void *state)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "searchfs(%p, %p, %p, %p, %p, %p)\n", (void *)path,
-			(void *)searchblock, (void *)nummatches,
-			(void *)scriptcode, (void *)options, (void *)state);
-#endif
 	return _ENOTSUP;
 }
 
 int
 sys_delete(user_addr_t path)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "delete(%p)\n", (void *)path);
-#endif
 	unimplemented();
 }
 
 int
 sys_copyfile(char *from, char *to, int mode, int flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "copyfile(%p, %p, %p, %p)\n", (void *)from, (void *)to,
-			(void *)mode, (void *)flags);
-#endif
 	unimplemented();
 }
 
 int
 sys_poll(void *fds, uint32_t nfds, int timeout)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "poll(%p, %p, %p)\n", (void *)fds, (void *)nfds,
-			(void *)timeout);
-#endif
 	struct pollfd *guest = fds;
 	struct pollfd *host = calloc((nfds > 0) ? nfds : 1, sizeof(*host));
 	if (host == NULL) {
@@ -3007,189 +2495,114 @@ poll_events_from_linux(short events)
 int
 sys_fsctl(const char *path, uint64_t cmd, void *data, uint32_t options)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "fsctl(\"%s\", %p, %p, %p)\n", path, (void *)cmd,
-			(void *)data, (void *)options);
-#endif
 	return _ENOTTY;
 }
 
 int
 sys_initgroups(uint32_t gidsetsize, void *gidset, int gmuid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "initgroups(%p, %p, %p)\n", (void *)gidsetsize,
-			(void *)gidset, (void *)gmuid);
-#endif
 	return credentials_setgroups(gidsetsize, gidset);
 }
 
 int
 sys_ffsctl(int fd, uint64_t cmd, void *data, uint32_t options)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "ffsctl(%p, %p, %p, %p)\n", (void *)fd, (void *)cmd,
-			(void *)data, (void *)options);
-#endif
 	return _ENOTTY;
 }
 
 int
 sys_minherit(void *addr, size_t len, int inherit)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "minherit(%p, %p, %p)\n", (void *)addr, (void *)len,
-			(void *)inherit);
-#endif
 	unimplemented();
 }
 
 int
 sys_semsys(uint32_t which, int a2, int a3, int a4, int a5)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "semsys(%p, %p, %p, %p, %p)\n", (void *)which,
-			(void *)a2, (void *)a3, (void *)a4, (void *)a5);
-#endif
 	unimplemented();
 }
 
 int
 sys_msgsys(uint32_t which, int a2, int a3, int a4, int a5)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "msgsys(%p, %p, %p, %p, %p)\n", (void *)which,
-			(void *)a2, (void *)a3, (void *)a4, (void *)a5);
-#endif
 	unimplemented();
 }
 
 int
 sys_shmsys(uint32_t which, int a2, int a3, int a4)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "shmsys(%p, %p, %p, %p)\n", (void *)which, (void *)a2,
-			(void *)a3, (void *)a4);
-#endif
 	unimplemented();
 }
 
 int
 sys_semctl(int semid, int semnum, int cmd, void *arg)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "semctl(%p, %p, %p, %p)\n", (void *)semid,
-			(void *)semnum, (void *)cmd, (void *)arg);
-#endif
 	unimplemented();
 }
 
 int
 sys_semget(void *key, int nsems, int semflg)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "semget(%p, %p, %p)\n", (void *)key, (void *)nsems,
-			(void *)semflg);
-#endif
 	unimplemented();
 }
 
 int
 sys_semop(int semid, void *sops, int nsops)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "semop(%p, %p, %p)\n", (void *)semid, (void *)sops,
-			(void *)nsops);
-#endif
 	unimplemented();
 }
 
 int
 sys_msgctl(int msqid, int cmd, void *buf)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "msgctl(%p, %p, %p)\n", (void *)msqid, (void *)cmd,
-			(void *)buf);
-#endif
 	unimplemented();
 }
 
 int
 sys_msgget(void *key, int msgflg)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "msgget(%p, %p)\n", (void *)key, (void *)msgflg);
-#endif
 	unimplemented();
 }
 
 int
 sys_msgsnd(int msqid, void *msgp, size_t msgsz, int msgflg)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "msgsnd(%p, %p, %p, %p)\n", (void *)msqid, (void *)msgp,
-			(void *)msgsz, (void *)msgflg);
-#endif
 	unimplemented();
 }
 
 user_ssize_t
 sys_msgrcv(int msqid, void *msgp, size_t msgsz, long msgtyp, int msgflg)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "msgrcv(%p, %p, %p, %p, %p)\n", (void *)msqid,
-			(void *)msgp, (void *)msgsz, (void *)msgtyp,
-			(void *)msgflg);
-#endif
 	unimplemented();
 }
 
 user_addr_t
 sys_shmat(int shmid, void *shmaddr, int shmflg)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "shmat(%p, %p, %p)\n", (void *)shmid, (void *)shmaddr,
-			(void *)shmflg);
-#endif
 	unimplemented();
 }
 
 int
 sys_shmctl(int shmid, int cmd, void *buf)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "shmctl(%p, %p, %p)\n", (void *)shmid, (void *)cmd,
-			(void *)buf);
-#endif
 	unimplemented();
 }
 
 int
 sys_shmdt(void *shmaddr)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "shmdt(%p)\n", (void *)shmaddr);
-#endif
 	unimplemented();
 }
 
 int
 sys_shmget(void *key, size_t size, int shmflg)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "shmget(%p, %p, %p)\n", (void *)key, (void *)size,
-			(void *)shmflg);
-#endif
 	unimplemented();
 }
 
 int
 sys_shm_open(const char *name, int oflag, int mode)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "shm_open(\"%s\", %p, %p)\n", name, (void *)oflag,
-			(void *)mode);
-#endif
 	trace_string(name);
 	return errno_map(shm_open(name, open_flags(oflag), mode));
 }
@@ -3197,9 +2610,6 @@ sys_shm_open(const char *name, int oflag, int mode)
 int
 sys_shm_unlink(const char *name)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "shm_unlink(\"%s\")\n", name);
-#endif
 	trace_string(name);
 	return errno_map(shm_unlink(name));
 }
@@ -3212,10 +2622,6 @@ static sem_t *semaphores[SEMAPHORE_MAX];
 user_addr_t
 sys_sem_open(const char *name, int oflag, int mode, int value)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sem_open(\"%s\", %p, %p, %p)\n", name,
-			(void *)oflag, (void *)mode, (void *)value);
-#endif
 	trace_string(name);
 	sem_t *sem = sem_open(name, open_flags(oflag) & (O_CREAT | O_EXCL),
 			(mode_t)mode, (unsigned int)value);
@@ -3239,9 +2645,6 @@ sys_sem_open(const char *name, int oflag, int mode, int value)
 int
 sys_sem_close(void *handle)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sem_close(%p)\n", handle);
-#endif
 	uintptr_t fd = (uintptr_t)handle;
 	if (fd >= SEMAPHORE_MAX) {
 		return _EINVAL;
@@ -3261,9 +2664,6 @@ sys_sem_close(void *handle)
 int
 sys_sem_unlink(const char *name)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sem_unlink(\"%s\")\n", name);
-#endif
 	trace_string(name);
 	return errno_map(sem_unlink(name));
 }
@@ -3271,9 +2671,6 @@ sys_sem_unlink(const char *name)
 int
 sys_sem_wait(void *handle)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sem_wait(%p)\n", handle);
-#endif
 	sem_t *sem = semaphore(handle);
 	return sem != NULL ? errno_map(sem_wait(sem)) : _EINVAL;
 }
@@ -3281,9 +2678,6 @@ sys_sem_wait(void *handle)
 int
 sys_sem_trywait(void *handle)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sem_trywait(%p)\n", handle);
-#endif
 	sem_t *sem = semaphore(handle);
 	return sem != NULL ? errno_map(sem_trywait(sem)) : _EINVAL;
 }
@@ -3291,9 +2685,6 @@ sys_sem_trywait(void *handle)
 int
 sys_sem_post(void *handle)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sem_post(%p)\n", handle);
-#endif
 	sem_t *sem = semaphore(handle);
 	return sem != NULL ? errno_map(sem_post(sem)) : _EINVAL;
 }
@@ -3315,21 +2706,12 @@ int
 sys_open_extended(user_addr_t path, int flags, void *uid, void *gid, int mode,
 		user_addr_t xsecurity)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "open_extended(%p, %p, %p, %p, %p, %p)\n", (void *)path,
-			(void *)flags, (void *)uid, (void *)gid, (void *)mode,
-			(void *)xsecurity);
-#endif
 	unimplemented();
 }
 
 int
 sys_umask_extended(int newmask, user_addr_t xsecurity)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "umask_extended(%p, %p)\n", (void *)newmask,
-			(void *)xsecurity);
-#endif
 	unimplemented();
 }
 
@@ -3337,11 +2719,6 @@ int
 sys_chmod_extended(user_addr_t path, void *uid, void *gid, int mode,
 		user_addr_t xsecurity)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "chmod_extended(\"%s\", %p, %p, %p, %p)\n",
-			(char *)path, (void *)uid, (void *)gid, (void *)mode,
-			(void *)xsecurity);
-#endif
 	char buffer[PATH_MAX];
 	const char *host_path = sysroot_host_path(path, 0, buffer);
 	if (chown(host_path,
@@ -3364,11 +2741,6 @@ int
 sys_fchmod_extended(
 		int fd, uid_t uid, gid_t gid, int mode, user_addr_t xsecurity)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "fchmod_extended(%p, %p, %p, %p, %p)\n", (void *)fd,
-			(void *)uid, (void *)gid, (void *)mode,
-			(void *)xsecurity);
-#endif
 	if (fchown(fd, (uid == KAUTH_UID_NONE) ? (uid_t)-1 : uid,
 			    (gid == KAUTH_GID_NONE) ? (gid_t)-1 : gid)
 			== -1) {
@@ -3384,10 +2756,6 @@ int
 sys_access_extended(user_addr_t entries, size_t size, user_addr_t results,
 		void *uid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "access_extended(%p, %p, %p, %p)\n", (void *)entries,
-			(void *)size, (void *)results, (void *)uid);
-#endif
 	struct accessx_descriptor {
 		unsigned int ad_name_offset;
 		int ad_flags;
@@ -3436,18 +2804,12 @@ static __thread gid_t thread_gid;
 int
 sys_settid(void *uid, void *gid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "settid(%p, %p)\n", (void *)uid, (void *)gid);
-#endif
 	unimplemented();
 }
 
 int
 sys_gettid(void *uidp, void *gidp)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "gettid(%p, %p)\n", (void *)uidp, (void *)gidp);
-#endif
 	if (!thread_identity) {
 		return _ESRCH;
 	}
@@ -3459,40 +2821,24 @@ sys_gettid(void *uidp, void *gidp)
 int
 sys_setsgroups(int setlen, user_addr_t guidset)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "setsgroups(%p, %p)\n", (void *)setlen,
-			(void *)guidset);
-#endif
 	unimplemented();
 }
 
 int
 sys_getsgroups(user_addr_t setlen, user_addr_t guidset)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getsgroups(%p, %p)\n", (void *)setlen,
-			(void *)guidset);
-#endif
 	unimplemented();
 }
 
 int
 sys_setwgroups(int setlen, user_addr_t guidset)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "setwgroups(%p, %p)\n", (void *)setlen,
-			(void *)guidset);
-#endif
 	unimplemented();
 }
 
 int
 sys_getwgroups(user_addr_t setlen, user_addr_t guidset)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getwgroups(%p, %p)\n", (void *)setlen,
-			(void *)guidset);
-#endif
 	unimplemented();
 }
 
@@ -3500,11 +2846,6 @@ int
 sys_mkfifo_extended(user_addr_t path, void *uid, void *gid, int mode,
 		user_addr_t xsecurity)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mkfifo_extended(%p, %p, %p, %p, %p)\n", (void *)path,
-			(void *)uid, (void *)gid, (void *)mode,
-			(void *)xsecurity);
-#endif
 	unimplemented();
 }
 
@@ -3512,20 +2853,12 @@ int
 sys_mkdir_extended(user_addr_t path, void *uid, void *gid, int mode,
 		user_addr_t xsecurity)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mkdir_extended(%p, %p, %p, %p, %p)\n", (void *)path,
-			(void *)uid, (void *)gid, (void *)mode,
-			(void *)xsecurity);
-#endif
 	unimplemented();
 }
 
 int
 sys_shared_region_check_np(uint64_t *start_address)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "shared_region_check_np(%p)\n", (void *)start_address);
-#endif
 	if (start_address == (uint64_t *)-1) {
 		return 0;
 	}
@@ -3538,113 +2871,72 @@ int
 sys_vm_pressure_monitor(int wait_for_pressure, int nsecs_monitored,
 		uint32_t *pages_reclaimed)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "vm_pressure_monitor(%p, %p, %p)\n",
-			(void *)wait_for_pressure, (void *)nsecs_monitored,
-			(void *)pages_reclaimed);
-#endif
 	unimplemented();
 }
 
 int
 sys_getsid(uint64_t pid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getsid(%p)\n", (void *)pid);
-#endif
 	unimplemented();
 }
 
 int
 sys_settid_with_pid(uint64_t pid, int assume)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "settid_with_pid(%p, %p)\n", (void *)pid,
-			(void *)assume);
-#endif
 	unimplemented();
 }
 
 int
 sys_aio_fsync(int op, user_addr_t aiocbp)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "aio_fsync(%p, %p)\n", (void *)op, (void *)aiocbp);
-#endif
 	unimplemented();
 }
 
 user_ssize_t
 sys_aio_return(user_addr_t aiocbp)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "aio_return(%p)\n", (void *)aiocbp);
-#endif
 	unimplemented();
 }
 
 int
 sys_aio_suspend(user_addr_t aiocblist, int nent, user_addr_t timeoutp)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "aio_suspend(%p, %p, %p)\n", (void *)aiocblist,
-			(void *)nent, (void *)timeoutp);
-#endif
 	unimplemented();
 }
 
 int
 sys_aio_cancel(int fd, user_addr_t aiocbp)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "aio_cancel(%p, %p)\n", (void *)fd, (void *)aiocbp);
-#endif
 	unimplemented();
 }
 
 int
 sys_aio_error(user_addr_t aiocbp)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "aio_error(%p)\n", (void *)aiocbp);
-#endif
 	unimplemented();
 }
 
 int
 sys_aio_read(user_addr_t aiocbp)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "aio_read(%p)\n", (void *)aiocbp);
-#endif
 	unimplemented();
 }
 
 int
 sys_aio_write(user_addr_t aiocbp)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "aio_write(%p)\n", (void *)aiocbp);
-#endif
 	unimplemented();
 }
 
 int
 sys_lio_listio(int mode, user_addr_t aiocblist, int nent, user_addr_t sigp)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "lio_listio(%p, %p, %p, %p)\n", (void *)mode,
-			(void *)aiocblist, (void *)nent, (void *)sigp);
-#endif
 	unimplemented();
 }
 
 int
 sys_iopolicysys(int cmd, void *arg)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "iopolicysys(%p, %p)\n", (void *)cmd, (void *)arg);
-#endif
 	struct {
 		int32_t scope;
 		int32_t type;
@@ -3661,13 +2953,6 @@ sys_process_policy(int scope, int action, int policy, int policy_subtype,
 		user_addr_t attrp, uint64_t target_pid,
 		uint64_t target_threadid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "process_policy(%p, %p, %p, %p, %p, %p, %p)\n",
-			(void *)scope, (void *)action, (void *)policy,
-			(void *)policy_subtype, (void *)attrp,
-			(void *)target_pid, (void *)target_threadid);
-#endif
-
 	enum {
 		PROC_POLICY_ACTION_APPLY = 1,
 		PROC_POLICY_ACTION_RESTORE = 2,
@@ -3710,37 +2995,24 @@ sys_process_policy(int scope, int action, int policy, int policy_subtype,
 int
 sys_mlockall(int how)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mlockall(%p)\n", (void *)how);
-#endif
 	unimplemented();
 }
 
 int
 sys_munlockall(int how)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "munlockall(%p)\n", (void *)how);
-#endif
 	unimplemented();
 }
 
 int
 sys_issetugid(void)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "issetugid()\n");
-#endif
 	return credentials_issetugid() ? 1 : 0;
 }
 
 int
 sys___pthread_kill(int thread_port, int sig)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "__pthread_kill(%p, %p)\n", (void *)thread_port,
-			(void *)sig);
-#endif
 	struct thread *thread
 			= ((mach_port_name_t)thread_port == thread_current()->port)
 			? thread_current()
@@ -3758,28 +3030,18 @@ sys___pthread_kill(int thread_port, int sig)
 int
 sys___pthread_sigmask(int how, user_addr_t set, user_addr_t oset)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "__pthread_sigmask(%p, %p, %p)\n", (void *)how,
-			(void *)set, (void *)oset);
-#endif
 	return signals_mask(how, set, oset);
 }
 
 int
 sys___sigwait(user_addr_t set, user_addr_t sig)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "__sigwait(%p, %p)\n", (void *)set, (void *)sig);
-#endif
 	return signals_sigwait(*(const uint32_t *)set, (int *)sig);
 }
 
 int
 sys___disable_threadsignal(int value)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "__disable_threadsignal(%p)\n", (void *)value);
-#endif
 	sigset_t mask;
 	sigfillset(&mask);
 	sigdelset(&mask, SIGSYS);
@@ -3789,19 +3051,12 @@ sys___disable_threadsignal(int value)
 int
 sys___pthread_markcancel(int thread_port)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "__pthread_markcancel(%p)\n", (void *)thread_port);
-#endif
 	unimplemented();
 }
 
 int
 sys___pthread_canceled(int action)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "__pthread_canceled(%p)\n", (void *)action);
-#endif
-
 	switch (action) {
 	case 1:
 	case 2:
@@ -3815,11 +3070,6 @@ int
 sys___semwait_signal(int cond_sem, int mutex_sem, int timeout, int relative,
 		int64_t tv_sec, int32_t tv_nsec)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "__semwait_signal(%p, %p, %p, %p, %p, %p)\n",
-			(void *)cond_sem, (void *)mutex_sem, (void *)timeout,
-			(void *)relative, (void *)tv_sec, (void *)tv_nsec);
-#endif
 	kern_return_t kr;
 	if (timeout) {
 		if (!relative) {
@@ -3858,11 +3108,6 @@ sys___semwait_signal(int cond_sem, int mutex_sem, int timeout, int relative,
 int
 sys_sendfile(int fd, int s, off_t offset, off_t *nbytes, void *hdtr, int flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sendfile(%p, %p, %p, %p, %p, %p)\n", (void *)fd,
-			(void *)s, (void *)offset, (void *)nbytes, (void *)hdtr,
-			(void *)flags);
-#endif
 	unimplemented();
 }
 
@@ -3895,9 +3140,6 @@ change_to_descriptor(const void *fd)
 int
 sys___pthread_chdir(user_addr_t path)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "__pthread_chdir(\"%s\")\n", (char *)path);
-#endif
 	char buffer[PATH_MAX];
 	return thread_directory_change(change_to_path,
 			sysroot_host_path(path, 0, buffer));
@@ -3906,9 +3148,6 @@ sys___pthread_chdir(user_addr_t path)
 int
 sys___pthread_fchdir(int fd)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "__pthread_fchdir(%p)\n", (void *)fd);
-#endif
 	if (fd == -1) {
 		if (!thread_directory) {
 			return 0;
@@ -3924,9 +3163,6 @@ sys___pthread_fchdir(int fd)
 int
 sys_audit(void *record, int length)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "audit(%p, %p)\n", (void *)record, (void *)length);
-#endif
 	unimplemented();
 }
 
@@ -3937,10 +3173,6 @@ sys_audit(void *record, int length)
 int
 sys_auditon(int cmd, void *data, int length)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "auditon(%p, %p, %p)\n", (void *)cmd, (void *)data,
-			(void *)length);
-#endif
 	/* No audit daemon runs, so nothing is audited */
 	switch (cmd) {
 	case A_GETCOND:
@@ -3962,28 +3194,18 @@ sys_auditon(int cmd, void *data, int length)
 int
 sys_getauid(void *auid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getauid(%p)\n", (void *)auid);
-#endif
 	unimplemented();
 }
 
 int
 sys_setauid(void *auid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "setauid(%p)\n", (void *)auid);
-#endif
 	unimplemented();
 }
 
 int
 sys_getaudit_addr(void *auditinfo_addr, int length)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getaudit_addr(%p, %p)\n", (void *)auditinfo_addr,
-			(void *)length);
-#endif
 	uint32_t *info = auditinfo_addr;
 	memset(info, 0, length);
 	info[0] = (uint32_t)-1;
@@ -3994,29 +3216,18 @@ sys_getaudit_addr(void *auditinfo_addr, int length)
 int
 sys_setaudit_addr(void *auditinfo_addr, int length)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "setaudit_addr(%p, %p)\n", (void *)auditinfo_addr,
-			(void *)length);
-#endif
 	unimplemented();
 }
 
 int
 sys_auditctl(char *path)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "auditctl(%p)\n", (void *)path);
-#endif
 	unimplemented();
 }
 
 int
 sys_lchown(user_addr_t path, void *owner, void *group)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "lchown(%p, %p, %p)\n", (void *)path, (void *)owner,
-			(void *)group);
-#endif
 	char buffer[PATH_MAX];
 	return errno_map(lchown(
 			sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer),
@@ -4026,105 +3237,66 @@ sys_lchown(user_addr_t path, void *owner, void *group)
 int
 sys_ledger(int cmd, void *arg1, void *arg2, void *arg3)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "ledger(%p, %p, %p, %p)\n", (void *)cmd, (void *)arg1,
-			(void *)arg2, (void *)arg3);
-#endif
 	unimplemented();
 }
 
 int
 sys___mac_execve(char *fname, char **argp, char **envp, void *mac_p)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "__mac_execve(%p, %p, %p, %p)\n", (void *)fname,
-			(void *)argp, (void *)envp, (void *)mac_p);
-#endif
 	unimplemented();
 }
 
 int
 sys___mac_get_file(char *path_p, void *mac_p)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "__mac_get_file(%p, %p)\n", (void *)path_p,
-			(void *)mac_p);
-#endif
 	unimplemented();
 }
 
 int
 sys___mac_set_file(char *path_p, void *mac_p)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "__mac_set_file(%p, %p)\n", (void *)path_p,
-			(void *)mac_p);
-#endif
 	unimplemented();
 }
 
 int
 sys___mac_get_link(char *path_p, void *mac_p)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "__mac_get_link(%p, %p)\n", (void *)path_p,
-			(void *)mac_p);
-#endif
 	unimplemented();
 }
 
 int
 sys___mac_set_link(char *path_p, void *mac_p)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "__mac_set_link(%p, %p)\n", (void *)path_p,
-			(void *)mac_p);
-#endif
 	unimplemented();
 }
 
 int
 sys___mac_get_proc(void *mac_p)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "__mac_get_proc(%p)\n", (void *)mac_p);
-#endif
 	unimplemented();
 }
 
 int
 sys___mac_set_proc(void *mac_p)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "__mac_set_proc(%p)\n", (void *)mac_p);
-#endif
 	unimplemented();
 }
 
 int
 sys___mac_get_fd(int fd, void *mac_p)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "__mac_get_fd(%p, %p)\n", (void *)fd, (void *)mac_p);
-#endif
 	unimplemented();
 }
 
 int
 sys___mac_set_fd(int fd, void *mac_p)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "__mac_set_fd(%p, %p)\n", (void *)fd, (void *)mac_p);
-#endif
 	unimplemented();
 }
 
 int
 sys___mac_get_pid(uint64_t pid, void *mac_p)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "__mac_get_pid(%p, %p)\n", (void *)pid, (void *)mac_p);
-#endif
 	unimplemented();
 }
 
@@ -4132,32 +3304,18 @@ int
 sys_pselect(int nd, uint32_t *in, uint32_t *ou, uint32_t *ex, void *ts,
 		void *mask)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "pselect(%p, %p, %p, %p, %p, %p)\n", (void *)nd,
-			(void *)in, (void *)ou, (void *)ex, (void *)ts,
-			(void *)mask);
-#endif
 	return select_guest(nd, in, ou, ex, ts, mask);
 }
 
 int
 sys___mac_mount(char *type, char *path, int flags, void *data, void *mac_p)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "__mac_mount(%p, %p, %p, %p, %p)\n", (void *)type,
-			(void *)path, (void *)flags, (void *)data,
-			(void *)mac_p);
-#endif
 	unimplemented();
 }
 
 int
 sys___mac_get_mount(char *path, void *mac_p)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "__mac_get_mount(%p, %p)\n", (void *)path,
-			(void *)mac_p);
-#endif
 	unimplemented();
 }
 
@@ -4165,49 +3323,30 @@ int
 sys___mac_getfsstat(user_addr_t buf, int bufsize, user_addr_t mac, int macsize,
 		int flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "__mac_getfsstat(%p, %p, %p, %p, %p)\n", (void *)buf,
-			(void *)bufsize, (void *)mac, (void *)macsize,
-			(void *)flags);
-#endif
 	unimplemented();
 }
 
 user_ssize_t
 sys_fsgetpath(user_addr_t buf, size_t bufsize, user_addr_t fsid, uint64_t objid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "fsgetpath(%p, %p, %p, %p)\n", (void *)buf,
-			(void *)bufsize, (void *)fsid, (void *)objid);
-#endif
 	return fileid_path(objid, buf, bufsize);
 }
 
 mach_port_name_t
 sys_audit_session_self(void)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "audit_session_self()\n");
-#endif
 	unimplemented();
 }
 
 int
 sys_audit_session_join(mach_port_name_t port)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "audit_session_join(%p)\n", (void *)port);
-#endif
 	unimplemented();
 }
 
 int
 sys_sys_fileport_makeport(int fd, user_addr_t portnamep)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sys_fileport_makeport(%p, %p)\n", (void *)fd,
-			(void *)portnamep);
-#endif
 	int copy = fcntl(fd, F_DUPFD_CLOEXEC, 0);
 	if (copy == -1) {
 		return err_map(errno);
@@ -4219,9 +3358,6 @@ sys_sys_fileport_makeport(int fd, user_addr_t portnamep)
 int
 sys_sys_fileport_makefd(mach_port_name_t port)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sys_fileport_makefd(%p)\n", (void *)port);
-#endif
 	int fd = ipc_fileport_fd(port);
 	if (fd == -1) {
 		return _EINVAL;
@@ -4232,39 +3368,24 @@ sys_sys_fileport_makefd(mach_port_name_t port)
 int
 sys_audit_session_port(void *asid, user_addr_t portnamep)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "audit_session_port(%p, %p)\n", (void *)asid,
-			(void *)portnamep);
-#endif
 	unimplemented();
 }
 
 int
 sys_pid_suspend(int pid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "pid_suspend(%p)\n", (void *)pid);
-#endif
 	return errno_map(kill(pid, SIGSTOP));
 }
 
 int
 sys_pid_resume(int pid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "pid_resume(%p)\n", (void *)pid);
-#endif
 	return errno_map(kill(pid, SIGCONT));
 }
 
 int
 sys_pid_shutdown_sockets(int pid, int level)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "pid_shutdown_sockets(%p, %p)\n", (void *)pid,
-			(void *)level);
-#endif
-
 	return 0;
 }
 
@@ -4272,13 +3393,6 @@ int
 sys_shared_region_map_and_slide_np(int fd, uint32_t count, void *mappings,
 		uint32_t slide, uint64_t *slide_start, uint32_t slide_size)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr,
-			"shared_region_map_and_slide_np(%p, %p, %p, %p, %p, "
-			"%p)\n",
-			(void *)fd, (void *)count, (void *)mappings,
-			(void *)slide, (void *)slide_start, (void *)slide_size);
-#endif
 	/* Should never be called by dyld because we map the shared cache before
 	 */
 	unimplemented();
@@ -4287,10 +3401,6 @@ sys_shared_region_map_and_slide_np(int fd, uint32_t count, void *mappings,
 int
 sys_kas_info(int selector, void *value, size_t *size)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "kas_info(%p, %p, %p)\n", (void *)selector,
-			(void *)value, (void *)size);
-#endif
 	unimplemented();
 }
 
@@ -4298,11 +3408,6 @@ int
 sys_memorystatus_control(uint32_t command, int32_t pid, uint32_t flags,
 		user_addr_t buffer, size_t buffersize)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "memorystatus_control(%p, %p, %p, %p, %p)\n",
-			(void *)command, (void *)pid, (void *)flags,
-			(void *)buffer, (void *)buffersize);
-#endif
 	enum { MEMORYSTATUS_CMD_GET_MEMLIMIT_PROPERTIES = 8 };
 	if (buffer != NULL) {
 		memset(buffer, 0, buffersize);
@@ -4319,31 +3424,18 @@ int
 sys_guarded_open_np(user_addr_t path, void *guard, uint32_t guardflags,
 		int flags, int mode)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "guarded_open_np(%p, %p, %p, %p, %p)\n", (void *)path,
-			(void *)guard, (void *)guardflags, (void *)flags,
-			(void *)mode);
-#endif
 	return sys_open(path, flags, mode);
 }
 
 int
 sys_guarded_close_np(int fd, void *guard)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "guarded_close_np(%p, %p)\n", (void *)fd,
-			(void *)guard);
-#endif
 	return sys_sys_close(fd);
 }
 
 int
 sys_guarded_kqueue_np(void *guard, uint32_t guardflags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "guarded_kqueue_np(%p, %p)\n", (void *)guard,
-			(void *)guardflags);
-#endif
 	unimplemented();
 }
 
@@ -4351,12 +3443,6 @@ int
 sys_change_fdguard_np(int fd, void *guard, uint32_t guardflags, void *nguard,
 		uint32_t nguardflags, int *fdflagsp)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "change_fdguard_np(%p, %p, %p, %p, %p, %p)\n",
-			(void *)fd, (void *)guard, (void *)guardflags,
-			(void *)nguard, (void *)nguardflags, (void *)fdflagsp);
-#endif
-
 	int old = fcntl(fd, F_GETFD);
 	if (old == -1) {
 		return err_map(errno);
@@ -4371,30 +3457,18 @@ sys_change_fdguard_np(int fd, void *guard, uint32_t guardflags, void *nguard,
 int
 sys_usrctl(uint32_t flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "usrctl(%p)\n", (void *)flags);
-#endif
 	unimplemented();
 }
 
 int
 sys_proc_rlimit_control(uint64_t pid, int flavor, void *arg)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "proc_rlimit_control(%p, %p, %p)\n", (void *)pid,
-			(void *)flavor, (void *)arg);
-#endif
-
 	return 0;
 }
 
 int
 sys_coalition_policy_set(uint64_t cid, int flavor, uint32_t value)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "coalition_policy_set(%p, %p, %p)\n", (void *)cid,
-			(void *)(intptr_t)flavor, (void *)(uintptr_t)value);
-#endif
 	return 0;
 }
 
@@ -4402,13 +3476,6 @@ int
 sys_connectx(int socket, void *endpoints, void *associd, void *flags, void *iov,
 		void *iovcnt, size_t *len, void *connid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "connectx(%p, %p, %p, %p, %p, %p, %p, %p)\n",
-			(void *)socket, (void *)endpoints, (void *)associd,
-			(void *)flags, (void *)iov, (void *)iovcnt, (void *)len,
-			(void *)connid);
-#endif
-
 	const struct {
 		uint32_t source_interface;
 		const void *source;
@@ -4449,29 +3516,18 @@ sys_connectx(int socket, void *endpoints, void *associd, void *flags, void *iov,
 int
 sys_disconnectx(int s, void *aid, void *cid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "disconnectx(%p, %p, %p)\n", (void *)s, (void *)aid,
-			(void *)cid);
-#endif
 	unimplemented();
 }
 
 int
 sys_peeloff(int s, void *aid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "peeloff(%p, %p)\n", (void *)s, (void *)aid);
-#endif
 	unimplemented();
 }
 
 int
 sys_socket_delegate(int domain, int type, int protocol, uint64_t epid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "socket_delegate(%p, %p, %p, %p)\n", (void *)domain,
-			(void *)type, (void *)protocol, (void *)epid);
-#endif
 	unimplemented();
 }
 
@@ -4479,11 +3535,6 @@ int
 sys_telemetry(uint64_t cmd, uint64_t deadline, uint64_t interval,
 		uint64_t leeway, uint64_t arg4, uint64_t arg5)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "telemetry(%p, %p, %p, %p, %p, %p)\n", (void *)cmd,
-			(void *)deadline, (void *)interval, (void *)leeway,
-			(void *)arg4, (void *)arg5);
-#endif
 	unimplemented();
 }
 
@@ -4491,20 +3542,12 @@ int
 sys_proc_uuid_policy(
 		uint32_t operation, void *uuid, size_t uuidlen, uint32_t flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "proc_uuid_policy(%p, %p, %p, %p)\n", (void *)operation,
-			(void *)uuid, (void *)uuidlen, (void *)flags);
-#endif
 	unimplemented();
 }
 
 int
 sys_memorystatus_get_level(user_addr_t level)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "memorystatus_get_level(%p)\n", (void *)level);
-#endif
-
 	*(int *)level = (int)(memorystatus_free_share() / 10);
 	return 0;
 }
@@ -4512,20 +3555,12 @@ sys_memorystatus_get_level(user_addr_t level)
 int
 sys_system_override(uint64_t timeout, uint64_t flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "system_override(%p, %p)\n", (void *)timeout,
-			(void *)flags);
-#endif
-
 	return 0;
 }
 
 int
 sys_vfs_purge(void)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "vfs_purge()\n");
-#endif
 	unimplemented();
 }
 
@@ -4533,10 +3568,6 @@ int
 sys_sfi_ctl(uint32_t operation, uint32_t sfi_class, uint64_t time,
 		uint64_t *out_time)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sfi_ctl(%p, %p, %p, %p)\n", (void *)operation,
-			(void *)sfi_class, (void *)time, (void *)out_time);
-#endif
 	unimplemented();
 }
 
@@ -4544,20 +3575,12 @@ int
 sys_sfi_pidctl(uint32_t operation, uint64_t pid, uint32_t sfi_flags,
 		uint32_t *out_sfi_flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sfi_pidctl(%p, %p, %p, %p)\n", (void *)operation,
-			(void *)pid, (void *)sfi_flags, (void *)out_sfi_flags);
-#endif
 	unimplemented();
 }
 
 int
 sys_coalition(uint32_t operation, uint64_t *cid, uint32_t flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "coalition(%p, %p, %p)\n", (void *)operation,
-			(void *)cid, (void *)flags);
-#endif
 	unimplemented();
 }
 
@@ -4565,10 +3588,6 @@ int
 sys_coalition_info(
 		uint32_t flavor, uint64_t *cid, void *buffer, size_t *bufsize)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "coalition_info(%p, %p, %p, %p)\n", (void *)flavor,
-			(void *)cid, (void *)buffer, (void *)bufsize);
-#endif
 	unimplemented();
 }
 
@@ -4576,11 +3595,6 @@ int
 sys_clonefileat(int src_dirfd, user_addr_t src, int dst_dirfd, user_addr_t dst,
 		uint32_t flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "clonefileat(%p, %p, %p, %p, %p)\n", (void *)src_dirfd,
-			(void *)src, (void *)dst_dirfd, (void *)dst,
-			(void *)flags);
-#endif
 	char buffer[PATH_MAX];
 	const char *host = sysroot_host_path(src,
 			(flags & _CLONE_NOFOLLOW) ? AT_SYMLINK_NOFOLLOW : 0,
@@ -4615,10 +3629,6 @@ sys_clonefileat(int src_dirfd, user_addr_t src, int dst_dirfd, user_addr_t dst,
 int
 sys_openat(int fd, user_addr_t path, int flags, int mode)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "openat(%p, \"%s\", %p, %p)\n", (void *)fd,
-			(char *)path, (void *)flags, (void *)mode);
-#endif
 	if (fsevents_is_device_path(path)) {
 		return fsevents_open(flags & _O_CLOEXEC);
 	}
@@ -4631,20 +3641,12 @@ sys_openat(int fd, user_addr_t path, int flags, int mode)
 int
 sys_renameat(int fromfd, char *from, int tofd, char *to)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "renameat(%p, \"%s\", %p, \"%s\")\n", (void *)fromfd,
-			from, (void *)tofd, to);
-#endif
 	return sys_renameatx_np(fromfd, from, tofd, to, 0);
 }
 
 int
 sys_faccessat(int fd, user_addr_t path, int amode, int flag)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "faccessat(%p, %p, %p, %p)\n", (void *)fd, (void *)path,
-			(void *)amode, (void *)flag);
-#endif
 	char buffer[PATH_MAX];
 	int flags = at_flags(flag);
 	return errno_map(faccessat(at_fd(fd),
@@ -4654,10 +3656,6 @@ sys_faccessat(int fd, user_addr_t path, int amode, int flag)
 int
 sys_fchmodat(int fd, user_addr_t path, int mode, int flag)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "fchmodat(%p, %p, %p, %p)\n", (void *)fd, (void *)path,
-			(void *)mode, (void *)flag);
-#endif
 	char buffer[PATH_MAX];
 	int flags = at_flags(flag);
 	return errno_map(fchmodat(at_fd(fd),
@@ -4667,10 +3665,6 @@ sys_fchmodat(int fd, user_addr_t path, int mode, int flag)
 int
 sys_fchownat(int fd, user_addr_t path, void *uid, void *gid, int flag)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "fchownat(%p, %p, %p, %p, %p)\n", (void *)fd,
-			(void *)path, (void *)uid, (void *)gid, (void *)flag);
-#endif
 	char buffer[PATH_MAX];
 	int flags = at_flags(flag);
 	return errno_map(fchownat(at_fd(fd),
@@ -4681,10 +3675,6 @@ sys_fchownat(int fd, user_addr_t path, void *uid, void *gid, int flag)
 int
 sys_linkat(int fd1, user_addr_t path, int fd2, user_addr_t link, int flag)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "linkat(%p, %p, %p, %p, %p)\n", (void *)fd1,
-			(void *)path, (void *)fd2, (void *)link, (void *)flag);
-#endif
 	char path_buffer[PATH_MAX], link_buffer[PATH_MAX];
 	int flags = at_flags(flag);
 	return errno_map(linkat(at_fd(fd1),
@@ -4702,10 +3692,6 @@ sys_linkat(int fd1, user_addr_t path, int fd2, user_addr_t link, int flag)
 int
 sys_unlinkat(int fd, user_addr_t path, int flag)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "unlinkat(%p, %p, %p)\n", (void *)fd, (void *)path,
-			(void *)flag);
-#endif
 	char buffer[PATH_MAX];
 	return errno_map(unlinkat(at_fd(fd),
 			sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer),
@@ -4715,10 +3701,6 @@ sys_unlinkat(int fd, user_addr_t path, int flag)
 int
 sys_readlinkat(int fd, user_addr_t path, user_addr_t buf, size_t bufsize)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "readlinkat(%p, %p, %p, %p)\n", (void *)fd,
-			(void *)path, (void *)buf, (void *)bufsize);
-#endif
 	char buffer[PATH_MAX];
 	return errno_map(readlinkat(at_fd(fd),
 			sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer),
@@ -4728,10 +3710,6 @@ sys_readlinkat(int fd, user_addr_t path, user_addr_t buf, size_t bufsize)
 int
 sys_symlinkat(user_addr_t *path1, int fd, user_addr_t path2)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "symlinkat(%p, %p, %p)\n", (void *)path1, (void *)fd,
-			(void *)path2);
-#endif
 	char buffer[PATH_MAX];
 	return errno_map(symlinkat((const char *)path1, at_fd(fd),
 			sysroot_host_path(path2, AT_SYMLINK_NOFOLLOW, buffer)));
@@ -4740,10 +3718,6 @@ sys_symlinkat(user_addr_t *path1, int fd, user_addr_t path2)
 int
 sys_mkdirat(int fd, user_addr_t path, int mode)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mkdirat(%p, \"%s\", %p)\n", (void *)fd, (char *)path,
-			(void *)mode);
-#endif
 	char buffer[PATH_MAX];
 	return errno_map(mkdirat(at_fd(fd),
 			sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer),
@@ -4753,20 +3727,12 @@ sys_mkdirat(int fd, user_addr_t path, int mode)
 int
 sys_proc_trace_log(uint64_t pid, uint64_t uniqueid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "proc_trace_log(%p, %p)\n", (void *)pid,
-			(void *)uniqueid);
-#endif
 	unimplemented();
 }
 
 int
 sys_openbyid_np(user_addr_t fsid, user_addr_t objid, int oflags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "openbyid_np(%p, %p, %p)\n", (void *)fsid,
-			(void *)objid, (void *)oflags);
-#endif
 	uint64_t id;
 	memcpy(&id, objid, sizeof(id));
 	char path[PATH_MAX];
@@ -4779,30 +3745,18 @@ sys_openbyid_np(user_addr_t fsid, user_addr_t objid, int oflags)
 user_ssize_t
 sys_recvmsg_x(int s, void *msgp, uint32_t cnt, int flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "recvmsg_x(%p, %p, %p, %p)\n", (void *)s, (void *)msgp,
-			(void *)cnt, (void *)flags);
-#endif
 	unimplemented();
 }
 
 user_ssize_t
 sys_sendmsg_x(int s, void *msgp, uint32_t cnt, int flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sendmsg_x(%p, %p, %p, %p)\n", (void *)s, (void *)msgp,
-			(void *)cnt, (void *)flags);
-#endif
 	unimplemented();
 }
 
 uint64_t
 sys_thread_selfusage(void)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "thread_selfusage()\n");
-#endif
-
 	struct timespec time;
 	syscall(SYS_clock_gettime, CLOCK_THREAD_CPUTIME_ID, &time);
 	return (uint64_t)time.tv_sec * 1000000000 + (uint64_t)time.tv_nsec;
@@ -4813,24 +3767,12 @@ sys_guarded_open_dprotected_np(user_addr_t path, void *guard,
 		uint32_t guardflags, int flags, int dpclass, int dpflags,
 		int mode)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr,
-			"guarded_open_dprotected_np(%p, %p, %p, %p, %p, %p, "
-			"%p)\n",
-			(void *)path, (void *)guard, (void *)guardflags,
-			(void *)flags, (void *)dpclass, (void *)dpflags,
-			(void *)mode);
-#endif
 	return sys_open_dprotected_np(path, flags, dpclass, dpflags, mode);
 }
 
 user_ssize_t
 sys_guarded_write_np(int fd, void *guard, user_addr_t cbuf, user_size_t nbyte)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "guarded_write_np(%p, %p, %p, %p)\n", (void *)fd,
-			(void *)guard, (void *)cbuf, (void *)nbyte);
-#endif
 	return sys_write(fd, cbuf, nbyte);
 }
 
@@ -4838,31 +3780,18 @@ user_ssize_t
 sys_guarded_pwrite_np(int fd, void *guard, user_addr_t buf, user_size_t nbyte,
 		off_t offset)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "guarded_pwrite_np(%p, %p, %p, %p, %p)\n", (void *)fd,
-			(void *)guard, (void *)buf, (void *)nbyte,
-			(void *)offset);
-#endif
 	return sys_pwrite(fd, buf, nbyte, offset);
 }
 
 user_ssize_t
 sys_guarded_writev_np(int fd, void *guard, void *iovp, int iovcnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "guarded_writev_np(%p, %p, %p, %p)\n", (void *)fd,
-			(void *)guard, (void *)iovp, (void *)iovcnt);
-#endif
 	return sys_writev(fd, iovp, iovcnt);
 }
 
 int
 sys_renameatx_np(int fromfd, char *from, int tofd, char *to, uint32_t flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "renameatx_np(%p, %p, %p, %p, %p)\n", (void *)fromfd,
-			(void *)from, (void *)tofd, (void *)to, (void *)flags);
-#endif
 	char from_buffer[PATH_MAX], to_buffer[PATH_MAX];
 	return errno_map(renameat2(at_fd(fromfd),
 			sysroot_host_path(
@@ -4892,21 +3821,12 @@ int
 sys_mremap_encrypted(void *addr, size_t len, uint32_t cryptid, uint32_t cputype,
 		uint32_t cpusubtype)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mremap_encrypted(%p, %p, %p, %p, %p)\n", (void *)addr,
-			(void *)len, (void *)cryptid, (void *)cputype,
-			(void *)cpusubtype);
-#endif
 	unimplemented();
 }
 
 int
 sys_netagent_trigger(void *agent_uuid, size_t agent_uuidlen)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "netagent_trigger(%p, %p)\n", (void *)agent_uuid,
-			(void *)agent_uuidlen);
-#endif
 	unimplemented();
 }
 
@@ -4914,22 +3834,12 @@ int
 sys_stack_snapshot_with_config(int stackshot_config_version,
 		user_addr_t stackshot_config, size_t stackshot_config_size)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "stack_snapshot_with_config(%p, %p, %p)\n",
-			(void *)stackshot_config_version,
-			(void *)stackshot_config,
-			(void *)stackshot_config_size);
-#endif
 	unimplemented();
 }
 
 int
 sys_microstackshot(user_addr_t tracebuf, uint32_t tracebuf_size, uint32_t flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "microstackshot(%p, %p, %p)\n", (void *)tracebuf,
-			(void *)tracebuf_size, (void *)flags);
-#endif
 	unimplemented();
 }
 
@@ -4937,11 +3847,6 @@ int
 sys_persona(uint32_t operation, uint32_t flags, void *info, void *id,
 		size_t *idlen, char *path)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "persona(%p, %p, %p, %p, %p, %p)\n", (void *)operation,
-			(void *)flags, (void *)info, (void *)id, (void *)idlen,
-			(void *)path);
-#endif
 	return persona_syscall(operation, flags, info, id, idlen, path);
 }
 
@@ -4949,10 +3854,6 @@ uint64_t
 sys_mach_eventlink_signal(
 		mach_port_name_t eventlink_port, uint64_t signal_count)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mach_eventlink_signal(%p, %p)\n",
-			(void *)eventlink_port, (void *)signal_count);
-#endif
 	unimplemented();
 }
 
@@ -4961,11 +3862,6 @@ sys_mach_eventlink_wait_until(mach_port_name_t eventlink_port,
 		uint64_t wait_count, uint64_t deadline, uint32_t clock_id,
 		uint32_t option)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mach_eventlink_wait_until(%p, %p, %p, %p, %p)\n",
-			(void *)eventlink_port, (void *)wait_count,
-			(void *)deadline, (void *)clock_id, (void *)option);
-#endif
 	unimplemented();
 }
 
@@ -4974,14 +3870,6 @@ sys_mach_eventlink_signal_wait_until(mach_port_name_t eventlink_port,
 		uint64_t wait_count, uint64_t signal_count, uint64_t deadline,
 		uint32_t clock_id, uint32_t option)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr,
-			"mach_eventlink_signal_wait_until(%p, %p, %p, %p, %p, "
-			"%p)\n",
-			(void *)eventlink_port, (void *)wait_count,
-			(void *)signal_count, (void *)deadline,
-			(void *)clock_id, (void *)option);
-#endif
 	unimplemented();
 }
 
@@ -4989,30 +3877,18 @@ int
 sys_work_interval_ctl(uint32_t operation, uint64_t work_interval_id, void *arg,
 		size_t len)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "work_interval_ctl(%p, %p, %p, %p)\n",
-			(void *)operation, (void *)work_interval_id,
-			(void *)arg, (void *)len);
-#endif
 	unimplemented();
 }
 
 int
 sys_getentropy(void *buffer, size_t size)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getentropy(%p, %p)\n", (void *)buffer, (void *)size);
-#endif
 	return getentropy(buffer, size);
 }
 
 int
 sys_fclonefileat(int src_fd, int dst_dirfd, user_addr_t dst, uint32_t flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "fclonefileat(%p, %p, %p, %p)\n", (void *)src_fd,
-			(void *)dst_dirfd, (void *)dst, (void *)flags);
-#endif
 	char buffer[PATH_MAX];
 	return clone_file(src_fd, at_fd(dst_dirfd),
 			sysroot_host_path(dst, 0, buffer), flags);
@@ -5082,11 +3958,6 @@ int
 sys_fs_snapshot(uint32_t op, int dirfd, user_addr_t name1, user_addr_t name2,
 		user_addr_t data, uint32_t flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "fs_snapshot(%p, %p, %p, %p, %p, %p)\n", (void *)op,
-			(void *)dirfd, (void *)name1, (void *)name2,
-			(void *)data, (void *)flags);
-#endif
 	unimplemented();
 }
 
@@ -5095,13 +3966,6 @@ sys_terminate_with_payload(int pid, uint32_t reason_namespace,
 		uint64_t reason_code, void *payload, uint32_t payload_size,
 		const char *reason_string, uint64_t reason_flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "terminate_with_payload(%p, %p, %p, %p, %p, %p, %p)\n",
-			(void *)pid, (void *)reason_namespace,
-			(void *)reason_code, (void *)payload,
-			(void *)payload_size, (void *)reason_string,
-			(void *)reason_flags);
-#endif
 	if (pid == getpid()) {
 		sys_abort_with_payload(reason_namespace, reason_code, payload,
 				payload_size, reason_string, reason_flags);
@@ -5114,50 +3978,30 @@ int __attribute__((noreturn)) sys_abort_with_payload(uint32_t reason_namespace,
 		uint64_t reason_code, void *payload, uint32_t payload_size,
 		const char *reason_string, uint64_t reason_flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "abort_with_payload(%p, %p, %p, %p, %p, %p)\n",
-			(void *)reason_namespace, (void *)reason_code,
-			(void *)payload, (void *)payload_size,
-			(void *)reason_string, (void *)reason_flags);
-#endif
 	unimplemented();
 }
 
 int
 sys_net_qos_guideline(void *param, uint32_t param_len)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "net_qos_guideline(%p, %p)\n", (void *)param,
-			(void *)param_len);
-#endif
 	unimplemented();
 }
 
 int
 sys_fmount(const char *type, int fd, int flags, void *data)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "fmount(%p, %p, %p, %p)\n", (void *)type, (void *)fd,
-			(void *)flags, (void *)data);
-#endif
 	unimplemented();
 }
 
 int
 sys_ntp_adjtime(void *tp)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "ntp_adjtime(%p)\n", (void *)tp);
-#endif
 	unimplemented();
 }
 
 int
 sys_ntp_gettime(void *ntvp)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "ntp_gettime(%p)\n", (void *)ntvp);
-#endif
 	unimplemented();
 }
 
@@ -5166,13 +4010,6 @@ sys_os_fault_with_payload(uint32_t reason_namespace, uint64_t reason_code,
 		void *payload, uint32_t payload_size, const char *reason_string,
 		uint64_t reason_flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "os_fault_with_payload(%p, %p, %p, %p, %p, %p)\n",
-			(void *)reason_namespace, (void *)reason_code,
-			(void *)payload, (void *)payload_size,
-			(void *)reason_string, (void *)reason_flags);
-#endif
-
 	fprintf(stderr, "limbo: abort, namespace %u, code %#llx: %s\n",
 			reason_namespace, (unsigned long long)reason_code,
 			reason_string != NULL ? reason_string : "");
@@ -5188,10 +4025,6 @@ sys_os_fault_with_payload(uint32_t reason_namespace, uint64_t reason_code,
 uint64_t
 sys___mach_bridge_remote_time(uint64_t local_timestamp)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "__mach_bridge_remote_time(%p)\n",
-			(void *)local_timestamp);
-#endif
 	unimplemented();
 }
 
@@ -5199,29 +4032,18 @@ int
 sys_coalition_ledger(uint32_t operation, uint64_t *cid, void *buffer,
 		size_t *bufsize)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "coalition_ledger(%p, %p, %p, %p)\n", (void *)operation,
-			(void *)cid, (void *)buffer, (void *)bufsize);
-#endif
 	unimplemented();
 }
 
 int
 sys_log_data(void *tag, void *flags, void *buffer, void *size)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "log_data(%p, %p, %p, %p)\n", (void *)tag,
-			(void *)flags, (void *)buffer, (void *)size);
-#endif
 	unimplemented();
 }
 
 uint64_t
 sys_memorystatus_available_memory(void)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "memorystatus_available_memory()\n");
-#endif
 	unimplemented();
 }
 
@@ -5229,11 +4051,6 @@ int
 sys_shared_region_map_and_slide_2_np(uint32_t files_count, void *files,
 		uint32_t mappings_count, void *mappings)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "shared_region_map_and_slide_2_np(%p, %p, %p, %p)\n",
-			(void *)files_count, (void *)files,
-			(void *)mappings_count, (void *)mappings);
-#endif
 	unimplemented();
 }
 
@@ -5241,10 +4058,6 @@ int
 sys_pivot_root(const char *new_rootfs_path_before,
 		const char *old_rootfs_path_after)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "pivot_root(%p, %p)\n", (void *)new_rootfs_path_before,
-			(void *)old_rootfs_path_after);
-#endif
 	unimplemented();
 }
 
@@ -5252,10 +4065,6 @@ int
 sys_task_inspect_for_pid(
 		mach_port_name_t target_tport, int pid, mach_port_name_t *t)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "task_inspect_for_pid(%p, %p, %p)\n",
-			(void *)target_tport, (void *)pid, (void *)t);
-#endif
 	unimplemented();
 }
 
@@ -5263,11 +4072,6 @@ int
 sys_task_read_for_pid(
 		mach_port_name_t target_tport, int pid, mach_port_name_t *t)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "task_read_for_pid(%p, %p, %p)\n", (void *)target_tport,
-			(void *)pid, (void *)t);
-#endif
-
 	if (pid == getpid()) {
 		*t = ipc_task_self();
 		return KERN_SUCCESS;
@@ -5278,20 +4082,12 @@ sys_task_read_for_pid(
 user_ssize_t
 sys_sys_preadv(int fd, void *iovp, int iovcnt, off_t offset)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sys_preadv(%p, %p, %p, %p)\n", (void *)fd,
-			(void *)iovp, (void *)iovcnt, (void *)offset);
-#endif
 	unimplemented();
 }
 
 user_ssize_t
 sys_sys_pwritev(int fd, void *iovp, int iovcnt, off_t offset)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sys_pwritev(%p, %p, %p, %p)\n", (void *)fd,
-			(void *)iovp, (void *)iovcnt, (void *)offset);
-#endif
 	unimplemented();
 }
 
@@ -5300,14 +4096,6 @@ sys_proc_info_extended_id(int32_t callnum, int32_t pid, uint32_t flavor,
 		uint32_t flags, uint64_t ext_id, uint64_t arg,
 		user_addr_t buffer, int32_t buffersize)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr,
-			"proc_info_extended_id(%p, %p, %p, %p, %p, %p, %p, "
-			"%p)\n",
-			(void *)callnum, (void *)pid, (void *)flavor,
-			(void *)flags, (void *)ext_id, (void *)arg,
-			(void *)buffer, (void *)buffersize);
-#endif
 	return sys_proc_info(callnum, pid, flavor, arg, buffer, buffersize);
 }
 

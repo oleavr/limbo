@@ -36,19 +36,11 @@ task_restartable_ranges_register(task_t target_task,
 		task_restartable_range_array_t ranges,
 		mach_msg_type_number_t rangesCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "task_restartable_ranges_register(%p, %p, %p)\n",
-			(void *)target_task, (void *)ranges, (void *)rangesCnt);
-#endif
 	return KERN_SUCCESS;
 }
 
 kern_return_t
 task_restartable_ranges_synchronize(task_t target_task)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "task_restartable_ranges_synchronize(%p)\n",
-			(void *)target_task);
-#endif
 	return KERN_SUCCESS;
 }

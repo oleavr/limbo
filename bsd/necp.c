@@ -411,16 +411,6 @@ compute_result(struct client *client)
 	}
 	client->result_length = (size_t)(cursor - client->result);
 	client->result_read = false;
-#ifdef ENABLE_STRACE
-	char text[INET6_ADDRSTRLEN] = "-";
-	if (family != 0) {
-		inet_ntop(family, destination, text, sizeof(text));
-	}
-	fprintf(stderr,
-			"  necp: client for %s port %u: flags %#x, interface "
-			"%u\n",
-			text, ntohs(port), flags, routed ? route.interface : 0);
-#endif
 }
 
 static bool
@@ -808,17 +798,6 @@ necp_client_action(int fd, uint32_t action, uint8_t *client_id,
 		result = validate_answer(client_id, client_id_length);
 		break;
 	default:
-#ifdef ENABLE_STRACE
-		fprintf(stderr,
-				"  necp: no action %u, id %zu bytes, buffer "
-				"%zu:",
-				action, client_id_length, buffer_size);
-		for (size_t i = 0; buffer != NULL && i < buffer_size && i < 160;
-				i++) {
-			fprintf(stderr, " %02x", buffer[i]);
-		}
-		fprintf(stderr, "\n");
-#endif
 		result = _ENOTSUP;
 		break;
 	}
@@ -1284,9 +1263,6 @@ necp_session_action(int fd, uint32_t action, const uint8_t *in,
 		result = _EINVAL;
 		break;
 	}
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "  necp: session action %u: %ld\n", action, result);
-#endif
 	pthread_mutex_unlock(&lock);
 	return result;
 }

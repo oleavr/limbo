@@ -273,11 +273,6 @@ int
 sys_proc_info(int32_t callnum, int32_t pid, uint32_t flavor, uint64_t arg,
 		user_addr_t buffer, int32_t buffersize)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "proc_info(%p, %p, %p, %p, %p, %p)\n", (void *)callnum,
-			(void *)pid, (void *)flavor, (void *)arg,
-			(void *)buffer, (void *)buffersize);
-#endif
 	switch (callnum) {
 	case PROC_INFO_CALL_LISTPIDS:
 		return listpids(pid, flavor, buffer, buffersize);

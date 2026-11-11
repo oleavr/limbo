@@ -241,13 +241,6 @@ broadcast(void)
 			i++) {
 		usleep(500);
 	}
-#ifdef ENABLE_STRACE
-	if (__atomic_load_n(&changed, __ATOMIC_ACQUIRE) < sent) {
-		fprintf(stderr, "credentials: %d of %d threads changed\n",
-				__atomic_load_n(&changed, __ATOMIC_ACQUIRE),
-				sent);
-	}
-#endif
 }
 
 static bool

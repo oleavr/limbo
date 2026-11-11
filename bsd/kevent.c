@@ -272,9 +272,6 @@ static void knote_delivered(struct knote *kn);
 int
 sys_kqueue(void)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "kqueue()\n");
-#endif
 	int fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
 	if (fd == -1) {
 		return err_map(errno);
@@ -294,10 +291,6 @@ int
 sys_kevent(int fd, void *changelist, int nchanges, void *eventlist, int nevents,
 		void *timeout)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "kevent(%d, %p, %d, %p, %d, %p)\n", fd, changelist,
-			nchanges, eventlist, nevents, timeout);
-#endif
 	const struct __darwin_kevent *darwin_changes = changelist;
 	struct __darwin_kevent *darwin_events = eventlist;
 	struct kevent_qos_s *changes
@@ -387,11 +380,6 @@ int
 sys_kevent64(int fd, void *changelist, int nchanges, void *eventlist,
 		int nevents, unsigned int flags, void *timeout)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "kevent64(%d, %p, %d, %p, %d, %#x, %p)\n", fd,
-			changelist, nchanges, eventlist, nevents, flags,
-			timeout);
-#endif
 	const struct __darwin_kevent64_s *darwin_changes = changelist;
 	struct __darwin_kevent64_s *darwin_events = eventlist;
 	struct kevent_qos_s *changes
@@ -434,11 +422,6 @@ sys_kevent_qos(int fd, void *changelist, int nchanges, void *eventlist,
 		int nevents, void *data_out, size_t *data_available,
 		unsigned int flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "kevent_qos(%d, %p, %d, %p, %d, %p, %p, %#x)\n", fd,
-			changelist, nchanges, eventlist, nevents, data_out,
-			(void *)data_available, flags);
-#endif
 	int64_t timeout = (flags & KEVENT_FLAG_IMMEDIATE) ? 0 : -1;
 	if (!(flags & KEVENT_FLAG_WORKQ)) {
 		return kevent_fd(fd, changelist, nchanges, eventlist, nevents,
@@ -458,11 +441,6 @@ sys_kevent_id(uint64_t id, void *changelist, int nchanges, void *eventlist,
 		int nevents, void *data_out, size_t *data_available,
 		unsigned int flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "kevent_id(%#lx, %p, %d, %p, %d, %p, %p, %#x)\n", id,
-			changelist, nchanges, eventlist, nevents, data_out,
-			(void *)data_available, flags);
-#endif
 	pthread_mutex_lock(&lock);
 	int result;
 	struct kqueue *kq = workloop_lookup(id, flags);
@@ -567,16 +545,6 @@ kevent_internal(struct kqueue *kq, const struct kevent_qos_s *changes,
 static int
 kevent_register(struct kqueue *kq, const struct kevent_qos_s *change)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr,
-			"  kevent(ident=%#lx, filter=%d, flags=%#x, qos=%#x, "
-			"udata=%#lx, fflags=%#x, data=%#lx, ext=[%#lx, %#lx, "
-			"%#lx, %#lx])\n",
-			change->ident, change->filter, change->flags,
-			change->qos, change->udata, change->fflags,
-			change->data, change->ext[0], change->ext[1],
-			change->ext[2], change->ext[3]);
-#endif
 	struct knote *kn = knote_find(kq, change);
 
 	if (change->filter == EVFILT_WORKLOOP) {
@@ -602,11 +570,6 @@ kevent_register(struct kqueue *kq, const struct kevent_qos_s *change)
 					: _ENOENT;
 		}
 		if (kn->in_flight && !(change->flags & EV_ENABLE)) {
-#ifdef ENABLE_STRACE
-			fprintf(stderr, "  kevent: the delete of %#lx waits for "
-					"its event in flight\n",
-					(unsigned long)kn->kev.ident);
-#endif
 			kn->defer_delete = true;
 			kn->disabled = true;
 			return _EINPROGRESS;
@@ -1188,11 +1151,6 @@ fd_watch_main(void *arg)
 				continue;
 			}
 			if (fds[i].revents != 0) {
-#ifdef ENABLE_STRACE
-				fprintf(stderr, "  fd watch: %d ready, %#x, kq %#lx\n",
-						fds[i].fd, fds[i].revents,
-						watched[i].kq->id);
-#endif
 				kqueue_request(watched[i].kq, watched[i].manager);
 			}
 		}
@@ -1483,15 +1441,6 @@ kqueue_collect(struct kqueue *kq, bool manager, struct kevent_qos_s *events,
 			if (kn->kev.filter != EVFILT_MACHPORT
 					|| machport_receive(&events[count],
 							data, data_size)) {
-#ifdef ENABLE_STRACE
-				fprintf(stderr,
-						"  deliver(kq=%#lx, "
-						"ident=%#lx, "
-						"filter=%d, fflags=%#x)\n",
-						kq->id, kn->kev.ident,
-						kn->kev.filter,
-						events[count].fflags);
-#endif
 				count++;
 				knote_delivered(kn);
 			}
@@ -1506,10 +1455,6 @@ kevent_bind(struct kqueue *kq, bool manager, struct kevent_qos_s *events,
 		int max_events, uint8_t *data, size_t data_size)
 {
 	pthread_mutex_lock(&lock);
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "  bind(kq=%#lx, manager=%d, tid=%d)\n", kq->id,
-			manager, gettid());
-#endif
 	kq->requested[manager] = false;
 	kq->bound[manager] = true;
 	if (kq->kind == KQUEUE_WORKLOOP && !manager) {
@@ -1613,10 +1558,6 @@ kevent_unbind(struct kqueue *kq, bool manager,
 		const struct kevent_qos_s *changes, int nchanges)
 {
 	pthread_mutex_lock(&lock);
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "  unbind(kq=%#lx, manager=%d, tid=%d)\n", kq->id,
-			manager, gettid());
-#endif
 	for (int i = 0; i < nchanges; i++) {
 		kevent_register(kq, &changes[i]);
 	}
@@ -1722,10 +1663,6 @@ int
 sys_kqueue_workloop_ctl(
 		user_addr_t cmd, uint64_t options, user_addr_t addr, size_t sz)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "kqueue_workloop_ctl(%p, %p, %p, %p)\n", (void *)cmd,
-			(void *)options, (void *)addr, (void *)sz);
-#endif
 	struct kqueue_workloop_params {
 		int kqwlp_version;
 		int kqwlp_flags;

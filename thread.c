@@ -299,12 +299,6 @@ thread_suspend_other(struct thread *thread)
 		usleep(2000);
 		pthread_mutex_lock(&thread->suspend_lock);
 	}
-#ifdef ENABLE_STRACE
-	if (thread->stopped_context == NULL && thread->trap_context == NULL) {
-		fprintf(stderr, "thread_suspend: thread %d did not stop\n",
-				thread->tid);
-	}
-#endif
 	pthread_mutex_unlock(&thread->suspend_lock);
 	return KERN_SUCCESS;
 }

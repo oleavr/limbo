@@ -1036,12 +1036,6 @@ fix_eh_frame_personalities(int f,
 		fixed[n++] = augmentation[5];
 		memcpy(fixed + n, instructions, (size_t)(end - instructions));
 
-#ifdef ENABLE_STRACE
-		fprintf(stderr, "limbo: the CIE at %#llx names a personality at "
-				"%#llx, which is no slot: made one without\n",
-				(unsigned long long)(uintptr_t)cie,
-				(unsigned long long)target);
-#endif
 		if (write_all(f, fixed, 4 + length,
 				    text->fileOffset + (uint64_t)(uintptr_t)cie
 						    - text->address)) {

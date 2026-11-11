@@ -92,9 +92,6 @@ static void *identity_serialize(const struct identity_property *prop,
 kern_return_t
 is_io_object_get_class(mach_port_t object, io_name_t className)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_object_get_class(%p)\n", (void *)object);
-#endif
 	strcpy(className, "IOPlatformExpertDevice");
 	return KERN_SUCCESS;
 }
@@ -103,9 +100,6 @@ kern_return_t
 is_io_object_conforms_to(
 		mach_port_t object, io_name_t className, boolean_t *conforms)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_object_conforms_to(%s)\n", className);
-#endif
 	*conforms = strcmp(className, "IOPlatformExpertDevice") == 0
 			|| strcmp(className, "IOService") == 0
 			|| strcmp(className, "IORegistryEntry") == 0;
@@ -115,9 +109,6 @@ is_io_object_conforms_to(
 kern_return_t
 is_io_iterator_next(mach_port_t iterator, mach_port_t *object)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_iterator_next(%p)\n", (void *)iterator);
-#endif
 	struct io_iterator *state
 			= ipc_kobject_lookup(iterator, IPC_KOBJECT_IO_OBJECT);
 	if (state->yielded) {
@@ -138,9 +129,6 @@ match_platform_expert(mach_port_t *service)
 kern_return_t
 is_io_iterator_reset(mach_port_t iterator)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_iterator_reset(%p)\n", (void *)iterator);
-#endif
 	struct io_iterator *state
 			= ipc_kobject_lookup(iterator, IPC_KOBJECT_IO_OBJECT);
 	state->yielded = false;
@@ -151,9 +139,6 @@ kern_return_t
 is_io_service_get_matching_services(
 		mach_port_t main_port, io_string_t matching, mach_port_t *existing)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_service_get_matching_services(%s)\n", matching);
-#endif
 	return match_iterator(existing);
 }
 
@@ -179,10 +164,6 @@ is_io_registry_entry_get_property(mach_port_t registry_entry,
 		io_name_t property_name, io_buf_ptr_t *properties,
 		mach_msg_type_number_t *propertiesCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_registry_entry_get_property(%s)\n",
-			property_name);
-#endif
 	const struct identity_property *prop = identity_lookup(property_name);
 	if (prop == NULL) {
 		return KERN_NOT_SUPPORTED;
@@ -256,28 +237,18 @@ is_io_registry_create_iterator(mach_port_t main_port,
 		uint32_t options,
 		mach_port_t *iterator)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_registry_create_iterator(%s)\n", plane);
-#endif
-
 	return exhausted_iterator(iterator);
 }
 
 kern_return_t
 is_io_registry_iterator_enter_entry(mach_port_t iterator)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_registry_iterator_enter_entry\n");
-#endif
 	return KERN_SUCCESS;
 }
 
 kern_return_t
 is_io_registry_iterator_exit_entry(mach_port_t iterator)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_registry_iterator_exit_entry\n");
-#endif
 	return KERN_SUCCESS;
 }
 
@@ -286,19 +257,12 @@ is_io_registry_entry_from_path(mach_port_t main_port,
 		io_string_t path,
 		mach_port_t *registry_entry)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_registry_entry_from_path\n");
-#endif
 	unimplemented();
 }
 
 kern_return_t
 is_io_registry_entry_get_name(mach_port_t registry_entry, io_name_t name)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_registry_entry_get_name(%p)\n",
-			(void *)registry_entry);
-#endif
 	strcpy(name, "device");
 	return KERN_SUCCESS;
 }
@@ -308,10 +272,6 @@ is_io_registry_entry_get_properties(mach_port_t registry_entry,
 		io_buf_ptr_t *properties,
 		mach_msg_type_number_t *propertiesCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_registry_entry_get_properties\n");
-#endif
-
 	struct os_object *empty = os_dictionary_create();
 	size_t size;
 	void *serialized = os_serialize(empty, &size);
@@ -330,10 +290,6 @@ is_io_registry_entry_get_property_bytes(mach_port_t registry_entry,
 		io_name_t property_name, io_struct_inband_t data,
 		mach_msg_type_number_t *dataCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_registry_entry_get_property_bytes(%s)\n",
-			property_name);
-#endif
 	const struct identity_property *prop = identity_lookup(property_name);
 	if (prop == NULL) {
 		return KERN_NOT_SUPPORTED;
@@ -354,9 +310,6 @@ is_io_registry_entry_get_child_iterator(mach_port_t registry_entry,
 		io_name_t plane,
 		mach_port_t *iterator)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_registry_entry_get_child_iterator\n");
-#endif
 	unimplemented();
 }
 
@@ -365,9 +318,6 @@ is_io_registry_entry_get_parent_iterator(mach_port_t registry_entry,
 		io_name_t plane,
 		mach_port_t *iterator)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_registry_entry_get_parent_iterator\n");
-#endif
 	return exhausted_iterator(iterator);
 }
 
@@ -382,18 +332,12 @@ is_io_connect_map_shared_memory(mach_port_t connection,
 		io_struct_inband_t inband_output,
 		mach_msg_type_number_t *inband_outputCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_connect_map_shared_memory\n");
-#endif
 	unimplemented();
 }
 
 kern_return_t
 is_io_service_close(mach_port_t connection)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_service_close\n");
-#endif
 	unimplemented();
 }
 
@@ -401,9 +345,6 @@ kern_return_t
 is_io_connect_get_service(mach_port_t connection,
 		mach_port_t *service)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_connect_get_service\n");
-#endif
 	unimplemented();
 }
 
@@ -411,9 +352,6 @@ kern_return_t
 is_io_connect_add_client(mach_port_t connection,
 		mach_port_t connect_to)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_connect_add_client\n");
-#endif
 	unimplemented();
 }
 
@@ -423,9 +361,6 @@ is_io_connect_set_properties(mach_port_t connection,
 		mach_msg_type_number_t propertiesCnt,
 		kern_return_t *result)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_connect_set_properties\n");
-#endif
 	unimplemented();
 }
 
@@ -434,9 +369,6 @@ is_io_registry_entry_get_path(mach_port_t registry_entry,
 		io_name_t plane,
 		io_string_t path)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_registry_entry_get_path\n");
-#endif
 	unimplemented();
 }
 
@@ -444,9 +376,6 @@ kern_return_t
 is_io_registry_get_root_entry(mach_port_t main_port,
 		mach_port_t *root)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_registry_get_root_entry\n");
-#endif
 	unimplemented();
 }
 
@@ -456,9 +385,6 @@ is_io_registry_entry_set_properties(mach_port_t registry_entry,
 		mach_msg_type_number_t propertiesCnt,
 		kern_return_t *result)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_registry_entry_set_properties\n");
-#endif
 	unimplemented();
 }
 
@@ -467,9 +393,6 @@ is_io_registry_entry_in_plane(mach_port_t registry_entry,
 		io_name_t plane,
 		boolean_t *inPlane)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_registry_entry_in_plane\n");
-#endif
 	unimplemented();
 }
 
@@ -477,9 +400,6 @@ kern_return_t
 is_io_object_get_retain_count(mach_port_t object,
 		uint32_t *retainCount)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_object_get_retain_count\n");
-#endif
 	unimplemented();
 }
 
@@ -487,9 +407,6 @@ kern_return_t
 is_io_service_get_busy_state(mach_port_t service,
 		uint32_t *busyState)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_service_get_busy_state\n");
-#endif
 	unimplemented();
 }
 
@@ -497,9 +414,6 @@ kern_return_t
 is_io_service_wait_quiet(mach_port_t service,
 		mach_timespec_t wait_time)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_service_wait_quiet\n");
-#endif
 	unimplemented();
 }
 
@@ -509,9 +423,6 @@ is_io_registry_entry_create_iterator(mach_port_t registry_entry,
 		uint32_t options,
 		mach_port_t *iterator)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_registry_entry_create_iterator\n");
-#endif
 	/* The registry here has no tree to walk, only entries found by path
 	 * or by matching */
 	return exhausted_iterator(iterator);
@@ -521,10 +432,6 @@ kern_return_t
 is_io_iterator_is_valid(mach_port_t iterator,
 		boolean_t *is_valid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_iterator_is_valid\n");
-#endif
-
 	*is_valid = TRUE;
 	return KERN_SUCCESS;
 }
@@ -536,9 +443,6 @@ is_io_catalog_send_data(mach_port_t main_port,
 		mach_msg_type_number_t inDataCnt,
 		kern_return_t *result)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_catalog_send_data\n");
-#endif
 	unimplemented();
 }
 
@@ -547,9 +451,6 @@ is_io_catalog_terminate(mach_port_t main_port,
 		uint32_t flag,
 		io_name_t name)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_catalog_terminate\n");
-#endif
 	unimplemented();
 }
 
@@ -559,9 +460,6 @@ is_io_catalog_get_data(mach_port_t main_port,
 		io_buf_ptr_t *outData,
 		mach_msg_type_number_t *outDataCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_catalog_get_data\n");
-#endif
 	unimplemented();
 }
 
@@ -569,9 +467,6 @@ kern_return_t
 is_io_catalog_get_gen_count(mach_port_t main_port,
 		uint32_t *genCount)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_catalog_get_gen_count\n");
-#endif
 	unimplemented();
 }
 
@@ -579,9 +474,6 @@ kern_return_t
 is_io_catalog_module_loaded(mach_port_t main_port,
 		io_name_t name)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_catalog_module_loaded\n");
-#endif
 	unimplemented();
 }
 
@@ -589,9 +481,6 @@ kern_return_t
 is_io_catalog_reset(mach_port_t main_port,
 		uint32_t flag)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_catalog_reset\n");
-#endif
 	unimplemented();
 }
 
@@ -599,9 +488,6 @@ kern_return_t
 is_io_service_request_probe(mach_port_t service,
 		uint32_t options)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_service_request_probe\n");
-#endif
 	unimplemented();
 }
 
@@ -610,9 +496,6 @@ is_io_registry_entry_get_name_in_plane(mach_port_t registry_entry,
 		io_name_t plane,
 		io_name_t name)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_registry_entry_get_name_in_plane\n");
-#endif
 	unimplemented();
 }
 
@@ -621,9 +504,6 @@ is_io_service_match_property_table(mach_port_t service,
 		io_string_t matching,
 		boolean_t *matches)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_service_match_property_table\n");
-#endif
 	unimplemented();
 }
 
@@ -632,9 +512,6 @@ is_io_connect_get_notification_semaphore(mach_port_t connection,
 		natural_t notification_type,
 		semaphore_t *semaphore)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_connect_get_notification_semaphore\n");
-#endif
 	unimplemented();
 }
 
@@ -643,9 +520,6 @@ is_io_registry_entry_get_location_in_plane(mach_port_t registry_entry,
 		io_name_t plane,
 		io_name_t location)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_registry_entry_get_location_in_plane\n");
-#endif
 	unimplemented();
 }
 
@@ -657,9 +531,6 @@ is_io_registry_entry_get_property_recursively(mach_port_t registry_entry,
 		io_buf_ptr_t *properties,
 		mach_msg_type_number_t *propertiesCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_registry_entry_get_property_recursively\n");
-#endif
 	unimplemented();
 }
 
@@ -669,9 +540,6 @@ is_io_service_get_state(mach_port_t service,
 		uint32_t *busy_state,
 		uint64_t *accumulated_busy_time)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_service_get_state\n");
-#endif
 	unimplemented();
 }
 
@@ -680,9 +548,6 @@ is_io_service_get_matching_services_ool(mach_port_t main_port,
 		io_buf_ptr_t matching, mach_msg_type_number_t matchingCnt,
 		kern_return_t *result, mach_port_t *existing)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_service_get_matching_services_ool\n");
-#endif
 	*result = match_iterator(existing);
 	return KERN_SUCCESS;
 }
@@ -694,9 +559,6 @@ is_io_service_match_property_table_ool(mach_port_t service,
 		kern_return_t *result,
 		boolean_t *matches)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_service_match_property_table_ool\n");
-#endif
 	unimplemented();
 }
 
@@ -705,9 +567,6 @@ is_io_object_get_superclass(mach_port_t main_port,
 		io_name_t obj_name,
 		io_name_t class_name)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_object_get_superclass\n");
-#endif
 	unimplemented();
 }
 
@@ -716,9 +575,6 @@ is_io_object_get_bundle_identifier(mach_port_t main_port,
 		io_name_t obj_name,
 		io_name_t class_name)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_object_get_bundle_identifier\n");
-#endif
 	unimplemented();
 }
 
@@ -732,9 +588,6 @@ is_io_service_open_extended(mach_port_t service,
 		kern_return_t *result,
 		mach_port_t *connection)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_service_open_extended\n");
-#endif
 	unimplemented();
 }
 
@@ -746,9 +599,6 @@ is_io_connect_map_memory_into_task(mach_port_t connection,
 		mach_vm_size_t *size,
 		uint32_t flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_connect_map_memory_into_task\n");
-#endif
 	unimplemented();
 }
 
@@ -758,9 +608,6 @@ is_io_connect_unmap_memory_from_task(mach_port_t connection,
 		task_t from_task,
 		mach_vm_address_t address)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_connect_unmap_memory_from_task\n");
-#endif
 	unimplemented();
 }
 
@@ -780,9 +627,6 @@ is_io_connect_method(mach_port_t connection,
 		mach_vm_address_t ool_output,
 		mach_vm_size_t *ool_output_size)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_connect_method\n");
-#endif
 	unimplemented();
 }
 
@@ -805,9 +649,6 @@ is_io_connect_async_method(mach_port_t connection,
 		mach_vm_address_t ool_output,
 		mach_vm_size_t *ool_output_size)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_connect_async_method\n");
-#endif
 	unimplemented();
 }
 
@@ -817,9 +658,6 @@ is_io_connect_set_notification_port(mach_port_t connection,
 		mach_port_t port,
 		io_user_reference_t reference)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_connect_set_notification_port\n");
-#endif
 	unimplemented();
 }
 
@@ -832,9 +670,6 @@ is_io_service_add_notification(mach_port_t main_port,
 		mach_msg_type_number_t referenceCnt,
 		mach_port_t *notification)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_service_add_notification\n");
-#endif
 	unimplemented();
 }
 
@@ -846,9 +681,6 @@ is_io_service_add_interest_notification(mach_port_t service,
 		mach_msg_type_number_t referenceCnt,
 		mach_port_t *notification)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_service_add_interest_notification\n");
-#endif
 	unimplemented();
 }
 
@@ -863,9 +695,6 @@ is_io_service_add_notification_ool(mach_port_t main_port,
 		kern_return_t *result,
 		mach_port_t *notification)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_service_add_notification_ool\n");
-#endif
 	unimplemented();
 }
 
@@ -873,10 +702,6 @@ kern_return_t
 is_io_registry_entry_get_registry_entry_id(
 		mach_port_t registry_entry, uint64_t *entry_id)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_registry_entry_get_registry_entry_id(%p)\n",
-			(void *)registry_entry);
-#endif
 	*entry_id = 0x100000100;
 	return KERN_SUCCESS;
 }
@@ -897,9 +722,6 @@ is_io_connect_method_var_output(mach_port_t connection,
 		io_buf_ptr_t *var_output,
 		mach_msg_type_number_t *var_outputCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_connect_method_var_output\n");
-#endif
 	unimplemented();
 }
 
@@ -907,9 +729,6 @@ kern_return_t
 is_io_service_get_matching_service(
 		mach_port_t main_port, io_string_t matching, mach_port_t *service)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_service_get_matching_service(%s)\n", matching);
-#endif
 	return match_platform_expert(service);
 }
 
@@ -918,9 +737,6 @@ is_io_service_get_matching_service_ool(mach_port_t main_port,
 		io_buf_ptr_t matching, mach_msg_type_number_t matchingCnt,
 		kern_return_t *result, mach_port_t *service)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_service_get_matching_service_ool\n");
-#endif
 	*result = match_platform_expert(service);
 	return KERN_SUCCESS;
 }
@@ -929,9 +745,6 @@ kern_return_t
 is_io_service_get_authorization_id(mach_port_t service,
 		uint64_t *authorization_id)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_service_get_authorization_id\n");
-#endif
 	unimplemented();
 }
 
@@ -939,9 +752,6 @@ kern_return_t
 is_io_service_set_authorization_id(mach_port_t service,
 		uint64_t authorization_id)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_service_set_authorization_id\n");
-#endif
 	unimplemented();
 }
 
@@ -949,9 +759,6 @@ kern_return_t
 is_io_server_version(mach_port_t main_port,
 		uint64_t *version)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_server_version\n");
-#endif
 	*version = 0x20220000;
 	return KERN_SUCCESS;
 }
@@ -961,9 +768,6 @@ is_io_registry_entry_get_properties_bin(mach_port_t registry_entry,
 		io_buf_ptr_t *properties,
 		mach_msg_type_number_t *propertiesCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_registry_entry_get_properties_bin\n");
-#endif
 	unimplemented();
 }
 
@@ -972,10 +776,6 @@ is_io_registry_entry_get_property_bin(mach_port_t registry_entry,
 		io_name_t plane, io_name_t property_name, uint32_t options,
 		io_buf_ptr_t *properties, mach_msg_type_number_t *propertiesCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_registry_entry_get_property_bin(%s)\n",
-			property_name);
-#endif
 	const struct identity_property *prop = identity_lookup(property_name);
 	if (prop == NULL) {
 		return KERN_NOT_SUPPORTED;
@@ -989,9 +789,6 @@ is_io_service_get_matching_service_bin(mach_port_t main_port,
 		io_struct_inband_t matching, mach_msg_type_number_t matchingCnt,
 		mach_port_t *service)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_service_get_matching_service_bin\n");
-#endif
 	return match_platform_expert(service);
 }
 
@@ -1000,9 +797,6 @@ is_io_service_get_matching_services_bin(mach_port_t main_port,
 		io_struct_inband_t matching, mach_msg_type_number_t matchingCnt,
 		mach_port_t *existing)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_service_get_matching_services_bin\n");
-#endif
 	return match_iterator(existing);
 }
 
@@ -1012,9 +806,6 @@ is_io_service_match_property_table_bin(mach_port_t service,
 		mach_msg_type_number_t matchingCnt,
 		boolean_t *matches)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_service_match_property_table_bin\n");
-#endif
 	unimplemented();
 }
 
@@ -1028,9 +819,6 @@ is_io_service_add_notification_bin(mach_port_t main_port,
 		mach_msg_type_number_t referenceCnt,
 		mach_port_t *notification)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_service_add_notification_bin\n");
-#endif
 	unimplemented();
 }
 
@@ -1041,9 +829,6 @@ is_io_registry_entry_get_path_ool(mach_port_t registry_entry,
 		io_buf_ptr_t *path_ool,
 		mach_msg_type_number_t *path_oolCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_registry_entry_get_path_ool\n");
-#endif
 	unimplemented();
 }
 
@@ -1055,9 +840,6 @@ is_io_registry_entry_from_path_ool(mach_port_t main_port,
 		kern_return_t *result,
 		mach_port_t *registry_entry)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_registry_entry_from_path_ool\n");
-#endif
 	unimplemented();
 }
 
@@ -1066,9 +848,6 @@ is_io_device_tree_entry_exists_with_name(mach_port_t main_port,
 		io_name_t name,
 		boolean_t *exists)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_device_tree_entry_exists_with_name\n");
-#endif
 	unimplemented();
 }
 
@@ -1079,10 +858,6 @@ is_io_registry_entry_get_properties_bin_buf(mach_port_t registry_entry,
 		io_buf_ptr_t *properties,
 		mach_msg_type_number_t *propertiesCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_registry_entry_get_properties_bin_buf\n");
-#endif
-
 	struct os_object *dictionary = os_dictionary_create();
 	if (ipc_kobject_lookup(registry_entry, IPC_KOBJECT_IO_OBJECT)
 			== PLATFORM_EXPERT) {
@@ -1132,10 +907,6 @@ is_io_registry_entry_get_property_bin_buf(mach_port_t registry_entry,
 		io_buf_ptr_t *properties,
 		mach_msg_type_number_t *propertiesCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_registry_entry_get_property_bin_buf(%s)\n",
-			property_name);
-#endif
 	const struct identity_property *prop = identity_lookup(property_name);
 	if (prop == NULL) {
 		return KERN_NOT_SUPPORTED;
@@ -1150,9 +921,6 @@ is_io_service_wait_quiet_with_options(mach_port_t service,
 		mach_timespec_t wait_time,
 		uint32_t options)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_service_wait_quiet_with_options\n");
-#endif
 	unimplemented();
 }
 
@@ -1165,8 +933,5 @@ is_io_service_get_wait_info(mach_port_t service,
 		uint64_t *end_ns,
 		boolean_t *blocking)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "is_io_service_get_wait_info\n");
-#endif
 	unimplemented();
 }

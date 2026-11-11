@@ -127,55 +127,36 @@ static void encode_timespec(struct __darwin_user64_timespec *to,
 int
 sys_getfsstat(user_addr_t buf, int bufsize, int flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getfsstat(%p, %p, %p)\n", (void *)buf, (void *)bufsize,
-			(void *)flags);
-#endif
 	unimplemented();
 }
 
 int
 sys_statfs(char *path, void *buf)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "statfs(%p, %p)\n", (void *)path, (void *)buf);
-#endif
 	unimplemented();
 }
 
 int
 sys_fstatfs(int fd, void *buf)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "fstatfs(%p, %p)\n", (void *)fd, (void *)buf);
-#endif
 	unimplemented();
 }
 
 int
 sys_stat(user_addr_t path, user_addr_t ub)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "stat(%p, %p)\n", (void *)path, (void *)ub);
-#endif
 	unimplemented();
 }
 
 int
 sys_sys_fstat(int fd, user_addr_t ub)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sys_fstat(%p, %p)\n", (void *)fd, (void *)ub);
-#endif
 	unimplemented();
 }
 
 int
 sys_lstat(user_addr_t path, user_addr_t ub)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "lstat(%p, %p)\n", (void *)path, (void *)ub);
-#endif
 	return stat_at(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, ub);
 }
 
@@ -243,10 +224,6 @@ int
 sys_stat_extended(user_addr_t path, user_addr_t ub, user_addr_t xsecurity,
 		user_addr_t xsecurity_size)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "stat_extended(%p, %p, %p, %p)\n", (void *)path,
-			(void *)ub, (void *)xsecurity, (void *)xsecurity_size);
-#endif
 	unimplemented();
 }
 
@@ -254,10 +231,6 @@ int
 sys_lstat_extended(user_addr_t path, user_addr_t ub, user_addr_t xsecurity,
 		user_addr_t xsecurity_size)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "lstat_extended(%p, %p, %p, %p)\n", (void *)path,
-			(void *)ub, (void *)xsecurity, (void *)xsecurity_size);
-#endif
 	unimplemented();
 }
 
@@ -265,37 +238,24 @@ int
 sys_sys_fstat_extended(int fd, user_addr_t ub, user_addr_t xsecurity,
 		user_addr_t xsecurity_size)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sys_fstat_extended(%p, %p, %p, %p)\n", (void *)fd,
-			(void *)ub, (void *)xsecurity, (void *)xsecurity_size);
-#endif
 	unimplemented();
 }
 
 int
 sys_stat64(user_addr_t path, user_addr_t ub)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "stat64(\"%s\", %p)\n", (char *)path, (void *)ub);
-#endif
 	return stat_at(AT_FDCWD, path, 0, ub);
 }
 
 int
 sys_sys_fstat64(int fd, user_addr_t ub)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sys_fstat64(%p, %p)\n", (void *)fd, (void *)ub);
-#endif
 	return stat_at(fd, "", AT_EMPTY_PATH, ub);
 }
 
 int
 sys_lstat64(user_addr_t path, user_addr_t ub)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "lstat64(\"%s\", %p)\n", (char *)path, (void *)ub);
-#endif
 	return stat_at(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, ub);
 }
 
@@ -303,10 +263,6 @@ int
 sys_stat64_extended(user_addr_t path, user_addr_t ub, user_addr_t xsecurity,
 		user_addr_t xsecurity_size)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "stat64_extended(\"%s\", %p, %p, %p)\n", (char *)path,
-			(void *)ub, (void *)xsecurity, (void *)xsecurity_size);
-#endif
 	return stat_extended_at(AT_FDCWD, path, 0, ub, xsecurity_size);
 }
 
@@ -314,10 +270,6 @@ int
 sys_lstat64_extended(user_addr_t path, user_addr_t ub, user_addr_t xsecurity,
 		user_addr_t xsecurity_size)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "lstat64_extended(\"%s\", %p, %p, %p)\n", (char *)path,
-			(void *)ub, (void *)xsecurity, (void *)xsecurity_size);
-#endif
 	return stat_extended_at(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, ub,
 			xsecurity_size);
 }
@@ -326,27 +278,17 @@ int
 sys_sys_fstat64_extended(int fd, user_addr_t ub, user_addr_t xsecurity,
 		user_addr_t xsecurity_size)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sys_fstat64_extended(%p, %p, %p, %p)\n", (void *)fd,
-			(void *)ub, (void *)xsecurity, (void *)xsecurity_size);
-#endif
 	return stat_extended_at(fd, "", AT_EMPTY_PATH, ub, xsecurity_size);
 }
 
 int
 sys_statfs64(char *path, void *buf)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "statfs64(\"%s\", %p)\n", path, (void *)buf);
-#endif
 	char buffer[PATH_MAX];
 	const char *host_path = sysroot_host_path(path, 0, buffer);
 	struct statfs tmp = {0};
 	struct stat st;
 	if (statfs(host_path, &tmp) == -1 || stat(host_path, &st) == -1) {
-#ifdef ENABLE_STRACE
-		perror("statfs");
-#endif
 		return err_map(errno);
 	}
 	convert_statfs(&tmp, st.st_dev, buf);
@@ -380,15 +322,9 @@ convert_statfs(const struct statfs *src, dev_t device,
 int
 sys_fstatfs64(int fd, void *buf)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "fstatfs64(%p, %p)\n", (void *)fd, (void *)buf);
-#endif
 	struct statfs tmp = {0};
 	struct stat st;
 	if (fstatfs(fd, &tmp) == -1 || fstat(fd, &st) == -1) {
-#ifdef ENABLE_STRACE
-		perror("fstatfs");
-#endif
 		return err_map(errno);
 	}
 	convert_statfs(&tmp, st.st_dev, buf);
@@ -398,10 +334,6 @@ sys_fstatfs64(int fd, void *buf)
 int
 sys_getfsstat64(user_addr_t buf, int bufsize, int flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getfsstat64(%p, %p, %p)\n", (void *)buf,
-			(void *)bufsize, (void *)flags);
-#endif
 	if (buf == NULL
 			|| bufsize < (int)sizeof(
 					   struct __darwin_struct_statfs64)) {
@@ -422,20 +354,12 @@ sys_getfsstat64(user_addr_t buf, int bufsize, int flags)
 int
 sys_fstatat(int fd, user_addr_t path, user_addr_t ub, int flag)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "fstatat(%p, %p, %p, %p)\n", (void *)fd, (void *)path,
-			(void *)ub, (void *)flag);
-#endif
 	unimplemented();
 }
 
 int
 sys_fstatat64(int fd, user_addr_t path, user_addr_t ub, int flag)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "fstatat64(%p, \"%s\", %p, %p)\n", (void *)fd, (char *)path,
-			(void *)ub, (void *)flag);
-#endif
 	enum { _AT_FDONLY = 0x400 };
 	if (flag & _AT_FDONLY) {
 		return stat_at(fd, "", AT_EMPTY_PATH, ub);

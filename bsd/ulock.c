@@ -70,10 +70,6 @@ static int count_waiters(const void *addr);
 int
 sys_ulock_wait(uint32_t operation, void *addr, uint64_t value, uint32_t timeout)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "ulock_wait(%#x, %p, %#lx, %u)\n", operation, addr,
-			value, timeout);
-#endif
 	return ulock_wait(operation, addr, value, timeout * 1000ULL);
 }
 
@@ -81,10 +77,6 @@ int
 sys_ulock_wait2(uint32_t operation, void *addr, uint64_t value,
 		uint64_t timeout, uint64_t value2)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "ulock_wait2(%#x, %p, %#lx, %lu, %#lx)\n", operation,
-			addr, value, timeout, value2);
-#endif
 	return ulock_wait(operation, addr, value, timeout);
 }
 
@@ -180,10 +172,6 @@ count_waiters(const void *addr)
 int
 sys_ulock_wake(uint32_t operation, void *addr, uint64_t wake_value)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "ulock_wake(%#x, %p, %#lx)\n", operation, addr,
-			wake_value);
-#endif
 	bool all = operation & ULF_WAKE_ALL;
 	bool specific = operation & ULF_WAKE_THREAD;
 	int woken = 0;

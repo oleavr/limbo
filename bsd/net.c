@@ -896,10 +896,6 @@ net_ioctl(int fd, uint64_t command, void *data)
 		if (!(command & xnu_IOC_OUT)) {
 			return 0;
 		}
-#ifdef ENABLE_STRACE
-		fprintf(stderr, "  ioctl: no interface ioctl %#llx\n",
-				(unsigned long long)command);
-#endif
 		return _EOPNOTSUPP;
 	}
 }
@@ -998,10 +994,6 @@ bpf_ioctl(int fd, uint64_t command, void *data)
 		if (!(command & xnu_IOC_OUT)) {
 			return 0;
 		}
-#ifdef ENABLE_STRACE
-		fprintf(stderr, "  ioctl: no BPF ioctl %#llx\n",
-				(unsigned long long)command);
-#endif
 		return _EINVAL;
 	}
 }
