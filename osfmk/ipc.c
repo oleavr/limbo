@@ -364,6 +364,7 @@ ipc_mach_msg(mach_msg_header_t *msg, mach_msg_option64_t options,
 		mach_port_name_t rcv_name, mach_msg_timeout_t timeout)
 {
 	if (options & MACH64_SEND_MSG) {
+		trace_message(TRACE_MESSAGE_SENT, msg, send_size);
 		mach_msg_return_t mr = send(msg, send_size, IPC_USER,
 				getpid());
 		if (mr != MACH_MSG_SUCCESS) {
@@ -372,7 +373,13 @@ ipc_mach_msg(mach_msg_header_t *msg, mach_msg_option64_t options,
 	}
 
 	if (options & MACH64_RCV_MSG) {
-		return receive(msg, options, rcv_size, rcv_name, timeout);
+		mach_msg_return_t mr = receive(
+				msg, options, rcv_size, rcv_name, timeout);
+		if (mr == MACH_MSG_SUCCESS) {
+			trace_message(TRACE_MESSAGE_RECEIVED, msg,
+					msg->msgh_size);
+		}
+		return mr;
 	}
 
 	return MACH_MSG_SUCCESS;

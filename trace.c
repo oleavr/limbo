@@ -235,6 +235,18 @@ trace_routine(int32_t id, int32_t result)
 	append(TRACE_ROUTINE, &routine.record, sizeof(routine));
 }
 
+void
+trace_message(enum trace_type type, const mach_msg_header_t *header,
+		mach_msg_size_t size)
+{
+	if (!*recording) {
+		return;
+	}
+	struct trace_message message = {.header = *header};
+	message.header.msgh_size = size;
+	append(type, &message.record, sizeof(message));
+}
+
 static void
 append(enum trace_type type, struct trace_record *record, size_t size)
 {
