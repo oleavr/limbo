@@ -38,7 +38,8 @@ targeting macOS or iOS on Linux without modification.
 
 *LIMBO_TRACE*
 	Directory to record the program's system calls in, a file for each
-	process, for *limbo-trace*(1) to print.
+	process, for *limbo-trace*(1) to print. Recording is on unless
+	*limbo-trace*(1) has switched it off.
 
 *LIMBO_TRACE_SIZE*
 	Bytes of records that a thread keeps before it overwrites the oldest,

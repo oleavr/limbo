@@ -41,16 +41,17 @@
 static uint64_t oldest_kept(const struct trace_ring *ring, uint64_t capacity);
 
 int
-trace_file_open(struct trace_file *file, const char *path)
+trace_file_open(struct trace_file *file, const char *path, int flags)
 {
-	int fd = open(path, O_RDONLY | O_CLOEXEC);
+	int protection = flags == O_RDWR ? PROT_READ | PROT_WRITE : PROT_READ;
+	int fd = open(path, flags | O_CLOEXEC);
 	if (fd == -1) {
 		return -1;
 	}
 	struct stat status;
 	fstat(fd, &status);
 	const struct trace_header *header = mmap(
-			NULL, status.st_size, PROT_READ, MAP_SHARED, fd, 0);
+			NULL, status.st_size, protection, MAP_SHARED, fd, 0);
 	close(fd);
 	if (header == MAP_FAILED) {
 		return -1;

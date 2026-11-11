@@ -6,7 +6,8 @@ limbo-trace - Print what Limbo recorded of its programs
 
 # SYNOPSIS
 
-_limbo-trace_ [*-r*] _path_...
+_limbo-trace_ [*-r*] _path_...++
+_limbo-trace_ *-s* on|off _path_...
 
 # DESCRIPTION
 
@@ -32,11 +33,18 @@ The files can be read while their programs run and after they have gone.
 Each thread keeps its latest records and overwrites the oldest; the line of a
 process's start tells how much was overwritten.
 
+Recording is switched with *-s*, for the running program whose file is
+_path_, or for every program of a directory and those yet to start there.
+Switched off, a program keeps its file and records nothing.
+
 # OPTIONS
 
 *-r*
 	After a call, print the paths it named with what they resolved to on
 	the host.
+
+*-s* on|off
+	Switch recording on or off instead of printing.
 
 # SEE ALSO
 
