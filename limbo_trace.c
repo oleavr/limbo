@@ -30,6 +30,7 @@
 #endif
 
 #include <dirent.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -69,9 +70,12 @@ static struct event *events;
 static uint32_t event_count, event_capacity;
 static uint32_t ring_count;
 static bool resolved;
+static bool switched_on;
 
-static void add_path(const char *path);
-static bool add_file(const char *path);
+static void switch_recording(const char *path);
+static void visit(const char *path, void (*visit_file)(const char *path));
+static void switch_file(const char *path);
+static void add_file(const char *path);
 static void collect(uint32_t process);
 static uint32_t add_event(const struct trace_record *record, uint64_t time,
 		uint32_t process, uint32_t ring);
@@ -96,18 +100,35 @@ static const char *call_format(const struct event *event,
 int
 main(int argc, char *argv[])
 {
-	resolved = getopt(argc, argv, "r") == 'r';
+	const char *recording = NULL;
+	int option;
+	while ((option = getopt(argc, argv, "rs:")) != -1) {
+		if (option == 'r') {
+			resolved = true;
+		} else if (option == 's') {
+			recording = optarg;
+		}
+	}
 	if (optind == argc) {
-		fprintf(stderr, "Usage: limbo-trace [-r] path...\n");
+		fprintf(stderr,
+				"Usage: limbo-trace [-r] [-s on|off] "
+				"path...\n");
 		return 1;
 	}
+	if (recording != NULL) {
+		switched_on = strcmp(recording, "on") == 0;
+		for (int i = optind; i < argc; i++) {
+			switch_recording(argv[i]);
+		}
+		return 0;
+	}
+
 	for (int i = optind; i < argc; i++) {
-		add_path(argv[i]);
+		visit(argv[i], add_file);
 	}
 	for (uint32_t i = 0; i < process_count; i++) {
 		collect(i);
 	}
-
 	uint32_t *order = malloc(event_count * sizeof(*order));
 	for (uint32_t i = 0; i < event_count; i++) {
 		order[i] = i;
@@ -120,31 +141,49 @@ main(int argc, char *argv[])
 }
 
 static void
-add_path(const char *path)
+switch_recording(const char *path)
+{
+	char *off;
+	asprintf(&off, "%s/" TRACE_OFF, path);
+	if (switched_on) {
+		unlink(off);
+	} else {
+		close(open(off, O_CREAT | O_WRONLY | O_CLOEXEC, 0644));
+	}
+	visit(path, switch_file);
+}
+
+static void
+visit(const char *path, void (*visit_file)(const char *path))
 {
 	struct dirent **entries;
 	int count = scandir(path, &entries, NULL, versionsort);
 	if (count == -1) {
-		if (!add_file(path)) {
-			fprintf(stderr, "limbo-trace: %s is not a trace\n",
-					path);
-			exit(1);
-		}
-		return;
+		visit_file(path);
 	}
 	for (int i = 0; i < count; i++) {
 		char *file;
 		asprintf(&file, "%s/%s", path, entries[i]->d_name);
-		add_file(file);
+		visit_file(file);
 	}
 }
 
-static bool
+static void
+switch_file(const char *path)
+{
+	struct trace_file file;
+	if (trace_file_open(&file, path, O_RDWR) == 0) {
+		((struct trace_header *)file.header)->recording = switched_on;
+		trace_file_close(&file);
+	}
+}
+
+static void
 add_file(const char *path)
 {
 	struct trace_file file;
-	if (trace_file_open(&file, path) == -1) {
-		return false;
+	if (trace_file_open(&file, path, O_RDONLY) == -1) {
+		return;
 	}
 	const char *slash = strrchr(file.header->program, '/');
 	processes = realloc(
@@ -154,7 +193,6 @@ add_file(const char *path)
 			.name
 			= slash != NULL ? slash + 1 : file.header->program,
 	};
-	return true;
 }
 
 static void
@@ -254,7 +292,7 @@ print_start(const struct event *event)
 				process->overwritten);
 	}
 	if (header->dropped != 0) {
-		printf(" (%" PRIu64 " records dropped)", header->dropped);
+		printf(" (%" PRIu32 " records dropped)", header->dropped);
 	}
 	printf(" +++\n");
 }

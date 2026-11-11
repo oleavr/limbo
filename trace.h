@@ -32,6 +32,7 @@
 #include <stdint.h>
 
 #define TRACE_MAGIC        "limbotrc"
+#define TRACE_OFF          "off"
 #define TRACE_VERSION      1
 #define TRACE_RING_COUNT   256
 #define TRACE_TABLE_OFFSET 4096
@@ -52,7 +53,8 @@ struct trace_header {
 	uint64_t start;
 	uint32_t ring_size;
 	uint32_t arguments_size;
-	_Atomic uint64_t dropped;
+	_Atomic uint32_t recording;
+	_Atomic uint32_t dropped;
 	char program[TRACE_STRING_SIZE];
 	char arguments[2 * TRACE_STRING_SIZE];
 };

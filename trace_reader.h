@@ -43,7 +43,7 @@ struct trace_run {
 	uint64_t end;
 };
 
-int trace_file_open(struct trace_file *file, const char *path);
+int trace_file_open(struct trace_file *file, const char *path, int flags);
 void trace_file_close(struct trace_file *file);
 struct trace_run trace_ring_copy(const struct trace_file *file, uint32_t index);
 const struct trace_record *trace_run_next(

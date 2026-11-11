@@ -30,6 +30,7 @@
 #endif
 
 #include <dirent.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
 #include <string.h>
@@ -50,6 +51,8 @@ static char directory[PATH_MAX];
 static pthread_barrier_t started;
 
 static void test_records(void);
+static void test_switch(void);
+static uint64_t written(const struct trace_file *file);
 static void test_wrap(void);
 static void test_threads(void);
 static void *record_many(void *argument);
@@ -57,6 +60,7 @@ static void test_short_lived_threads(void);
 static void *record_one(void *argument);
 static void test_fork(void);
 static void test_exec(const char *self);
+static pid_t run_second_image(const char *self);
 static void remove_trace(void);
 static void open_trace(struct trace_file *file, pid_t pid, unsigned image);
 static uint64_t count_calls(const struct trace_file *file, uint32_t ring,
@@ -82,6 +86,7 @@ main(int argc, char *argv[])
 	trace_start("/bin/program", first_arguments);
 
 	test_records();
+	test_switch();
 	test_wrap();
 	test_threads();
 	test_short_lived_threads();
@@ -108,6 +113,7 @@ test_records(void)
 	CHECK(header->parent == getppid());
 	CHECK(header->start != 0);
 	CHECK(header->ring_size == RING_SIZE);
+	CHECK(header->recording == 1);
 	CHECK(strcmp(header->program, "/bin/program") == 0);
 	CHECK(header->arguments_size == sizeof("first\0second argument"));
 	CHECK(memcmp(header->arguments, "first\0second argument",
@@ -159,6 +165,34 @@ test_records(void)
 	CHECK(position == run.end);
 	free(run.bytes);
 	trace_file_close(&file);
+}
+
+static void
+test_switch(void)
+{
+	const uint64_t arguments[6] = {0};
+	char path[PATH_MAX + 32];
+	snprintf(path, sizeof(path), "%s/%d.0", directory, getpid());
+	struct trace_file file;
+	CHECK(trace_file_open(&file, path, O_RDWR) == 0);
+	struct trace_header *header = (struct trace_header *)file.header;
+	uint64_t recorded = written(&file);
+
+	header->recording = 0;
+	trace_syscall_enter(TRACE_CLASS_BSD, 1, arguments);
+	CHECK(written(&file) == recorded);
+	header->recording = 1;
+	trace_syscall_enter(TRACE_CLASS_BSD, 1, arguments);
+	CHECK(written(&file) > recorded);
+	trace_file_close(&file);
+}
+
+static uint64_t
+written(const struct trace_file *file)
+{
+	struct trace_run run = trace_ring_copy(file, 0);
+	free(run.bytes);
+	return run.end;
 }
 
 static void
@@ -290,16 +324,7 @@ test_fork(void)
 static void
 test_exec(const char *self)
 {
-	pid_t child = fork();
-	CHECK(child != -1);
-	if (child == 0) {
-		trace_fork_child();
-		execl(self, self, "second", NULL);
-		_exit(1);
-	}
-	int status;
-	CHECK(waitpid(child, &status, 0) == child && status == 0);
-
+	pid_t child = run_second_image(self);
 	struct trace_file file;
 	open_trace(&file, child, 0);
 	CHECK(strcmp(file.header->program, "/bin/program") == 0);
@@ -311,6 +336,31 @@ test_exec(const char *self)
 	CHECK(trace_run_next(&run, &position)->type == TRACE_STRING);
 	free(run.bytes);
 	trace_file_close(&file);
+
+	char off[PATH_MAX + 32];
+	snprintf(off, sizeof(off), "%s/" TRACE_OFF, directory);
+	close(open(off, O_CREAT | O_WRONLY, 0644));
+	child = run_second_image(self);
+	CHECK(unlink(off) == 0);
+	open_trace(&file, child, 1);
+	CHECK(file.header->recording == 0);
+	CHECK(written(&file) == 0);
+	trace_file_close(&file);
+}
+
+static pid_t
+run_second_image(const char *self)
+{
+	pid_t child = fork();
+	CHECK(child != -1);
+	if (child == 0) {
+		trace_fork_child();
+		execl(self, self, "second", NULL);
+		_exit(1);
+	}
+	int status;
+	CHECK(waitpid(child, &status, 0) == child && status == 0);
+	return child;
 }
 
 static void
@@ -330,7 +380,7 @@ open_trace(struct trace_file *file, pid_t pid, unsigned image)
 {
 	char path[PATH_MAX + 32];
 	snprintf(path, sizeof(path), "%s/%d.%u", directory, pid, image);
-	CHECK(trace_file_open(file, path) == 0);
+	CHECK(trace_file_open(file, path, O_RDONLY) == 0);
 	CHECK(file->header->pid == pid);
 }
 

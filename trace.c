@@ -51,6 +51,8 @@ static char directory[PATH_MAX];
 static size_t ring_size = RING_SIZE;
 static size_t mapping_size;
 static struct trace_header *header;
+static const _Atomic uint32_t never;
+static const _Atomic uint32_t *recording = &never;
 static pthread_key_t ring_key;
 
 static __thread struct trace_ring *ring;
@@ -58,7 +60,7 @@ static __thread uint8_t *ring_data;
 static __thread uint32_t ring_tid;
 
 static void create_file(const char *program, const char *arguments,
-		size_t arguments_size);
+		size_t arguments_size, bool record);
 static void append(
 		enum trace_type type, struct trace_record *record, size_t size);
 static bool claim_ring(void);
@@ -97,7 +99,9 @@ trace_start(const char *program, char *const arguments[])
 		memcpy(joined + joined_size, arguments[i], length);
 		joined_size += length;
 	}
-	create_file(program, joined, joined_size);
+	char off[PATH_MAX + sizeof("/" TRACE_OFF)];
+	snprintf(off, sizeof(off), "%s/" TRACE_OFF, directory);
+	create_file(program, joined, joined_size, access(off, F_OK) == -1);
 }
 
 void
@@ -108,14 +112,17 @@ trace_fork_child(void)
 		return;
 	}
 	header = NULL;
+	recording = &never;
 	ring = NULL;
 	pthread_setspecific(ring_key, NULL);
-	create_file(parent->program, parent->arguments, parent->arguments_size);
+	create_file(parent->program, parent->arguments, parent->arguments_size,
+			parent->recording);
 	munmap(parent, mapping_size);
 }
 
 static void
-create_file(const char *program, const char *arguments, size_t arguments_size)
+create_file(const char *program, const char *arguments, size_t arguments_size,
+		bool record)
 {
 	char path[PATH_MAX + 32];
 	int fd;
@@ -146,18 +153,20 @@ create_file(const char *program, const char *arguments, size_t arguments_size)
 	created->start = now();
 	created->ring_size = ring_size;
 	created->arguments_size = arguments_size;
+	created->recording = record;
 	snprintf(created->program, sizeof(created->program), "%s", program);
 	memcpy(created->arguments, arguments, arguments_size);
 	memcpy(created->magic, TRACE_MAGIC, sizeof(created->magic));
 
 	header = created;
+	recording = &created->recording;
 }
 
 void
 trace_syscall_enter(uint32_t syscall_class, uint32_t number,
 		const uint64_t arguments[6])
 {
-	if (header == NULL) {
+	if (!*recording) {
 		return;
 	}
 	struct trace_syscall_enter enter = {
@@ -172,7 +181,7 @@ void
 trace_syscall_return(uint32_t syscall_class, uint32_t number, int64_t result,
 		enum trace_outcome outcome)
 {
-	if (header == NULL) {
+	if (!*recording) {
 		return;
 	}
 	struct trace_syscall_return returned = {
@@ -193,7 +202,7 @@ trace_string(const char *string)
 void
 trace_path(const char *guest, const char *host)
 {
-	if (header == NULL) {
+	if (!*recording) {
 		return;
 	}
 	union {
@@ -219,7 +228,7 @@ trace_path(const char *guest, const char *host)
 void
 trace_routine(int32_t id, int32_t result)
 {
-	if (header == NULL) {
+	if (!*recording) {
 		return;
 	}
 	struct trace_routine routine = {.id = id, .result = result};
