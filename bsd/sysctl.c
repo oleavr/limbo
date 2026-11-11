@@ -52,6 +52,7 @@
 #include "route.h"
 #include "shared_cache.h"
 #include "sysroot.h"
+#include "trace.h"
 #include "xnu-errno.h"
 
 #ifdef __arm64__
@@ -462,6 +463,7 @@ sys_sysctl(int *name, uint32_t namelen, void *old, size_t *oldlenp, void *new,
 #endif
 		return _ENOENT;
 	}
+	trace_string(node->name);
 	return read_node(node, old, oldlenp);
 }
 
@@ -706,6 +708,7 @@ sys_sys_sysctlbyname(const char *name, size_t namelen, void *old,
 			(int)namelen, name, (void *)namelen, (void *)old,
 			(void *)oldlenp, (void *)new, (void *)newlen);
 #endif
+	trace_string(name);
 	if (new != NULL) {
 #ifdef ENABLE_STRACE
 		fprintf(stderr, "  sysctl: setting {%d, %d} ignored\n", name[0],
