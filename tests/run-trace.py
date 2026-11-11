@@ -34,7 +34,7 @@ def main():
 
     started = r"\+\+\+ started by {}: \S*traced \S*traced{}( \(.*\))? \+\+\+$"
     parent = find(r" traced\[(\d+)\] " + started.format(r"\d+", "")).group(1)
-    find(rf' traced\[{parent}\] open\("0x[0-9a-f]+", 0, 0\) = -1 ENOENT ')
+    find(rf' traced\[{parent}\] open\("/no/such/file", 0, 0\) = -1 ENOENT ')
     forked = find(r" traced\[(\d+)\] " + started.format(parent, "")).group(1)
     find(rf" traced\[{parent}\] fork\(\) = {forked} ")
     find(rf" traced\[{forked}\] \.\.\. fork = {parent}$")

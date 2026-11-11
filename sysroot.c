@@ -43,6 +43,7 @@
 #include <unistd.h>
 
 #include "sysroot.h"
+#include "trace.h"
 
 #define NOFOLLOW_PREFIX "/.nofollow"
 
@@ -54,6 +55,7 @@ static dev_t root_dev;
 static ino_t root_ino;
 static size_t root_length;
 
+static const char *host_path(const char *path, int flags, char *buffer);
 static int open_in_root(const char *path, int flags, uint64_t resolve);
 static ssize_t read_fd_path(int fd, char *buffer);
 
@@ -81,6 +83,16 @@ sysroot_open(void)
 
 const char *
 sysroot_host_path(const char *path, int flags, char *buffer)
+{
+	const char *host = host_path(path, flags, buffer);
+	if (path != NULL) {
+		trace_path(path, host);
+	}
+	return host;
+}
+
+static const char *
+host_path(const char *path, int flags, char *buffer)
 {
 	if (path == NULL || root_length == 0 || path[0] != '/') {
 		return path;
