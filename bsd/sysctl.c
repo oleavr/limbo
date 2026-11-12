@@ -52,6 +52,7 @@
 #include "route.h"
 #include "shared_cache.h"
 #include "sysroot.h"
+#include "trace.h"
 #include "xnu-errno.h"
 
 #ifdef __arm64__
@@ -370,11 +371,6 @@ int
 sys_sysctl(int *name, uint32_t namelen, void *old, size_t *oldlenp, void *new,
 		size_t newlen)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sysctl(%p, %p, %p, %p, %p, %p)\n", (void *)name,
-			(void *)namelen, (void *)old, (void *)oldlenp,
-			(void *)new, (void *)newlen);
-#endif
 	if (namelen == 2 && name[0] == CTL_UNSPEC
 			&& name[1] == CTL_SYSCTL_NAME2OID) {
 		return name2oid(new, newlen, old, oldlenp);
@@ -394,10 +390,6 @@ sys_sysctl(int *name, uint32_t namelen, void *old, size_t *oldlenp, void *new,
 	}
 
 	if (new != NULL) {
-#ifdef ENABLE_STRACE
-		fprintf(stderr, "  sysctl: setting {%d, %d} ignored\n", name[0],
-				namelen > 1 ? name[1] : 0);
-#endif
 		if (old == NULL) {
 			return 0;
 		}
@@ -453,15 +445,9 @@ sys_sysctl(int *name, uint32_t namelen, void *old, size_t *oldlenp, void *new,
 		}
 	}
 	if (node == NULL) {
-#ifdef ENABLE_STRACE
-		fprintf(stderr, ">> Unknown sysctl:");
-		for (uint32_t i = 0; i < namelen; i++) {
-			fprintf(stderr, " %d", name[i]);
-		}
-		fprintf(stderr, "\n");
-#endif
 		return _ENOENT;
 	}
+	trace_string(node->name);
 	return read_node(node, old, oldlenp);
 }
 
@@ -701,16 +687,8 @@ int
 sys_sys_sysctlbyname(const char *name, size_t namelen, void *old,
 		size_t *oldlenp, void *new, size_t newlen)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "sysctlbyname(\"%.*s\", %p, %p, %p, %p, %p)\n",
-			(int)namelen, name, (void *)namelen, (void *)old,
-			(void *)oldlenp, (void *)new, (void *)newlen);
-#endif
+	trace_string(name);
 	if (new != NULL) {
-#ifdef ENABLE_STRACE
-		fprintf(stderr, "  sysctl: setting {%d, %d} ignored\n", name[0],
-				namelen > 1 ? name[1] : 0);
-#endif
 		if (old == NULL) {
 			return 0;
 		}
@@ -733,9 +711,6 @@ lookup_name(const char *name, size_t namelen)
 			return &nodes[i];
 		}
 	}
-#ifdef ENABLE_STRACE
-	fprintf(stderr, ">> Unknown sysctl: %.*s\n", (int)namelen, name);
-#endif
 	return NULL;
 }
 
@@ -754,9 +729,6 @@ node_oid(const struct sysctl_node *node, int oid[2])
 static int
 read_node(const struct sysctl_node *node, void *old, size_t *oldlenp)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "  sysctl: %s\n", node->name);
-#endif
 	switch (node->kind) {
 	case SYSCTL_STRING:
 		return read_bytes(node->string, strlen(node->string) + 1, old,

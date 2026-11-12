@@ -46,11 +46,6 @@ mach_voucher_extract_attr_content(ipc_voucher_t voucher,
 		mach_voucher_attr_content_t content,
 		mach_msg_type_number_t *contentCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mach_voucher_extract_attr_content(%p, %p, %p, %p)\n",
-			(void *)(uintptr_t)voucher, (void *)(uintptr_t)key,
-			(void *)content, (void *)contentCnt);
-#endif
 	if (!is_voucher(voucher)) {
 		return KERN_INVALID_ARGUMENT;
 	}
@@ -70,14 +65,6 @@ _kernelrpc_mach_voucher_extract_attr_recipe(ipc_voucher_t voucher,
 		mach_voucher_attr_raw_recipe_t recipe,
 		mach_msg_type_number_t *recipeCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr,
-			"_kernelrpc_mach_voucher_extract_attr_recipe(%p, %p, "
-			"%p, "
-			"%p)\n",
-			(void *)(uintptr_t)voucher, (void *)(uintptr_t)key,
-			(void *)recipe, (void *)recipeCnt);
-#endif
 	if (!is_voucher(voucher)) {
 		return KERN_INVALID_ARGUMENT;
 	}
@@ -90,11 +77,6 @@ mach_voucher_extract_all_attr_recipes(ipc_voucher_t voucher,
 		mach_voucher_attr_raw_recipe_array_t recipes,
 		mach_msg_type_number_t *recipesCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mach_voucher_extract_all_attr_recipes(%p, %p, %p)\n",
-			(void *)(uintptr_t)voucher, (void *)recipes,
-			(void *)recipesCnt);
-#endif
 	if (!is_voucher(voucher)) {
 		return KERN_INVALID_ARGUMENT;
 	}
@@ -110,15 +92,6 @@ mach_voucher_attr_command(ipc_voucher_t voucher, mach_voucher_attr_key_t key,
 		mach_voucher_attr_content_t out_content,
 		mach_msg_type_number_t *out_contentCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr,
-			"mach_voucher_attr_command(%p, %p, %p, %p, %p, %p, "
-			"%p)\n",
-			(void *)(uintptr_t)voucher, (void *)(uintptr_t)key,
-			(void *)(uintptr_t)command, (void *)in_content,
-			(void *)(uintptr_t)in_contentCnt, (void *)out_content,
-			(void *)out_contentCnt);
-#endif
 	if (!is_voucher(voucher)) {
 		return KERN_INVALID_ARGUMENT;
 	}
@@ -147,11 +120,5 @@ mach_voucher_debug_info(ipc_space_read_t task, mach_port_name_t voucher_name,
 		mach_voucher_attr_raw_recipe_array_t recipes,
 		mach_msg_type_number_t *recipesCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mach_voucher_debug_info(%p, %p, %p, %p)\n",
-			(void *)(uintptr_t)task,
-			(void *)(uintptr_t)voucher_name, (void *)recipes,
-			(void *)recipesCnt);
-#endif
 	return KERN_NOT_SUPPORTED;
 }

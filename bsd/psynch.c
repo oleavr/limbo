@@ -82,10 +82,6 @@ int
 sys_psynch_mutexwait(user_addr_t mutex, uint32_t mgen, uint32_t ugen,
 		uint64_t tid, uint32_t flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "psynch_mutexwait(%p, %#x, %#x, %#lx, %#x)\n", mutex,
-			mgen, ugen, tid, flags);
-#endif
 	return psynch_wait(mutex, false, 0, 0, 0);
 }
 
@@ -93,10 +89,6 @@ int
 sys_psynch_mutexdrop(user_addr_t mutex, uint32_t mgen, uint32_t ugen,
 		uint64_t tid, uint32_t flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "psynch_mutexdrop(%p, %#x, %#x, %#lx, %#x)\n", mutex,
-			mgen, ugen, tid, flags);
-#endif
 	psynch_wake_one(mutex);
 	return 0;
 }
@@ -106,12 +98,6 @@ sys_psynch_cvwait(user_addr_t cv, uint64_t cvlsgen, uint32_t cvugen,
 		user_addr_t mutex, uint64_t mugen, uint32_t flags, int64_t sec,
 		uint32_t nsec)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr,
-			"psynch_cvwait(%p, %#lx, %#x, %p, %#lx, %#x, %ld, "
-			"%u)\n",
-			cv, cvlsgen, cvugen, mutex, mugen, flags, sec, nsec);
-#endif
 	if (mutex != NULL) {
 		psynch_wake_one(mutex);
 	}
@@ -209,13 +195,6 @@ sys_psynch_cvsignal(user_addr_t cv, uint64_t cvlsgen, uint32_t cvugen,
 		int thread_port, user_addr_t mutex, uint64_t mugen,
 		uint64_t tid, uint32_t flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr,
-			"psynch_cvsignal(%p, %#lx, %#x, %#x, %p, %#lx, %#lx, "
-			"%#x)\n",
-			cv, cvlsgen, cvugen, thread_port, mutex, mugen, tid,
-			flags);
-#endif
 	pthread_mutex_lock(&lock);
 	uint32_t woken = wake_waiters(cv, thread_port, 1);
 	if (woken == 0 && pending_waiters(cvlsgen) != 0) {
@@ -231,10 +210,6 @@ int
 sys_psynch_cvbroad(user_addr_t cv, uint64_t cvlsgen, uint64_t cvudgen,
 		uint32_t flags, user_addr_t mutex, uint64_t mugen, uint64_t tid)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "psynch_cvbroad(%p, %#lx, %#lx, %#x, %p, %#lx, %#lx)\n",
-			cv, cvlsgen, cvudgen, flags, mutex, mugen, tid);
-#endif
 	uint32_t pending = pending_waiters(cvlsgen);
 
 	pthread_mutex_lock(&lock);
@@ -318,12 +293,6 @@ sys_psynch_cvclrprepost(user_addr_t cv, uint32_t cvgen, uint32_t cvugen,
 		uint32_t cvsgen, uint32_t prepocnt, uint32_t preposeq,
 		uint32_t flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr,
-			"psynch_cvclrprepost(%p, %#x, %#x, %#x, %#x, %#x, "
-			"%#x)\n",
-			cv, cvgen, cvugen, cvsgen, prepocnt, preposeq, flags);
-#endif
 	pthread_mutex_lock(&lock);
 	for (struct psynch_prepost **p = &preposts; *p != NULL;
 			p = &(*p)->next) {
@@ -381,10 +350,6 @@ int
 sys_psynch_rw_rdlock(user_addr_t rwlock, uint32_t lgenval, uint32_t ugenval,
 		uint32_t rw_wc, int flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "psynch_rw_rdlock(%p, %#x, %#x, %#x, %#x)\n", rwlock,
-			lgenval, ugenval, rw_wc, flags);
-#endif
 	pthread_mutex_lock(&lock);
 	struct rw_prepost *state = *rw_prepost_find(rwlock);
 	uint32_t sseq = rw_wc & PTHRW_COUNT_MASK;
@@ -405,10 +370,6 @@ int
 sys_psynch_rw_wrlock(user_addr_t rwlock, uint32_t lgenval, uint32_t ugenval,
 		uint32_t rw_wc, int flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "psynch_rw_wrlock(%p, %#x, %#x, %#x, %#x)\n", rwlock,
-			lgenval, ugenval, rw_wc, flags);
-#endif
 	return rw_lock(rwlock, lgenval, true);
 }
 
@@ -416,10 +377,6 @@ int
 sys_psynch_rw_unlock(user_addr_t rwlock, uint32_t lgenval, uint32_t ugenval,
 		uint32_t rw_wc, int flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "psynch_rw_unlock(%p, %#x, %#x, %#x, %#x)\n", rwlock,
-			lgenval, ugenval, rw_wc, flags);
-#endif
 	uint32_t lseq = lgenval & PTHRW_COUNT_MASK;
 	uint32_t sseq = rw_wc & PTHRW_COUNT_MASK;
 

@@ -36,9 +36,18 @@ targeting macOS or iOS on Linux without modification.
 	program resolve inside it when they exist there, and on the host
 	otherwise.
 
+*LIMBO_TRACE*
+	Directory to record the program's system calls in, a file for each
+	process, for *limbo-trace*(1) to print. Recording is on unless
+	*limbo-trace*(1) has switched it off.
+
+*LIMBO_TRACE_SIZE*
+	Bytes of records that a thread keeps before it overwrites the oldest,
+	rounded up to a power of two; 1048576 unless set.
+
 # SEE ALSO
 
-*cache-lookup*(1)
+*cache-lookup*(1), *limbo-trace*(1)
 
 # AUTHORS
 

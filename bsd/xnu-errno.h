@@ -349,9 +349,6 @@ static inline int
 errno_map(int r)
 {
 	if (r < 0) {
-#ifdef ENABLE_STRACE
-		perror("errno_map");
-#endif
 		return err_map(errno);
 	}
 	return r;

@@ -194,12 +194,6 @@ sys_bsdthread_register(user_addr_t threadstart, user_addr_t wqthread,
 		uint32_t pthread_size, user_addr_t data, uint32_t data_size,
 		uint32_t dispatch_queue_offset)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "bsdthread_register(%p, %p, %p, %p, %p, %p)\n",
-			threadstart, wqthread, (void *)(uintptr_t)pthread_size,
-			data, (void *)(uintptr_t)data_size,
-			(void *)(uintptr_t)dispatch_queue_offset);
-#endif
 	struct pthread_registration_data *d = data;
 #ifndef __x86_64__
 	asm("xpaci %0" : "+r"(threadstart));
@@ -226,10 +220,6 @@ user_addr_t
 sys_bsdthread_create(user_addr_t func, user_addr_t func_arg, user_addr_t stack,
 		user_addr_t pthread, uint32_t flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "bsdthread_create(%p, %p, %p, %p, %p)\n", func,
-			func_arg, stack, pthread, (void *)(uintptr_t)flags);
-#endif
 	struct thread *thread = thread_new(NULL, NULL);
 	mach_port_name_t kport = ipc_kobject_copy_send(thread->port);
 	uint64_t tsd_base = (uint64_t)pthread + registration.tsd_offset;
@@ -272,11 +262,6 @@ int
 sys_bsdthread_terminate(user_addr_t stackaddr, size_t freesize, uint32_t port,
 		uint32_t sem)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "bsdthread_terminate(%p, %p, %p, %p)\n", stackaddr,
-			(void *)freesize, (void *)(uintptr_t)port,
-			(void *)(uintptr_t)sem);
-#endif
 	ipc_port_deallocate(port);
 	if (sem != MACH_PORT_NULL) {
 		semaphore_signal(sem);
@@ -287,20 +272,12 @@ sys_bsdthread_terminate(user_addr_t stackaddr, size_t freesize, uint32_t port,
 int
 sys_workq_open(void)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "workq_open()\n");
-#endif
 	return 0;
 }
 
 int
 sys_workq_kernreturn(int options, user_addr_t item, int affinity, int prio)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "workq_kernreturn(%p, %p, %p, %p)\n",
-			(void *)(intptr_t)options, item,
-			(void *)(intptr_t)affinity, (void *)(intptr_t)prio);
-#endif
 	switch (options) {
 	case WQOPS_QUEUE_REQTHREADS:
 	case WQOPS_QUEUE_REQTHREADS2: {
@@ -637,9 +614,6 @@ workq_request_kqueue(struct kqueue *kq, uint32_t qos, bool manager)
 uint64_t
 sys_thread_selfid(void)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "thread_selfid()\n");
-#endif
 	return gettid();
 }
 
@@ -647,10 +621,6 @@ int
 sys_bsdthread_ctl(user_addr_t cmd, user_addr_t arg1, user_addr_t arg2,
 		user_addr_t arg3)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "bsdthread_ctl(%p, %p, %p, %p)\n", cmd, arg1, arg2,
-			arg3);
-#endif
 	switch ((uintptr_t)cmd) {
 	case BSDTHREAD_CTL_QOS_MAX_PARALLELISM:
 		return sysconf(_SC_NPROCESSORS_ONLN);

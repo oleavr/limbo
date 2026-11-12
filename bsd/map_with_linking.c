@@ -77,11 +77,6 @@ int
 sys_map_with_linking_np(user_addr_t regions, uint32_t region_count,
 		user_addr_t blob, uint32_t blob_size)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "map_with_linking_np(%p, %p, %p, %p)\n", regions,
-			(void *)(uintptr_t)region_count, blob,
-			(void *)(uintptr_t)blob_size);
-#endif
 	const struct mwl_region *r = regions;
 
 	for (uint32_t i = 0; i < region_count; i++) {

@@ -290,10 +290,6 @@ clone_watcher(const struct clone_args *args)
 	start_watching();
 	pthread_mutex_unlock(&lock);
 	*args->fd = pair[0];
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "  fsevents: watcher %d for %d event types\n", pair[0],
-			args->num_events);
-#endif
 	return 0;
 }
 
@@ -307,10 +303,6 @@ start_watching(void)
 					| FAN_REPORT_DFID_NAME_TARGET,
 			O_RDONLY | O_LARGEFILE | O_CLOEXEC);
 	if (fan == -1) {
-#ifdef ENABLE_STRACE
-		fprintf(stderr, "  fsevents: no fanotify: %s\n",
-				strerror(errno));
-#endif
 		return;
 	}
 	char root[PATH_MAX];
@@ -319,9 +311,6 @@ start_watching(void)
 	if (fanotify_mark(fan, FAN_MARK_ADD | FAN_MARK_FILESYSTEM, mask,
 			    AT_FDCWD, sysroot_host_path("/", 0, root))
 			== -1) {
-#ifdef ENABLE_STRACE
-		fprintf(stderr, "  fsevents: no mark: %s\n", strerror(errno));
-#endif
 		close(fan);
 		return;
 	}
@@ -416,12 +405,6 @@ handle_event(int mount_fd, const struct fanotify_event_metadata *metadata)
 		cursor += header->len;
 	}
 
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "  fsevents: fanotify %#llx by %d, %s\n",
-			(unsigned long long)metadata->mask, metadata->pid,
-			name != NULL ? name
-				     : (new_name != NULL ? new_name : "-"));
-#endif
 	bool is_dir = metadata->mask & FAN_ONDIR;
 	struct item items[2];
 	if (metadata->mask & FAN_RENAME) {
@@ -506,10 +489,6 @@ handle_path(int mount_fd, struct file_handle *handle, char *out)
 {
 	int fd = open_by_handle_at(mount_fd, handle, O_PATH | O_CLOEXEC);
 	if (fd == -1) {
-#ifdef ENABLE_STRACE
-		fprintf(stderr, "  fsevents: no directory for a handle: %s\n",
-				strerror(errno));
-#endif
 		struct known_directory *known = known_directory(handle);
 		if (known == NULL) {
 			return false;
@@ -602,11 +581,6 @@ post(int32_t type, int32_t pid, const struct item *items, size_t count)
 		}
 	}
 	pthread_mutex_unlock(&lock);
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "  fsevents: %d by %d: %s%s%s\n", type, pid,
-			items[0].path, count > 1 ? " -> " : "",
-			count > 1 ? items[1].path : "");
-#endif
 }
 
 static size_t

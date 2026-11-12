@@ -713,9 +713,6 @@ post_event(uint32_t subclass, uint32_t code, const void *data, size_t size)
 		deliver(socket, message, header->total_size);
 	}
 	pthread_mutex_unlock(&lock);
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "  route: event %u/%u\n", subclass, code);
-#endif
 }
 
 static void
@@ -1522,9 +1519,6 @@ route_write(int fd, const void *buffer, size_t size)
 		memcpy(grow(&out, size), buffer, size);
 		((struct xnu_rt_msghdr *)out.bytes)->rtm_errno = -error;
 	}
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "  route: request %u: %d\n", request.rtm_type, error);
-#endif
 	if (out.length != 0) {
 		((struct xnu_rt_msghdr *)out.bytes)->rtm_pid = getpid();
 		pthread_mutex_lock(&lock);

@@ -10,11 +10,6 @@ assert(cc.has_header_symbol('sys/prctl.h', 'PR_SET_SYSCALL_USER_DISPATCH'), 'PR_
 
 config = configuration_data()
 
-strace = not get_option('strace').disabled()
-if strace
-  config.set('ENABLE_STRACE', 1)
-endif
-
 configure_file(
   input: 'config.h.in',
   output: 'config.h',
@@ -60,6 +55,7 @@ limbo = executable('limbo',
     'syscall.c',
     'sysroot.c',
     'thread.c',
+    'trace.c',
   ] + limbo_arch_sources,
   include_directories: include_dir,
   dependencies: [shm_dep, thread_dep],
@@ -86,6 +82,18 @@ limbo_broker = executable('limbo-broker',
   install: true,
 )
 
+limbo_trace = executable('limbo-trace',
+  sources: [
+    'limbo_trace.c',
+    'trace_reader.c',
+  ],
+  include_directories: include_dir,
+  link_args: [
+    '-static'
+  ],
+  install: true,
+)
+
 scdoc = find_program('scdoc', native: true, required: false)
 
 if scdoc.found()
@@ -95,6 +103,7 @@ if scdoc.found()
   pages = [
     'cache-lookup.1.scd',
     'limbo.1.scd',
+    'limbo-trace.1.scd',
   ]
 
   foreach page : pages

@@ -35,9 +35,9 @@ Limbo needs a macOS userspace to run programs against. Bootstrap a sysroot as
 described in the [User's Guide](README.md#Users-Guide) and export
 `LIMBO_SYSROOT` to point at it.
 
-Build with system call tracing enabled:
+Build Limbo:
 ```
-meson setup build -Dstrace=enabled
+meson setup build
 ninja -C build
 ```
 
@@ -49,6 +49,17 @@ build/limbo $LIMBO_SYSROOT/bin/echo echo Hello, world
 
 Programs spawned by that program are run by the *binfmt.d*(5) handler, so for
 those to use your build, point `/etc/binfmt.d/Mach-O.conf` at it.
+
+To see the system calls a program makes, name a directory in `LIMBO_TRACE` and
+print what Limbo recorded there with `limbo-trace`:
+```
+mkdir /tmp/trace
+LIMBO_TRACE=/tmp/trace build/limbo $LIMBO_SYSROOT/bin/echo echo Hello, world
+build/limbo-trace /tmp/trace
+```
+
+`limbo-trace` names a system call by its row in `trace_names.h`, so a new
+system call gets a row there.
 
 ## Testing
 

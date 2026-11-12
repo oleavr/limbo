@@ -43,11 +43,12 @@
 
 #include "broker.h"
 #include "broker_client.h"
-#include "libinfo.h"
-#include "mach_vm.h"
-#include "xpc_bootstrap.h"
 #include "bsd/kevent.h"
 #include "ipc.h"
+#include "libinfo.h"
+#include "mach_vm.h"
+#include "trace.h"
+#include "xpc_bootstrap.h"
 
 typedef enum {
 	IPC_USER,
@@ -363,6 +364,7 @@ ipc_mach_msg(mach_msg_header_t *msg, mach_msg_option64_t options,
 		mach_port_name_t rcv_name, mach_msg_timeout_t timeout)
 {
 	if (options & MACH64_SEND_MSG) {
+		trace_message(TRACE_MESSAGE_SENT, msg, send_size);
 		mach_msg_return_t mr = send(msg, send_size, IPC_USER,
 				getpid());
 		if (mr != MACH_MSG_SUCCESS) {
@@ -371,7 +373,13 @@ ipc_mach_msg(mach_msg_header_t *msg, mach_msg_option64_t options,
 	}
 
 	if (options & MACH64_RCV_MSG) {
-		return receive(msg, options, rcv_size, rcv_name, timeout);
+		mach_msg_return_t mr = receive(
+				msg, options, rcv_size, rcv_name, timeout);
+		if (mr == MACH_MSG_SUCCESS) {
+			trace_message(TRACE_MESSAGE_RECEIVED, msg,
+					msg->msgh_size);
+		}
+		return mr;
 	}
 
 	return MACH_MSG_SUCCESS;
@@ -1059,6 +1067,8 @@ kobject_server(mach_msg_header_t *request)
 		reply->RetCode = MIG_BAD_ID;
 	} else {
 		routine(request, &reply->Head);
+		bool complex = reply->Head.msgh_bits & MACH_MSGH_BITS_COMPLEX;
+		trace_routine(id, complex ? KERN_SUCCESS : reply->RetCode);
 	}
 
 	if (!(reply->Head.msgh_bits & MACH_MSGH_BITS_COMPLEX)

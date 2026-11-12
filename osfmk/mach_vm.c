@@ -100,11 +100,6 @@ kern_return_t
 _kernelrpc_mach_vm_allocate(vm_task_entry_t target, mach_vm_address_t *address,
 		mach_vm_size_t size, int flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "_kernelrpc_mach_vm_allocate(%p, %p, %p, %p)\n",
-			(void *)target, (void *)address, (void *)size,
-			(void *)flags);
-#endif
 	return map_anonymous(address, size, 0, flags, VM_PROT_DEFAULT);
 }
 
@@ -177,10 +172,6 @@ kern_return_t
 _kernelrpc_mach_vm_deallocate(vm_task_entry_t target, mach_vm_address_t address,
 		mach_vm_size_t size)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "_kernelrpc_mach_vm_deallocate(%p, %p, %p)\n",
-			(void *)target, (void *)address, (void *)size);
-#endif
 	mach_vm_address_t start = address & ~PAGE_MASK;
 	mach_vm_address_t end = (address + size + PAGE_MASK) & ~PAGE_MASK;
 	if (start != end && munmap((void *)start, end - start) == -1) {
@@ -194,11 +185,6 @@ _kernelrpc_mach_vm_protect(vm_task_entry_t target_task,
 		mach_vm_address_t address, mach_vm_size_t size,
 		boolean_t set_maximum, vm_prot_t new_protection)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "_kernelrpc_mach_vm_protect(%p, %p, %p, %p, %p)\n",
-			(void *)target_task, (void *)address, (void *)size,
-			(void *)set_maximum, (void *)new_protection);
-#endif
 	if (set_maximum) {
 		return KERN_SUCCESS;
 	}
@@ -216,12 +202,6 @@ kern_return_t
 mach_vm_inherit(vm_task_entry_t target_task, mach_vm_address_t address,
 		mach_vm_size_t size, vm_inherit_t new_inheritance)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mach_vm_inherit(%p, %p, %p, %p)\n",
-			(void *)target_task, (void *)address, (void *)size,
-			(void *)new_inheritance);
-#endif
-
 	(void)target_task;
 	(void)address;
 	(void)size;
@@ -234,11 +214,6 @@ _kernelrpc_mach_vm_read(vm_map_read_t target_task, mach_vm_address_t address,
 		mach_vm_size_t size, vm_offset_t *data,
 		mach_msg_type_number_t *dataCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "_kernelrpc_mach_vm_read(%p, %p, %p, %p, %p)\n",
-			(void *)target_task, (void *)address, (void *)size,
-			(void *)data, (void *)dataCnt);
-#endif
 	(void)target_task;
 
 	if (size > 64 * 1024 * 1024) {
@@ -265,10 +240,6 @@ kern_return_t
 mach_vm_read_list(vm_map_read_t target_task, mach_vm_read_entry_t data_list,
 		natural_t count)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mach_vm_read_list(%p, %p, %p)\n", (void *)target_task,
-			(void *)data_list, (void *)count);
-#endif
 	unimplemented();
 }
 
@@ -276,10 +247,6 @@ kern_return_t
 mach_vm_write(vm_map_t target_task, mach_vm_address_t address, vm_offset_t data,
 		mach_msg_type_number_t dataCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mach_vm_write(%p, %p, %p, %p)\n", (void *)target_task,
-			(void *)address, (void *)data, (void *)dataCnt);
-#endif
 	memmove((void *)address, (void *)data, dataCnt);
 	return KERN_SUCCESS;
 }
@@ -288,11 +255,6 @@ kern_return_t
 mach_vm_copy(vm_map_t target_task, mach_vm_address_t source_address,
 		mach_vm_size_t size, mach_vm_address_t dest_address)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mach_vm_copy(%p, %p, %p, %p)\n", (void *)target_task,
-			(void *)source_address, (void *)size,
-			(void *)dest_address);
-#endif
 	memmove((void *)dest_address, (void *)source_address, size);
 	return KERN_SUCCESS;
 }
@@ -302,11 +264,6 @@ mach_vm_read_overwrite(vm_map_read_t target_task, mach_vm_address_t address,
 		mach_vm_size_t size, mach_vm_address_t data,
 		mach_vm_size_t *outsize)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mach_vm_read_overwrite(%p, %p, %p, %p, %p)\n",
-			(void *)target_task, (void *)address, (void *)size,
-			(void *)data, (void *)outsize);
-#endif
 	memmove((void *)data, (void *)address, size);
 	*outsize = size;
 	return KERN_SUCCESS;
@@ -316,10 +273,6 @@ kern_return_t
 mach_vm_msync(vm_map_t target_task, mach_vm_address_t address,
 		mach_vm_size_t size, vm_sync_t sync_flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mach_vm_msync(%p, %p, %p, %p)\n", (void *)target_task,
-			(void *)address, (void *)size, (void *)sync_flags);
-#endif
 	unimplemented();
 }
 
@@ -327,11 +280,6 @@ kern_return_t
 mach_vm_behavior_set(vm_map_t target_task, mach_vm_address_t address,
 		mach_vm_size_t size, vm_behavior_t new_behavior)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mach_vm_behavior_set(%p, %p, %p, %p)\n",
-			(void *)target_task, (void *)address, (void *)size,
-			(void *)new_behavior);
-#endif
 	unimplemented();
 }
 
@@ -342,15 +290,6 @@ _kernelrpc_mach_vm_map(vm_task_entry_t target_task, mach_vm_address_t *address,
 		boolean_t copy, vm_prot_t cur_protection,
 		vm_prot_t max_protection, vm_inherit_t inheritance)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr,
-			"_kernelrpc_mach_vm_map(%p, %p, %p, %p, %p, %p, %p, "
-			"%p, %p, %p, %p)\n",
-			(void *)target_task, (void *)address, (void *)size,
-			(void *)mask, (void *)flags, (void *)object,
-			(void *)offset, (void *)copy, (void *)cur_protection,
-			(void *)max_protection, (void *)inheritance);
-#endif
 	cur_protection &= VM_PROT_ALL;
 	if (object != MACH_PORT_NULL) {
 		struct memory_entry *entry = ipc_kobject_lookup(
@@ -371,13 +310,6 @@ _kernelrpc_mach_vm_map(vm_task_entry_t target_task, mach_vm_address_t *address,
 		if (kr == KERN_SUCCESS) {
 			*address += in_page;
 		}
-#ifdef ENABLE_STRACE
-		fprintf(stderr,
-				"  mach_vm_map: entry of %#llx bytes: %d, at "
-				"%#llx\n",
-				(unsigned long long)entry->size, kr,
-				(unsigned long long)*address);
-#endif
 		return kr;
 	}
 
@@ -495,11 +427,6 @@ mach_vm_machine_attribute(vm_map_t target_task, mach_vm_address_t address,
 		mach_vm_size_t size, vm_machine_attribute_t attribute,
 		vm_machine_attribute_val_t *value)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mach_vm_machine_attribute(%p, %p, %p, %p, %p)\n",
-			(void *)target_task, (void *)address, (void *)size,
-			(void *)attribute, (void *)value);
-#endif
 	unimplemented();
 }
 
@@ -511,16 +438,6 @@ _kernelrpc_mach_vm_remap(vm_map_t target_task,
 		vm_prot_t *cur_protection, vm_prot_t *max_protection,
 		vm_inherit_t inheritance)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr,
-			"_kernelrpc_mach_vm_remap(%p, %p, %p, %p, %p, %p, %p, "
-			"%p, %p, %p, %p)\n",
-			(void *)target_task, (void *)target_address,
-			(void *)size, (void *)mask, (void *)flags,
-			(void *)src_task, (void *)src_address, (void *)copy,
-			(void *)cur_protection, (void *)max_protection,
-			(void *)inheritance);
-#endif
 	*cur_protection = region_protection(src_address);
 	*max_protection = VM_PROT_ALL;
 	if (!copy) {
@@ -854,11 +771,6 @@ kern_return_t
 mach_vm_page_query(vm_map_read_t target_map, mach_vm_offset_t offset,
 		integer_t *disposition, integer_t *ref_count)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mach_vm_page_query(%p, %p, %p, %p)\n",
-			(void *)target_map, (void *)offset, (void *)disposition,
-			(void *)ref_count);
-#endif
 	unimplemented();
 }
 
@@ -867,11 +779,6 @@ mach_vm_region_recurse(vm_map_read_t target_task, mach_vm_address_t *address,
 		mach_vm_size_t *size, natural_t *nesting_depth,
 		vm_region_recurse_info_t info, mach_msg_type_number_t *infoCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mach_vm_region_recurse(%p, %p, %p, %p, %p, %p)\n",
-			(void *)target_task, (void *)address, (void *)size,
-			(void *)nesting_depth, (void *)info, (void *)infoCnt);
-#endif
 	if (*infoCnt < VM_REGION_SUBMAP_INFO_COUNT_64) {
 		return KERN_INVALID_ARGUMENT;
 	}
@@ -902,12 +809,6 @@ mach_vm_region(vm_map_read_t target_task, mach_vm_address_t *address,
 		vm_region_info_t info, mach_msg_type_number_t *infoCnt,
 		mach_port_t *object_name)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mach_vm_region(%p, %p, %p, %p, %p, %p, %p)\n",
-			(void *)target_task, (void *)address, (void *)size,
-			(void *)flavor, (void *)info, (void *)infoCnt,
-			(void *)object_name);
-#endif
 	bool narrow = flavor == VM_REGION_BASIC_INFO
 			&& *infoCnt >= VM_REGION_BASIC_INFO_COUNT;
 	bool top = flavor == VM_REGION_TOP_INFO
@@ -1021,12 +922,6 @@ mach_make_memory_entry(vm_map_t target_task, memory_object_size_t *size,
 		memory_object_offset_t offset, vm_prot_t permission,
 		mach_port_t *object_handle, mem_entry_name_port_t parent_handle)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mach_make_memory_entry(%p, %p, %p, %p, %p, %p)\n",
-			(void *)target_task, (void *)size, (void *)offset,
-			(void *)permission, (void *)object_handle,
-			(void *)parent_handle);
-#endif
 	if (parent_handle != MACH_PORT_NULL) {
 		unimplemented();
 	}
@@ -1057,24 +952,6 @@ mach_make_memory_entry(vm_map_t target_task, memory_object_size_t *size,
 			: share_in_place(start, end - start,
 					  region_protection(start));
 	if (fd == -1) {
-#ifdef ENABLE_STRACE
-		fprintf(stderr, "  mach_make_memory_entry: %#llx-%#llx: %s\n",
-				(unsigned long long)start,
-				(unsigned long long)end, strerror(errno));
-		FILE *maps = fopen("/proc/thread-self/maps", "r");
-		char line[512];
-		while (maps != NULL
-				&& fgets(line, sizeof(line), maps) != NULL) {
-			unsigned long from, to;
-			if (sscanf(line, "%lx-%lx", &from, &to) == 2
-					&& to > start && from < end) {
-				fprintf(stderr, "    %s", line);
-			}
-		}
-		if (maps != NULL) {
-			fclose(maps);
-		}
-#endif
 		return KERN_INVALID_ADDRESS;
 	}
 
@@ -1112,11 +989,6 @@ kern_return_t
 _kernelrpc_mach_vm_purgable_control(vm_map_t target_task,
 		mach_vm_address_t address, vm_purgable_t control, int *state)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "_kernelrpc_mach_vm_purgable_control(%p, %p, %p, %p)\n",
-			(void *)target_task, (void *)address, (void *)control,
-			(void *)state);
-#endif
 	*state = VM_PURGABLE_NONVOLATILE;
 	return KERN_SUCCESS;
 }
@@ -1134,11 +1006,6 @@ kern_return_t
 mach_memory_entry_purgable_control(mem_entry_name_port_t mem_entry,
 		vm_purgable_t control, int *state)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mach_memory_entry_purgable_control(%p, %p, %p)\n",
-			(void *)(uintptr_t)mem_entry,
-			(void *)(uintptr_t)control, (void *)state);
-#endif
 	if (ipc_kobject_lookup(mem_entry, IPC_KOBJECT_MEMORY_ENTRY) == NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
@@ -1151,12 +1018,6 @@ mach_memory_entry_access_tracking(mem_entry_name_port_t mem_entry,
 		int *access_tracking, uint32_t *access_tracking_reads,
 		uint32_t *access_tracking_writes)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mach_memory_entry_access_tracking(%p, %p, %p, %p)\n",
-			(void *)(uintptr_t)mem_entry, (void *)access_tracking,
-			(void *)access_tracking_reads,
-			(void *)access_tracking_writes);
-#endif
 	return KERN_NOT_SUPPORTED;
 }
 
@@ -1164,11 +1025,6 @@ kern_return_t
 mach_memory_entry_ownership(mem_entry_name_port_t mem_entry, task_t owner,
 		int ledger_tag, int ledger_flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mach_memory_entry_ownership(%p, %p, %d, %#x)\n",
-			(void *)(uintptr_t)mem_entry, (void *)(uintptr_t)owner,
-			ledger_tag, ledger_flags);
-#endif
 	bool transfers = (owner != MACH_PORT_NULL
 					 && owner != ipc_kobject_name(IPC_KOBJECT_TASK))
 			|| (ledger_flags & VM_LEDGER_FLAGS_USER) != 0
@@ -1196,11 +1052,6 @@ mach_vm_page_info(vm_map_read_t target_task, mach_vm_address_t address,
 		vm_page_info_flavor_t flavor, vm_page_info_t info,
 		mach_msg_type_number_t *infoCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mach_vm_page_info(%p, %p, %p, %p, %p)\n",
-			(void *)target_task, (void *)address, (void *)flavor,
-			(void *)info, (void *)infoCnt);
-#endif
 	unimplemented();
 }
 
@@ -1209,12 +1060,6 @@ mach_vm_page_range_query(vm_map_read_t target_map, mach_vm_offset_t address,
 		mach_vm_size_t size, mach_vm_address_t dispositions,
 		mach_vm_size_t *dispositions_count)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mach_vm_page_range_query(%p, %p, %p, %p, %p)\n",
-			(void *)target_map, (void *)address, (void *)size,
-			(void *)dispositions, (void *)dispositions_count);
-#endif
-
 	mach_vm_address_t start = address & ~(mach_vm_address_t)PAGE_MASK;
 	mach_vm_size_t pages = (address + size - start + PAGE_MASK) / PAGE_SIZE;
 	if (pages > *dispositions_count) {
@@ -1248,16 +1093,6 @@ _kernelrpc_mach_vm_remap_new(vm_map_t target_task,
 		vm_prot_t *cur_protection, vm_prot_t *max_protection,
 		vm_inherit_t inheritance)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr,
-			"_kernelrpc_mach_vm_remap_new(%p, %p, %p, %p, %p, %p, "
-			"%p, %p, %p, %p, %p)\n",
-			(void *)target_task, (void *)target_address,
-			(void *)size, (void *)mask, (void *)flags,
-			(void *)src_task, (void *)src_address, (void *)copy,
-			(void *)cur_protection, (void *)max_protection,
-			(void *)inheritance);
-#endif
 	if (!copy) {
 		unimplemented();
 	}
@@ -1421,13 +1256,6 @@ mach_vm_deferred_reclamation_buffer_allocate(task_t target_task,
 		mach_vm_address_t *address, uint64_t *next_deadline,
 		uint32_t len, uint32_t max_len)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr,
-			"mach_vm_deferred_reclamation_buffer_allocate(%p, %p, "
-			"%p, %p, %p)\n",
-			(void *)target_task, (void *)address,
-			(void *)next_deadline, (void *)len, (void *)max_len);
-#endif
 	if (len == 0 || max_len < len) {
 		return KERN_INVALID_ARGUMENT;
 	}
@@ -1477,13 +1305,6 @@ mach_vm_deferred_reclamation_buffer_flush(task_t target_task,
 		uint32_t num_entries_to_reclaim, uint64_t *bytes_reclaimed,
 		uint64_t *next_deadline)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr,
-			"mach_vm_deferred_reclamation_buffer_flush(%p, %p, %p, "
-			"%p)\n",
-			(void *)target_task, (void *)num_entries_to_reclaim,
-			(void *)bytes_reclaimed, (void *)next_deadline);
-#endif
 	if (reclaim_ring == NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
@@ -1516,17 +1337,6 @@ mach_vm_reclaim_update_kernel_accounting(
 							  : 0)
 			+ reclaim_take_unreported();
 	*next_deadline = reclaim_next_deadline();
-#ifdef ENABLE_STRACE
-	fprintf(stderr,
-			"mach_vm_reclaim_update_kernel_accounting: %llu of "
-			"%llu "
-			"bytes, head %llu, tail %llu\n",
-			(unsigned long long)*bytes_reclaimed,
-			(unsigned long long)unneeded,
-			(unsigned long long)*reclaim_index(RECLAIM_HEAD_OFFSET),
-			(unsigned long long)*reclaim_index(
-					RECLAIM_TAIL_OFFSET));
-#endif
 	return KERN_SUCCESS;
 }
 
@@ -1535,11 +1345,6 @@ mach_vm_range_create(vm_map_t target_task, mach_vm_range_flavor_t flavor,
 		mach_vm_range_recipes_raw_t recipes,
 		mach_msg_type_number_t recipesCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "mach_vm_range_create(%p, %p, %p, %p)\n",
-			(void *)target_task, (void *)flavor, (void *)recipes,
-			(void *)recipesCnt);
-#endif
 	unimplemented();
 }
 
@@ -1547,13 +1352,6 @@ kern_return_t
 mach_vm_deferred_reclamation_buffer_resize(task_t target_task, uint32_t new_len,
 		uint64_t *bytes_reclaimed, uint64_t *next_deadline)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr,
-			"mach_vm_deferred_reclamation_buffer_resize(%p, %p, "
-			"%p, %p)\n",
-			(void *)target_task, (void *)new_len,
-			(void *)bytes_reclaimed, (void *)next_deadline);
-#endif
 	if (reclaim_ring == NULL || new_len == 0
 			|| RECLAIM_ENTRIES_OFFSET
 							+ (mach_vm_size_t)new_len
@@ -1577,14 +1375,6 @@ _kernelrpc_mach_vm_update_pointers_with_remote_tags(vm_map_t target,
 		mach_vm_offset_list_t out_pointer_list,
 		mach_msg_type_number_t *out_pointer_listCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr,
-			"_kernelrpc_mach_vm_update_pointers_with_remote_tags(%"
-			"p, %p, %p, %p, %p)\n",
-			(void *)target, (void *)in_pointer_list,
-			(void *)in_pointer_listCnt, (void *)out_pointer_list,
-			(void *)out_pointer_listCnt);
-#endif
 	unimplemented();
 }
 
@@ -1592,12 +1382,6 @@ kern_return_t
 mach_vm_deferred_reclamation_buffer_query(task_read_t target,
 		mach_vm_address_t *addr, mach_vm_size_t *size)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr,
-			"mach_vm_deferred_reclamation_buffer_query(%p, %p, "
-			"%p)\n",
-			(void *)target, (void *)addr, (void *)size);
-#endif
 	*addr = (mach_vm_address_t)reclaim_ring;
 	*size = reclaim_ring_size;
 	return KERN_SUCCESS;
@@ -1609,14 +1393,6 @@ _kernelrpc_mach_vm_reallocate(vm_map_t target_task, mach_vm_address_t src,
 		mach_vm_size_t dst_size, mach_vm_offset_t align_mask,
 		int options, int flags)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr,
-			"_kernelrpc_mach_vm_reallocate(%p, %p, %p, %p, %p, %p, "
-			"%p, %p)\n",
-			(void *)target_task, (void *)src, (void *)src_size,
-			(void *)dst, (void *)dst_size, (void *)align_mask,
-			(void *)options, (void *)flags);
-#endif
 	kern_return_t kr = map_anonymous(dst, dst_size, align_mask,
 			flags | VM_FLAGS_ANYWHERE,
 			VM_PROT_READ | VM_PROT_WRITE);

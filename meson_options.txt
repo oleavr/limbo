@@ -1,5 +1,0 @@
-option('strace',
-  type: 'feature',
-  value: 'disabled',
-  description: 'Build with system call tracing',
-)

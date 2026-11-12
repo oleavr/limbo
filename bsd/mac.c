@@ -36,6 +36,7 @@
 #include "handler.h"
 #include "sha.h"
 #include "sysroot.h"
+#include "trace.h"
 #include "xnu-errno.h"
 
 #define MAC_MAX_POLICY_NAME 32
@@ -196,10 +197,7 @@ sandbox_handle_syscall(int call, void *arg)
 int
 sys___mac_syscall(char *policy, int call, user_addr_t arg)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "__mac_syscall(\"%s\", %p, %p)\n", policy, (void *)call,
-			(void *)arg);
-#endif
+	trace_string(policy);
 	if (strncmp(policy, "AMFI", MAC_MAX_POLICY_NAME) == 0) {
 		return amfi_handle_syscall(call, arg);
 	} else if (strncmp(policy, "Quarantine", MAC_MAX_POLICY_NAME) == 0) {

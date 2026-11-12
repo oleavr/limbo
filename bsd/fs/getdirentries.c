@@ -61,10 +61,6 @@ struct __darwin_struct_dirent {
 user_ssize_t
 sys_getdirentries64(int dirfd, void *buf, user_size_t bufsize, off_t *position)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getdirentries64(%p, %p, %p, %p)\n", (void *)dirfd,
-			(void *)buf, (void *)bufsize, (void *)position);
-#endif
 	off_t start = lseek(dirfd, 0, SEEK_CUR);
 	if (start == -1) {
 		return err_map(errno);
@@ -125,10 +121,6 @@ done:
 int
 sys_getdirentries(int fd, char *buf, uint32_t count, long *basep)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getdirentries(%p, %p, %p, %p)\n", (void *)fd,
-			(void *)buf, (void *)count, (void *)basep);
-#endif
 	unimplemented();
 }
 
@@ -136,11 +128,5 @@ int
 sys_getdirentriesattr(int fd, void *alist, void *buffer, size_t buffersize,
 		void *count, void *basep, void *newstate, uint64_t options)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "getdirentriesattr(%p, %p, %p, %p, %p, %p, %p, %p)\n",
-			(void *)fd, (void *)alist, (void *)buffer,
-			(void *)buffersize, (void *)count, (void *)basep,
-			(void *)newstate, (void *)options);
-#endif
 	unimplemented();
 }

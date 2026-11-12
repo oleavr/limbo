@@ -34,10 +34,6 @@
 kern_return_t
 clock_get_time(clock_serv_t clock_serv, mach_timespec_t *cur_time)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "clock_get_time(%p, %p)\n", (void *)clock_serv,
-			(void *)cur_time);
-#endif
 	clockid_t id = (clock_serv == ipc_kobject_name(IPC_KOBJECT_CLOCK))
 			? CLOCK_MONOTONIC
 			: CLOCK_REALTIME;
@@ -52,11 +48,6 @@ kern_return_t
 clock_get_attributes(clock_serv_t clock_serv, clock_flavor_t flavor,
 		clock_attr_t clock_attr, mach_msg_type_number_t *clock_attrCnt)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "clock_get_attributes(%p, %p, %p, %p)\n",
-			(void *)clock_serv, (void *)flavor, (void *)clock_attr,
-			(void *)clock_attrCnt);
-#endif
 	unimplemented();
 }
 
@@ -65,10 +56,5 @@ clock_alarm(clock_serv_t clock_serv, alarm_type_t alarm_type,
 		mach_timespec_t alarm_time, clock_reply_t alarm_port,
 		mach_msg_type_name_t alarm_portPoly)
 {
-#ifdef ENABLE_STRACE
-	fprintf(stderr, "clock_alarm(%p, %p, %p, %p, %p)\n", (void *)clock_serv,
-			(void *)alarm_type, (void *)&alarm_time,
-			(void *)alarm_port, (void *)alarm_portPoly);
-#endif
 	unimplemented();
 }
