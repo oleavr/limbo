@@ -72,6 +72,14 @@ thread_current(void)
 	return current;
 }
 
+void
+thread_fork_child(void)
+{
+	current->tid = gettid();
+	pthread_mutex_init(&current->suspend_lock, NULL);
+	pthread_cond_init(&current->resumed, NULL);
+}
+
 struct thread *
 thread_new(thread_continuation_t continuation, void *context)
 {
