@@ -583,6 +583,31 @@ check_tasks(void)
 	CHECK(task_map_corpse_info_64(
 			      task, task, &corpse_info_64, &corpse_size_64)
 			== KERN_INVALID_ARGUMENT);
+
+	task_category_policy_data_t category
+			= {.role = TASK_FOREGROUND_APPLICATION};
+	mach_msg_type_number_t count = TASK_CATEGORY_POLICY_COUNT;
+	boolean_t get_default = FALSE;
+	CHECK(task_policy_get(task, TASK_CATEGORY_POLICY,
+			      (task_policy_t)&category, &count, &get_default)
+			== KERN_SUCCESS);
+	CHECK(category.role == TASK_UNSPECIFIED);
+	struct task_qos_policy qos
+			= {LATENCY_QOS_TIER_0, THROUGHPUT_QOS_TIER_0};
+	count = TASK_QOS_POLICY_COUNT;
+	CHECK(task_policy_get(task, TASK_BASE_QOS_POLICY, (task_policy_t)&qos,
+			      &count, &get_default)
+			== KERN_SUCCESS);
+	CHECK(qos.task_latency_qos_tier == LATENCY_QOS_TIER_UNSPECIFIED);
+	CHECK(qos.task_throughput_qos_tier == THROUGHPUT_QOS_TIER_UNSPECIFIED);
+	count = TASK_QOS_POLICY_COUNT - 1;
+	CHECK(task_policy_get(task, TASK_BASE_QOS_POLICY, (task_policy_t)&qos,
+			      &count, &get_default)
+			== KERN_INVALID_ARGUMENT);
+	count = TASK_QOS_POLICY_COUNT;
+	CHECK(task_policy_get(task, TASK_BASE_LATENCY_QOS_POLICY,
+			      (task_policy_t)&qos, &count, &get_default)
+			== KERN_INVALID_ARGUMENT);
 }
 
 static void
