@@ -91,6 +91,7 @@
 #define FSCALE 2048
 
 #define CTL_SYSCTL_NAME     1
+#define CTL_SYSCTL_NEXT     2
 #define CTL_SYSCTL_NAME2OID 3
 #define CTL_SYSCTL_OIDFMT   4
 
@@ -370,6 +371,10 @@ static int read_procargs2(int32_t pid, void *old, size_t *oldlenp);
 static const struct sysctl_node *lookup_oid(const int *name, uint32_t namelen);
 static int name2oid(
 		const char *name, size_t namelen, void *old, size_t *oldlenp);
+static int next_oid(
+		const int *name, uint32_t namelen, void *old, size_t *oldlenp);
+static bool oid_before(const int *a, uint32_t a_length, const int *b,
+		uint32_t b_length);
 static int oid_format(const int *oid, void *old, size_t *oldlenp);
 static const struct sysctl_node *lookup_name(const char *name, size_t namelen);
 static void node_oid(const struct sysctl_node *node, int oid[2]);
@@ -386,6 +391,10 @@ sys_sysctl(int *name, uint32_t namelen, void *old, size_t *oldlenp, void *new,
 	if (namelen == 2 && name[0] == CTL_UNSPEC
 			&& name[1] == CTL_SYSCTL_NAME2OID) {
 		return name2oid(new, newlen, old, oldlenp);
+	}
+	if (namelen >= 2 && name[0] == CTL_UNSPEC
+			&& name[1] == CTL_SYSCTL_NEXT) {
+		return next_oid(name + 2, namelen - 2, old, oldlenp);
 	}
 	if (namelen == 4 && name[0] == CTL_UNSPEC
 			&& name[1] == CTL_SYSCTL_OIDFMT) {
@@ -645,6 +654,38 @@ name2oid(const char *name, size_t namelen, void *old, size_t *oldlenp)
 	int oid[2];
 	node_oid(node, oid);
 	return read_bytes(oid, sizeof(oid), old, oldlenp);
+}
+
+static int
+next_oid(const int *name, uint32_t namelen, void *old, size_t *oldlenp)
+{
+	int best[2];
+	bool found = false;
+	for (uint32_t i = 0; i < sizeof(nodes) / sizeof(nodes[0]); i++) {
+		int oid[2];
+		node_oid(&nodes[i], oid);
+		if (oid_before(name, namelen, oid, 2)
+				&& (!found || oid_before(oid, 2, best, 2))) {
+			best[0] = oid[0];
+			best[1] = oid[1];
+			found = true;
+		}
+	}
+	if (!found) {
+		return _ENOENT;
+	}
+	return read_bytes(best, sizeof(best), old, oldlenp);
+}
+
+static bool
+oid_before(const int *a, uint32_t a_length, const int *b, uint32_t b_length)
+{
+	for (uint32_t i = 0; i < a_length && i < b_length; i++) {
+		if (a[i] != b[i]) {
+			return (unsigned)a[i] < (unsigned)b[i];
+		}
+	}
+	return a_length < b_length;
 }
 
 static int

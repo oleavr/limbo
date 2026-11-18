@@ -66,6 +66,7 @@
 int proc_get_cpumon_params(pid_t pid, int *percentage, int *interval);
 
 static void check_main_thread_gone(void);
+static void check_sysctl_walk(void);
 static void check_workqueue(void);
 static void signal_done(void *done);
 
@@ -149,6 +150,7 @@ main(void)
 			<= 0);
 
 	check_main_thread_gone();
+	check_sysctl_walk();
 	check_workqueue();
 
 	int value = -1;
@@ -365,6 +367,33 @@ check_main_thread_gone(void)
 
 	int status;
 	CHECK(waitpid(pid, &status, 0) == pid);
+}
+
+static void
+check_sysctl_walk(void)
+{
+	int walk[2 + CTL_MAXNAME] = {CTL_UNSPEC, 2, CTL_KERN};
+	u_int walk_length = 3, visited = 0;
+	bool saw_ostype = false;
+	for (;;) {
+		int next[CTL_MAXNAME];
+		size_t size = sizeof(next);
+		if (sysctl(walk, walk_length, next, &size, NULL, 0) != 0) {
+			break;
+		}
+		u_int length = 2 + (u_int)(size / sizeof(int));
+		int name_oid[2 + CTL_MAXNAME] = {CTL_UNSPEC, 1};
+		memcpy(name_oid + 2, next, size);
+		char name[128];
+		size_t name_size = sizeof(name);
+		CHECK(sysctl(name_oid, length, name, &name_size, NULL, 0) == 0);
+		saw_ostype |= strcmp(name, "kern.ostype") == 0;
+		memcpy(walk + 2, next, size);
+		walk_length = length;
+		CHECK(++visited < 10000);
+	}
+	CHECK(errno == ENOENT);
+	CHECK(visited > 20 && saw_ostype);
 }
 
 static void
