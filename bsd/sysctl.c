@@ -112,11 +112,14 @@
 #define KERN_HOSTNAME   10
 #define KERN_HOSTID     11
 #define KERN_PROC       14
+#define KERN_NGROUPS    18
 #define KERN_BOOTTIME   21
 #define KERN_MAXFILESPERPROC 29
 #define KERN_USRSTACK64 59
 #define KERN_OSVERSION  65
 #define KERN_PROCARGS2  49
+
+#define xnu_NGROUPS_MAX 16
 
 #define EXCLAVES_STATUS_NOT_SUPPORTED 0xff
 
@@ -235,6 +238,8 @@ static const struct sysctl_node nodes[] = {
 		{"kern.maxfilesperproc", {CTL_KERN, KERN_MAXFILESPERPROC},
 				SYSCTL_INT, .number = 184320},
 		{"kern.maxprocperuid", {0, 0}, SYSCTL_INT, .number = 8000},
+		{"kern.ngroups", {CTL_KERN, KERN_NGROUPS}, SYSCTL_INT,
+				.number = xnu_NGROUPS_MAX},
 		{"kern.securelevel", {CTL_KERN, KERN_SECURELVL}, SYSCTL_INT,
 				.number = 0},
 		{"kern.hostname", {CTL_KERN, KERN_HOSTNAME}, SYSCTL_READER,
