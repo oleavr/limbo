@@ -60,6 +60,9 @@ static pthread_t main_thread;
 static int turn;
 static bool by_name;
 
+static atomic_bool spun;
+static atomic_bool times_read;
+
 static void *increment(void *arg);
 static void initialize(void);
 static void *produce(void *arg);
@@ -71,6 +74,10 @@ static void check_identifiers(void);
 static void *wait_for_lock(void *arg);
 static void check_dispatch_queue(void *queue);
 static thread_identifier_info_data_t identifier_info(pthread_t thread);
+static void check_thread_times(void);
+static void *spin_then_wait(void *arg);
+static uint64_t cpu_microseconds(pthread_t thread);
+static uint64_t microseconds(time_value_t time);
 
 extern int __pthread_fchdir(int fd);
 
@@ -155,6 +162,7 @@ main(void)
 	CHECK(strcmp(name, "limbo-main") == 0);
 
 	check_identifiers();
+	check_thread_times();
 	return 0;
 }
 
@@ -310,4 +318,68 @@ identifier_info(pthread_t thread)
 			      &count)
 			== KERN_SUCCESS);
 	return info;
+}
+
+static void
+check_thread_times(void)
+{
+	pthread_t spinner;
+	CHECK(pthread_create(&spinner, NULL, spin_then_wait, NULL) == 0);
+	while (!spun) {
+		usleep(1000);
+	}
+	CHECK(cpu_microseconds(spinner) >= 200000);
+
+	thread_basic_info_data_t info;
+	for (int tries = 0; tries < 1000; tries++) {
+		mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+		CHECK(thread_info(pthread_mach_thread_np(spinner),
+				      THREAD_BASIC_INFO, (thread_info_t)&info,
+				      &count)
+				== KERN_SUCCESS);
+		if (info.run_state == TH_STATE_WAITING) {
+			break;
+		}
+		usleep(1000);
+	}
+	CHECK(info.run_state == TH_STATE_WAITING);
+
+	times_read = true;
+	CHECK(pthread_join(spinner, NULL) == 0);
+}
+
+static void *
+spin_then_wait(void *arg)
+{
+	uint64_t start = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID);
+	volatile uint64_t sum = 0;
+	while (clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - start
+			< 300000000) {
+		for (int i = 0; i != 100000; i++) {
+			sum += i;
+		}
+	}
+	CHECK(cpu_microseconds(pthread_self()) >= 200000);
+	spun = true;
+	while (!times_read) {
+		usleep(1000);
+	}
+	return NULL;
+}
+
+static uint64_t
+cpu_microseconds(pthread_t thread)
+{
+	thread_basic_info_data_t info;
+	mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+	CHECK(thread_info(pthread_mach_thread_np(thread), THREAD_BASIC_INFO,
+			      (thread_info_t)&info, &count)
+			== KERN_SUCCESS);
+	return microseconds(info.user_time) + microseconds(info.system_time);
+}
+
+static uint64_t
+microseconds(time_value_t time)
+{
+	return (uint64_t)time.seconds * 1000000 + time.microseconds;
 }

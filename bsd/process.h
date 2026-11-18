@@ -1,5 +1,6 @@
 /*
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -50,7 +51,15 @@ struct process {
 	uint32_t gid[3];
 };
 
+struct process_thread {
+	char state;
+	uint64_t user_ticks;
+	uint64_t system_ticks;
+};
+
 int process_lookup(int32_t pid, struct process *process);
+int process_thread_lookup(
+		int32_t pid, int32_t tid, struct process_thread *thread);
 int32_t process_terminal(const struct process *process);
 void process_start_time(
 		const struct process *process, uint64_t *sec, uint64_t *usec);
