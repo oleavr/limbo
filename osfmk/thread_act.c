@@ -63,6 +63,11 @@ struct darwin_x86_thread_state64 {
 #define DARWIN_X86_THREAD_STATE64_COUNT                                        \
 	(sizeof(struct darwin_x86_thread_state64) / sizeof(uint32_t))
 
+static const ucontext_t *hold_guest_context(struct thread *thread);
+static kern_return_t get_state(const ucontext_t *context,
+		thread_state_flavor_t flavor, thread_state_t old_state,
+		mach_msg_type_number_t *old_stateCnt);
+static void release_guest_context(struct thread *thread);
 static uint64_t started_thread_id(struct thread *thread);
 
 kern_return_t
@@ -94,10 +99,28 @@ thread_get_state(thread_read_t target_act, thread_state_flavor_t flavor,
 	if (thread == NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
-	const ucontext_t *context = thread_guest_context(thread);
-	if (context == NULL) {
-		return KERN_FAILURE;
+	const ucontext_t *context = hold_guest_context(thread);
+	kern_return_t kr = context != NULL
+			? get_state(context, flavor, old_state, old_stateCnt)
+			: KERN_FAILURE;
+	release_guest_context(thread);
+	return kr;
+}
+
+static const ucontext_t *
+hold_guest_context(struct thread *thread)
+{
+	if (thread == thread_current()) {
+		return thread->trap_context;
 	}
+	thread_suspend_other(thread);
+	return thread_guest_context(thread);
+}
+
+static kern_return_t
+get_state(const ucontext_t *context, thread_state_flavor_t flavor,
+		thread_state_t old_state, mach_msg_type_number_t *old_stateCnt)
+{
 	const mcontext_t *mc = &context->uc_mcontext;
 	switch (flavor) {
 #ifdef __x86_64__
@@ -155,6 +178,14 @@ thread_get_state(thread_read_t target_act, thread_state_flavor_t flavor,
 #endif
 	default:
 		return KERN_INVALID_ARGUMENT;
+	}
+}
+
+static void
+release_guest_context(struct thread *thread)
+{
+	if (thread != thread_current()) {
+		thread_resume_thread(thread);
 	}
 }
 
