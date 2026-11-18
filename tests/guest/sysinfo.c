@@ -67,6 +67,7 @@ int proc_get_cpumon_params(pid_t pid, int *percentage, int *interval);
 
 static void check_main_thread_gone(void);
 static void check_sysctl_walk(void);
+static void check_structure(const char *name, const char *format);
 static void check_workqueue(void);
 static void signal_done(void *done);
 
@@ -151,6 +152,8 @@ main(void)
 
 	check_main_thread_gone();
 	check_sysctl_walk();
+	check_structure("vm.loadavg", "S,loadavg");
+	check_structure("vm.swapusage", "S,xsw_usage");
 	check_workqueue();
 
 	int value = -1;
@@ -394,6 +397,23 @@ check_sysctl_walk(void)
 	}
 	CHECK(errno == ENOENT);
 	CHECK(visited > 20 && saw_ostype);
+}
+
+static void
+check_structure(const char *name, const char *format)
+{
+	int oid[2 + CTL_MAXNAME] = {CTL_UNSPEC, 4};
+	size_t length = CTL_MAXNAME;
+	CHECK(sysctlnametomib(name, oid + 2, &length) == 0);
+	struct {
+		uint32_t kind;
+		char format[60];
+	} description;
+	size_t size = sizeof(description);
+	CHECK(sysctl(oid, 2 + (u_int)length, &description, &size, NULL, 0)
+			== 0);
+	CHECK((description.kind & CTLTYPE) == CTLTYPE_STRUCT);
+	CHECK(strcmp(description.format, format) == 0);
 }
 
 static void
