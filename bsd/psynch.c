@@ -1,5 +1,6 @@
 /*
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -308,11 +309,17 @@ sys_psynch_cvclrprepost(user_addr_t cv, uint32_t cvgen, uint32_t cvugen,
 }
 
 #define PTHRW_COUNT_SHIFT 8
+#define PTHRW_BIT_MASK    0xffu
+#define PTHRW_MAX_READERS PTHRW_COUNT_MASK
 #define PTH_RWL_KBIT      0x01
 #define PTH_RWL_EBIT      0x02
 #define PTH_RWL_WBIT      0x04
 #define PTH_RWL_MBIT      0x40
+#define PTH_RWL_IBIT      0x80
+#define PTHRW_RWL_INIT    PTH_RWL_IBIT
+#define PTH_RWS_SBIT      0x01
 #define PTH_RWS_WSVBIT    0x04
+#define PTHRW_RWS_INIT    PTH_RWS_SBIT
 
 struct rw_waiter {
 	struct rw_waiter *next;
@@ -324,173 +331,344 @@ struct rw_waiter {
 	pthread_cond_t wakeup;
 };
 
-struct rw_prepost {
-	struct rw_prepost *next;
+struct rw_state {
+	struct rw_state *next;
 	user_addr_t rwlock;
-	bool pending;
-	uint32_t lseq;
-	uint32_t sseq;
+	uint32_t pp_count;
+	uint32_t pp_lseq;
+	uint32_t pp_sseq;
 	bool overlap;
-	uint32_t overlap_sseq;
-	uint32_t granted_sseq;
+	bool init_cleared;
+	uint32_t nextseqword;
+	uint32_t lastseqword;
+	uint32_t lastunlockseq;
 };
 
-static struct rw_waiter *rw_waiters;
-static struct rw_prepost *rw_preposts;
+enum rw_prepost_type { RW_PREPOST_NONE, RW_PREPOST_READ, RW_PREPOST_WRITE };
 
-static int rw_lock(user_addr_t rwlock, uint32_t lgenval, bool write);
-static bool rw_all_arrived(user_addr_t rwlock, uint32_t sseq, uint32_t lseq);
-static void rw_grant(user_addr_t rwlock, uint32_t sseq);
-static struct rw_waiter *rw_waiter_at(user_addr_t rwlock, uint32_t seq);
+static struct rw_waiter *rw_waiters;
+static struct rw_state *rw_states;
+
+static int rw_lock(user_addr_t rwlock, uint32_t lgenval, uint32_t rw_wc,
+		bool write);
+static struct rw_state *rw_state(user_addr_t rwlock);
+static bool rw_check_init(struct rw_state *state, uint32_t lgenval);
+static void rw_reset(struct rw_state *state);
+static uint32_t seq_diff(uint32_t upto, uint32_t lowest);
+static bool seq_higher_eq(uint32_t x, uint32_t y);
+static void rw_clear_prepost(struct rw_state *state);
+static uint32_t rw_handle_unlock(struct rw_state *state, uint32_t rw_wc,
+		enum rw_prepost_type prepost, uint32_t premgen, bool *block);
+static struct rw_waiter *rw_lowest(user_addr_t rwlock, bool write);
+static uint32_t rw_count(
+		user_addr_t rwlock, bool write, bool all, uint32_t upto);
+static bool seq_lower_eq(uint32_t x, uint32_t y);
+static bool seq_lower(uint32_t x, uint32_t y);
 static void rw_wake(struct rw_waiter *waiter, uint32_t update);
-static struct rw_prepost **rw_prepost_find(user_addr_t rwlock);
-static struct rw_prepost *rw_state(user_addr_t rwlock);
 
 int
 sys_psynch_rw_rdlock(user_addr_t rwlock, uint32_t lgenval, uint32_t ugenval,
 		uint32_t rw_wc, int flags)
 {
-	pthread_mutex_lock(&lock);
-	struct rw_prepost *state = *rw_prepost_find(rwlock);
-	uint32_t sseq = rw_wc & PTHRW_COUNT_MASK;
-	if (state != NULL && state->overlap && !(rw_wc & PTH_RWS_WSVBIT)
-			&& !(lgenval & PTH_RWL_WBIT)
-			&& ((int32_t)(state->granted_sseq - sseq) >= 0
-					|| (int32_t)(sseq - state->overlap_sseq)
-							<= 0)) {
-		state->granted_sseq += PTHRW_INC;
-		pthread_mutex_unlock(&lock);
-		return PTHRW_INC | PTH_RWL_MBIT;
-	}
-	pthread_mutex_unlock(&lock);
-	return rw_lock(rwlock, lgenval, false);
+	return rw_lock(rwlock, lgenval, rw_wc, false);
 }
 
 int
 sys_psynch_rw_wrlock(user_addr_t rwlock, uint32_t lgenval, uint32_t ugenval,
 		uint32_t rw_wc, int flags)
 {
-	return rw_lock(rwlock, lgenval, true);
+	return rw_lock(rwlock, lgenval, rw_wc, true);
 }
 
 int
 sys_psynch_rw_unlock(user_addr_t rwlock, uint32_t lgenval, uint32_t ugenval,
 		uint32_t rw_wc, int flags)
 {
-	uint32_t lseq = lgenval & PTHRW_COUNT_MASK;
-	uint32_t sseq = rw_wc & PTHRW_COUNT_MASK;
-
+	uint32_t curgen = lgenval & PTHRW_COUNT_MASK;
 	pthread_mutex_lock(&lock);
-	struct rw_prepost *state = rw_state(rwlock);
-	state->overlap = false;
-	state->overlap_sseq = sseq;
-	if (rw_all_arrived(rwlock, sseq, lseq)) {
-		rw_grant(rwlock, sseq);
-	} else {
-		state->pending = true;
-		state->lseq = lseq;
-		state->sseq = sseq;
+	struct rw_state *state = rw_state(rwlock);
+	bool init = rw_check_init(state, lgenval);
+
+	if (state->lastunlockseq != PTHRW_RWL_INIT
+			&& seq_lower(ugenval, state->lastunlockseq)) {
+		pthread_mutex_unlock(&lock);
+		return 0;
 	}
+
+	uint32_t diff = seq_diff(lgenval, ugenval);
+	uint32_t count = rw_count(rwlock, false, false, curgen)
+			+ rw_count(rwlock, true, false, curgen);
+	if (count == 0 || count < diff) {
+		if ((state->pp_sseq & PTH_RWS_SBIT)
+				|| seq_higher_eq(rw_wc, state->pp_sseq)) {
+			state->pp_count = diff - count;
+			state->pp_lseq = curgen;
+			state->pp_sseq = rw_wc;
+		}
+		pthread_mutex_unlock(&lock);
+		return 0;
+	}
+
+	if (init && state->init_cleared) {
+		state->init_cleared = false;
+	}
+	rw_clear_prepost(state);
+	bool block;
+	rw_handle_unlock(state, rw_wc, RW_PREPOST_NONE, 0, &block);
 	pthread_mutex_unlock(&lock);
 	return 0;
 }
 
 static int
-rw_lock(user_addr_t rwlock, uint32_t lgenval, bool write)
+rw_lock(user_addr_t rwlock, uint32_t lgenval, uint32_t rw_wc, bool write)
 {
+	uint32_t lseq = lgenval & PTHRW_COUNT_MASK;
+	pthread_mutex_lock(&lock);
+	struct rw_state *state = rw_state(rwlock);
+	rw_check_init(state, lgenval);
+
+	if (!write && state->overlap && !(rw_wc & PTH_RWS_WSVBIT)
+			&& !(lgenval & PTH_RWL_WBIT)
+			&& (seq_lower_eq(rw_wc, state->nextseqword)
+					|| seq_higher_eq(state->lastseqword,
+							rw_wc))) {
+		state->nextseqword += PTHRW_INC;
+		uint32_t update = PTHRW_INC
+				| (state->nextseqword & PTHRW_BIT_MASK)
+				| PTH_RWL_MBIT;
+		pthread_mutex_unlock(&lock);
+		return (int)update;
+	}
+
+	if (state->pp_count != 0 && seq_lower_eq(lseq, state->pp_lseq)) {
+		state->pp_count--;
+		if (state->pp_count == 0) {
+			uint32_t sseq = state->pp_sseq;
+			rw_clear_prepost(state);
+			state->init_cleared = false;
+			bool block;
+			uint32_t update = rw_handle_unlock(state, sseq,
+					write ? RW_PREPOST_WRITE
+					      : RW_PREPOST_READ,
+					lseq, &block);
+			if (!block) {
+				pthread_mutex_unlock(&lock);
+				return (int)update;
+			}
+		}
+	}
+
 	struct rw_waiter waiter = {
 			.rwlock = rwlock,
-			.seq = lgenval & PTHRW_COUNT_MASK,
+			.seq = lseq,
 			.write = write,
 	};
 	pthread_cond_init(&waiter.wakeup, NULL);
-
-	pthread_mutex_lock(&lock);
 	waiter.next = rw_waiters;
 	rw_waiters = &waiter;
-
-	struct rw_prepost *prepost = *rw_prepost_find(rwlock);
-	if (prepost != NULL && prepost->pending
-			&& rw_all_arrived(
-					rwlock, prepost->sseq, prepost->lseq)) {
-		prepost->pending = false;
-		rw_grant(rwlock, prepost->sseq);
-	}
-
 	while (!waiter.granted) {
 		pthread_cond_wait(&waiter.wakeup, &lock);
 	}
 	pthread_mutex_unlock(&lock);
-
 	pthread_cond_destroy(&waiter.wakeup);
 	return (int)waiter.update;
 }
 
-static bool
-rw_all_arrived(user_addr_t rwlock, uint32_t sseq, uint32_t lseq)
+static struct rw_state *
+rw_state(user_addr_t rwlock)
 {
-	for (uint32_t seq = sseq + PTHRW_INC; (int32_t)(lseq - seq) >= 0;
-			seq += PTHRW_INC) {
-		if (rw_waiter_at(rwlock, seq) == NULL) {
-			return false;
+	for (struct rw_state *state = rw_states; state != NULL;
+			state = state->next) {
+		if (state->rwlock == rwlock) {
+			return state;
 		}
+	}
+	struct rw_state *state = calloc(1, sizeof(*state));
+	state->rwlock = rwlock;
+	rw_reset(state);
+	state->next = rw_states;
+	rw_states = state;
+	return state;
+}
+
+static bool
+rw_check_init(struct rw_state *state, uint32_t lgenval)
+{
+	if (!(lgenval & PTHRW_RWL_INIT)) {
+		return false;
+	}
+	if (!state->init_cleared) {
+		rw_reset(state);
+		state->init_cleared = true;
 	}
 	return true;
 }
 
 static void
-rw_grant(user_addr_t rwlock, uint32_t sseq)
+rw_reset(struct rw_state *state)
 {
-	uint32_t next = sseq + PTHRW_INC;
-	struct rw_waiter *first = rw_waiter_at(rwlock, next);
-	if (first == NULL) {
-		return;
+	state->nextseqword = PTHRW_RWS_INIT;
+	state->overlap = false;
+	rw_clear_prepost(state);
+	state->lastunlockseq = PTHRW_RWL_INIT;
+	state->lastseqword = PTHRW_RWS_INIT;
+}
+
+static uint32_t
+seq_diff(uint32_t upto, uint32_t lowest)
+{
+	uint32_t x = upto & PTHRW_COUNT_MASK, y = lowest & PTHRW_COUNT_MASK;
+	if (x == y) {
+		return 0;
+	}
+	if (seq_lower(x, y)) {
+		uint32_t swap = x;
+		x = y;
+		y = swap;
+	}
+	uint32_t diff = x > y ? x - y : (PTHRW_MAX_READERS - y) + x + PTHRW_INC;
+	return diff >> PTHRW_COUNT_SHIFT;
+}
+
+static bool
+seq_higher_eq(uint32_t x, uint32_t y)
+{
+	return (x & PTHRW_COUNT_MASK) == (y & PTHRW_COUNT_MASK)
+			|| seq_lower(y, x);
+}
+
+static void
+rw_clear_prepost(struct rw_state *state)
+{
+	state->pp_count = 0;
+	state->pp_lseq = 0;
+	state->pp_sseq = PTHRW_RWS_INIT;
+}
+
+static uint32_t
+rw_handle_unlock(struct rw_state *state, uint32_t rw_wc,
+		enum rw_prepost_type prepost, uint32_t premgen, bool *block)
+{
+	user_addr_t rwlock = state->rwlock;
+	*block = true;
+	state->lastseqword = rw_wc;
+	state->lastunlockseq = rw_wc & PTHRW_COUNT_MASK;
+	state->overlap = false;
+
+	struct rw_waiter *first_reader = rw_lowest(rwlock, false);
+	struct rw_waiter *first_writer = rw_lowest(rwlock, true);
+	bool readers = first_reader != NULL || prepost == RW_PREPOST_READ;
+	bool writers = first_writer != NULL || prepost == RW_PREPOST_WRITE;
+	uint32_t low_reader
+			= first_reader != NULL ? first_reader->seq : premgen;
+	if (prepost == RW_PREPOST_READ && first_reader != NULL
+			&& seq_lower(premgen, low_reader)) {
+		low_reader = premgen;
+	}
+	uint32_t low_writer
+			= first_writer != NULL ? first_writer->seq : premgen;
+	if (prepost == RW_PREPOST_WRITE && first_writer != NULL
+			&& seq_lower(premgen, low_writer)) {
+		low_writer = premgen;
+	}
+	if (!readers && !writers) {
+		return 0;
 	}
 
-	bool writers = false;
-	for (struct rw_waiter *w = rw_waiters; w != NULL; w = w->next) {
-		if (w->rwlock == rwlock && !w->granted && w->write
-				&& w != first) {
-			writers = true;
+	uint32_t update = 0;
+	if (readers && (!writers || seq_lower(low_reader, low_writer))) {
+		bool current = false;
+		uint32_t needed;
+		if (writers) {
+			update |= PTH_RWL_WBIT | PTH_RWL_KBIT;
+			needed = rw_count(rwlock, false, false, low_writer);
+			if (prepost == RW_PREPOST_READ
+					&& seq_lower(premgen, low_writer)) {
+				current = true;
+				needed++;
+			}
+		} else {
+			state->overlap = true;
+			needed = rw_count(rwlock, false, true, 0);
+			if (prepost == RW_PREPOST_READ) {
+				current = true;
+				needed++;
+			}
 		}
-	}
-
-	if (first->write) {
-		uint32_t update = PTHRW_INC | PTH_RWL_KBIT | PTH_RWL_EBIT;
-		rw_wake(first, writers ? update | PTH_RWL_WBIT : update);
-		return;
-	}
-
-	uint32_t count = 0;
-	for (uint32_t seq = next;; seq += PTHRW_INC) {
-		struct rw_waiter *w = rw_waiter_at(rwlock, seq);
-		if (w == NULL || w->write) {
-			break;
+		update += needed << PTHRW_COUNT_SHIFT;
+		state->nextseqword = (rw_wc & PTHRW_COUNT_MASK) + update;
+		if (current) {
+			*block = false;
 		}
-		count++;
+		struct rw_waiter *w;
+		while ((w = rw_lowest(rwlock, false)) != NULL
+				&& (!writers
+						|| seq_lower(w->seq,
+								low_writer))) {
+			rw_wake(w, update);
+		}
+		return update;
 	}
-	uint32_t update = count << PTHRW_COUNT_SHIFT;
-	if (writers) {
-		update |= PTH_RWL_WBIT | PTH_RWL_KBIT;
+
+	update = PTHRW_INC | PTH_RWL_KBIT | PTH_RWL_EBIT;
+	if (prepost == RW_PREPOST_WRITE && low_writer == premgen) {
+		*block = false;
+		if (first_writer != NULL) {
+			update |= PTH_RWL_WBIT;
+		}
 	} else {
-		struct rw_prepost *state = rw_state(rwlock);
-		state->overlap = true;
-		state->granted_sseq = sseq + count * PTHRW_INC;
+		if (rw_count(rwlock, true, true, 0) > 1
+				|| prepost == RW_PREPOST_WRITE) {
+			update |= PTH_RWL_WBIT;
+		}
+		rw_wake(first_writer, update);
 	}
-	for (uint32_t i = 0; i < count; i++) {
-		rw_wake(rw_waiter_at(rwlock, next + i * PTHRW_INC), update);
-	}
+	state->nextseqword = (rw_wc & PTHRW_COUNT_MASK) + update;
+	return update;
 }
 
 static struct rw_waiter *
-rw_waiter_at(user_addr_t rwlock, uint32_t seq)
+rw_lowest(user_addr_t rwlock, bool write)
 {
+	struct rw_waiter *lowest = NULL;
 	for (struct rw_waiter *w = rw_waiters; w != NULL; w = w->next) {
-		if (w->rwlock == rwlock && w->seq == seq && !w->granted) {
-			return w;
+		if (w->rwlock == rwlock && !w->granted && w->write == write
+				&& (lowest == NULL
+						|| seq_lower(w->seq,
+								lowest->seq))) {
+			lowest = w;
 		}
 	}
-	return NULL;
+	return lowest;
+}
+
+static uint32_t
+rw_count(user_addr_t rwlock, bool write, bool all, uint32_t upto)
+{
+	uint32_t count = 0;
+	for (struct rw_waiter *w = rw_waiters; w != NULL; w = w->next) {
+		if (w->rwlock == rwlock && !w->granted && w->write == write
+				&& (all || seq_lower_eq(w->seq, upto))) {
+			count++;
+		}
+	}
+	return count;
+}
+
+static bool
+seq_lower_eq(uint32_t x, uint32_t y)
+{
+	return (x & PTHRW_COUNT_MASK) == (y & PTHRW_COUNT_MASK)
+			|| seq_lower(x, y);
+}
+
+static bool
+seq_lower(uint32_t x, uint32_t y)
+{
+	x &= PTHRW_COUNT_MASK;
+	y &= PTHRW_COUNT_MASK;
+	return x < y ? y - x < PTHRW_MAX_READERS / 2
+		     : x - y > PTHRW_MAX_READERS / 2;
 }
 
 static void
@@ -505,27 +683,4 @@ rw_wake(struct rw_waiter *waiter, uint32_t update)
 	waiter->granted = true;
 	waiter->update = update;
 	pthread_cond_signal(&waiter->wakeup);
-}
-
-static struct rw_prepost *
-rw_state(user_addr_t rwlock)
-{
-	struct rw_prepost *state = *rw_prepost_find(rwlock);
-	if (state == NULL) {
-		state = calloc(1, sizeof(*state));
-		state->rwlock = rwlock;
-		state->next = rw_preposts;
-		rw_preposts = state;
-	}
-	return state;
-}
-
-static struct rw_prepost **
-rw_prepost_find(user_addr_t rwlock)
-{
-	struct rw_prepost **link = &rw_preposts;
-	while (*link != NULL && (*link)->rwlock != rwlock) {
-		link = &(*link)->next;
-	}
-	return link;
 }
