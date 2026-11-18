@@ -28,6 +28,7 @@
 
 #include <dispatch/dispatch.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <libproc.h>
 #include <mach/mach.h>
 #include <netinet/in.h>
@@ -36,7 +37,9 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <string.h>
+#include <sys/event.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
@@ -73,6 +76,7 @@ int proc_pidoriginatorinfo(int flavor, void *buffer, int buffersize);
 static void check_main_thread_gone(void);
 static void check_sysctl_walk(void);
 static void check_structure(const char *name, const char *format);
+static void check_kqueue_info(void);
 static void check_workqueue(void);
 static void signal_done(void *done);
 
@@ -160,6 +164,7 @@ main(void)
 	check_sysctl_walk();
 	check_structure("vm.loadavg", "S,loadavg");
 	check_structure("vm.swapusage", "S,xsw_usage");
+	check_kqueue_info();
 	check_workqueue();
 
 	int value = -1;
@@ -434,6 +439,27 @@ check_structure(const char *name, const char *format)
 			== 0);
 	CHECK((description.kind & CTLTYPE) == CTLTYPE_STRUCT);
 	CHECK(strcmp(description.format, format) == 0);
+}
+
+static void
+check_kqueue_info(void)
+{
+	int kq = kqueue();
+	CHECK(kq >= 0);
+	struct kqueue_fdinfo info;
+	CHECK(proc_pidfdinfo(getpid(), kq, PROC_PIDFDKQUEUEINFO, &info,
+			      sizeof(info))
+			== sizeof(info));
+	CHECK(info.pfi.fi_type == PROX_FDTYPE_KQUEUE);
+	CHECK(info.pfi.fi_openflags == (FREAD | FWRITE));
+	CHECK(S_ISFIFO(info.kqueueinfo.kq_stat.vst_mode));
+	CHECK(info.kqueueinfo.kq_stat.vst_blksize == sizeof(struct kevent));
+	errno = 0;
+	CHECK(proc_pidfdinfo(getpid(), STDERR_FILENO, PROC_PIDFDKQUEUEINFO,
+			      &info, sizeof(info))
+			== 0);
+	CHECK(errno == EBADF);
+	CHECK(close(kq) == 0);
 }
 
 static void
