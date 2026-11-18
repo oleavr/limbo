@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -3759,7 +3760,11 @@ sys_thread_selfusage(void)
 {
 	struct timespec time;
 	syscall(SYS_clock_gettime, CLOCK_THREAD_CPUTIME_ID, &time);
-	return (uint64_t)time.tv_sec * 1000000000 + (uint64_t)time.tv_nsec;
+	uint64_t nanoseconds = (uint64_t)time.tv_sec * 1000000000
+			+ (uint64_t)time.tv_nsec;
+	uint32_t numer, denom;
+	commpage_timebase(&numer, &denom);
+	return (uint64_t)((unsigned __int128)nanoseconds * denom / numer);
 }
 
 int
