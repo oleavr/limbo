@@ -317,6 +317,20 @@ sys_workq_kernreturn(int options, user_addr_t item, int affinity, int prio)
 	}
 }
 
+void
+workq_counts(uint32_t *threads, uint32_t *running, uint32_t *blocked)
+{
+	pthread_mutex_lock(&workq.lock);
+	*threads = 0;
+	for (struct workq_thread *wt = workq.threads; wt != NULL;
+			wt = wt->next) {
+		(*threads)++;
+	}
+	*blocked = workq_blocked();
+	*running = *threads - workq.idle - *blocked;
+	pthread_mutex_unlock(&workq.lock);
+}
+
 static void
 workq_schedule(void)
 {

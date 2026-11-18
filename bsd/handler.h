@@ -379,6 +379,7 @@ int sys_bsdthread_register(user_addr_t threadstart, user_addr_t wqthread,
 uint32_t bsdthread_dispatch_queue_offset(void);
 int sys_workq_open(void);
 int sys_workq_kernreturn(int options, user_addr_t item, int affinity, int prio);
+void workq_counts(uint32_t *threads, uint32_t *running, uint32_t *blocked);
 int sys_kevent64(int fd, void *changelist, int nchanges, void *eventlist,
 		int nevents, unsigned int flags, void *timeout);
 uint64_t sys_thread_selfid(void);
