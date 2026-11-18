@@ -2161,41 +2161,85 @@ sys_pathconf(char *path, int name)
 	return result;
 }
 
-#define XNU_PC_CASE_SENSITIVE  11
-#define XNU_PC_CASE_PRESERVING 12
-#define XNU_PC_FILESIZEBITS    18
-#define XNU_PC_SYMLINK_MAX     24
-#define XNU_PC_XATTR_SIZE_BITS 26
-#define XNU_PC_MIN_HOLE_SIZE   27
+#define XNU_PC_NAME_CHARS_MAX       10
+#define XNU_PC_CASE_SENSITIVE       11
+#define XNU_PC_CASE_PRESERVING      12
+#define XNU_PC_EXTENDED_SECURITY_NP 13
+#define XNU_PC_AUTH_OPAQUE_NP       14
+#define XNU_PC_2_SYMLINKS           15
+#define XNU_PC_ALLOC_SIZE_MIN       16
+#define XNU_PC_ASYNC_IO             17
+#define XNU_PC_FILESIZEBITS         18
+#define XNU_PC_PRIO_IO              19
+#define XNU_PC_REC_INCR_XFER_SIZE   20
+#define XNU_PC_REC_MAX_XFER_SIZE    21
+#define XNU_PC_REC_MIN_XFER_SIZE    22
+#define XNU_PC_REC_XFER_ALIGN       23
+#define XNU_PC_SYMLINK_MAX          24
+#define XNU_PC_SYNC_IO              25
+#define XNU_PC_XATTR_SIZE_BITS      26
+#define XNU_PC_MIN_HOLE_SIZE        27
 
 static int
 fpathconf_value(int fd, int name)
 {
 	switch (name) {
+	case XNU_PC_NAME_CHARS_MAX:
+		return 255;
 	case XNU_PC_CASE_SENSITIVE:
 	case XNU_PC_CASE_PRESERVING:
 		return 1;
+	case XNU_PC_EXTENDED_SECURITY_NP:
+	case XNU_PC_AUTH_OPAQUE_NP:
+		return 0;
 	case XNU_PC_XATTR_SIZE_BITS:
 		return 32;
 	case XNU_PC_MIN_HOLE_SIZE:
 		return 1;
 	}
 
-	int linux_name;
+	static const struct {
+		int xnu;
+		int linux_name;
+		long apfs;
+	} names[] = {
+			{XNU_PC_2_SYMLINKS, _PC_2_SYMLINKS, 1},
+			{XNU_PC_ALLOC_SIZE_MIN, _PC_ALLOC_SIZE_MIN, 1},
+			{XNU_PC_ASYNC_IO, _PC_ASYNC_IO, 1},
+			{XNU_PC_FILESIZEBITS, _PC_FILESIZEBITS, 56},
+			{XNU_PC_PRIO_IO, _PC_PRIO_IO, 0},
+			{XNU_PC_REC_INCR_XFER_SIZE, _PC_REC_INCR_XFER_SIZE,
+					4096},
+			{XNU_PC_REC_MAX_XFER_SIZE, _PC_REC_MAX_XFER_SIZE,
+					65536},
+			{XNU_PC_REC_MIN_XFER_SIZE, _PC_REC_MIN_XFER_SIZE, 4096},
+			{XNU_PC_REC_XFER_ALIGN, _PC_REC_XFER_ALIGN, 4096},
+			{XNU_PC_SYMLINK_MAX, _PC_SYMLINK_MAX, 255},
+			{XNU_PC_SYNC_IO, _PC_SYNC_IO, 0},
+	};
+	int linux_name = -1;
+	long apfs = -1;
 	if (name >= 1 && name <= 9) {
 		linux_name = name - 1;
-	} else if (name == XNU_PC_FILESIZEBITS) {
-		linux_name = _PC_FILESIZEBITS;
-	} else if (name == XNU_PC_SYMLINK_MAX) {
-		linux_name = _PC_SYMLINK_MAX;
-	} else {
-		unimplemented();
+	}
+	for (size_t i = 0; i != sizeof(names) / sizeof(names[0]); i++) {
+		if (names[i].xnu == name) {
+			linux_name = names[i].linux_name;
+			apfs = names[i].apfs;
+		}
+	}
+	if (linux_name == -1) {
+		return _EINVAL;
 	}
 
 	errno = 0;
 	long value = fpathconf(fd, linux_name);
 	if (value == -1 && errno != 0) {
 		return err_map(errno);
+	}
+	bool unlimited = value == -1;
+	if (unlimited && apfs != -1) {
+		return (int)apfs;
 	}
 	return value;
 }

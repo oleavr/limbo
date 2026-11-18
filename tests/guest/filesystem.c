@@ -1,5 +1,6 @@
 /*
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -225,6 +226,8 @@ check_attributes(void)
 			      "attributes")
 			== 0);
 	CHECK(pathconf("attributes", _PC_NAME_MAX) >= 255);
+	CHECK(pathconf("attributes", _PC_REC_INCR_XFER_SIZE) > 0);
+	CHECK(pathconf("attributes", 9999) == -1 && errno == EINVAL);
 
 	struct attrlist times_request = {
 			.bitmapcount = ATTR_BIT_MAP_COUNT,
