@@ -76,6 +76,7 @@ int proc_pidoriginatorinfo(int flavor, void *buffer, int buffersize);
 static void check_main_thread_gone(void);
 static void check_sysctl_walk(void);
 static void check_structure(const char *name, const char *format);
+static void check_pipe_info(void);
 static void check_kqueue_info(void);
 static void check_workqueue(void);
 static void signal_done(void *done);
@@ -164,6 +165,7 @@ main(void)
 	check_sysctl_walk();
 	check_structure("vm.loadavg", "S,loadavg");
 	check_structure("vm.swapusage", "S,xsw_usage");
+	check_pipe_info();
 	check_kqueue_info();
 	check_workqueue();
 
@@ -439,6 +441,37 @@ check_structure(const char *name, const char *format)
 			== 0);
 	CHECK((description.kind & CTLTYPE) == CTLTYPE_STRUCT);
 	CHECK(strcmp(description.format, format) == 0);
+}
+
+static void
+check_pipe_info(void)
+{
+	int ends[2];
+	CHECK(pipe(ends) == 0);
+	struct pipe_fdinfo reader, writer;
+	CHECK(proc_pidfdinfo(getpid(), ends[0], PROC_PIDFDPIPEINFO, &reader,
+			      sizeof(reader))
+			== sizeof(reader));
+	CHECK(proc_pidfdinfo(getpid(), ends[1], PROC_PIDFDPIPEINFO, &writer,
+			      sizeof(writer))
+			== sizeof(writer));
+	CHECK(reader.pfi.fi_type == PROX_FDTYPE_PIPE);
+	CHECK(reader.pfi.fi_openflags == FREAD);
+	CHECK(writer.pfi.fi_openflags == FWRITE);
+	CHECK(S_ISFIFO(reader.pipeinfo.pipe_stat.vst_mode));
+	CHECK(reader.pipeinfo.pipe_handle != writer.pipeinfo.pipe_handle);
+	CHECK(reader.pipeinfo.pipe_peerhandle == writer.pipeinfo.pipe_handle);
+	CHECK(writer.pipeinfo.pipe_peerhandle == reader.pipeinfo.pipe_handle);
+	CHECK(close(ends[0]) == 0 && close(ends[1]) == 0);
+
+	int kq = kqueue();
+	CHECK(kq >= 0);
+	errno = 0;
+	CHECK(proc_pidfdinfo(getpid(), kq, PROC_PIDFDPIPEINFO, &reader,
+			      sizeof(reader))
+			== 0);
+	CHECK(errno == EBADF);
+	CHECK(close(kq) == 0);
 }
 
 static void
