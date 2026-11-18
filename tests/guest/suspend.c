@@ -82,12 +82,18 @@ check_running_thread(void)
 	pthread_create(&thread, NULL, spin, NULL);
 	usleep(100000);
 	mach_port_t port = pthread_mach_thread_np(thread);
-	CHECK(thread_suspend(port) == KERN_SUCCESS);
+	uintptr_t pc, sp;
+	stopped_at(port, &pc, &sp);
+	CHECK(pc >= (uintptr_t)spin && pc < (uintptr_t)spin + 64);
 	unsigned long before = counter;
+	usleep(100000);
+	CHECK(counter > before);
+
+	CHECK(thread_suspend(port) == KERN_SUCCESS);
+	before = counter;
 	usleep(100000);
 	CHECK(counter == before);
 
-	uintptr_t pc, sp;
 	stopped_at(port, &pc, &sp);
 	CHECK(pc >= (uintptr_t)spin && pc < (uintptr_t)spin + 64);
 
@@ -117,10 +123,20 @@ check_blocked_thread(void)
 	CHECK(got == 1);
 }
 
+static void
+check_own_thread(void)
+{
+	uintptr_t pc, sp;
+	stopped_at(pthread_mach_thread_np(pthread_self()), &pc, &sp);
+	uintptr_t frame = (uintptr_t)__builtin_frame_address(0);
+	CHECK(sp <= frame && frame - sp < 65536);
+}
+
 int
 main(void)
 {
 	check_running_thread();
 	check_blocked_thread();
+	check_own_thread();
 	return 0;
 }
