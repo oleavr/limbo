@@ -28,6 +28,7 @@
  */
 
 #include <dirent.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <mach/mach.h>
 #include <stdbool.h>
@@ -90,6 +91,7 @@
 #define FWRITE 0x2
 
 #define KEVENT_SIZE 32
+#define PIPE_SIZE   16384
 
 #define SRUN           2
 #define PROC_FLAG_LP64 0x10
@@ -264,6 +266,18 @@ struct kqueue_fdinfo {
 };
 _Static_assert(sizeof(struct kqueue_fdinfo) == 168, "kqueue_fdinfo");
 
+struct pipe_fdinfo {
+	struct proc_fileinfo pfi;
+	struct {
+		struct vinfo_stat pipe_stat;
+		uint64_t pipe_handle;
+		uint64_t pipe_peerhandle;
+		int32_t pipe_status;
+		int32_t rfu_1;
+	} pipeinfo;
+};
+_Static_assert(sizeof(struct pipe_fdinfo) == 184, "pipe_fdinfo");
+
 struct proc_regioninfo {
 	uint32_t pri_protection;
 	uint32_t pri_max_protection;
@@ -312,6 +326,8 @@ static uint32_t file_table_size(int32_t pid);
 static int listfds(int32_t pid, void *buffer, int32_t buffersize);
 static int fdinfo(int32_t pid, uint32_t flavor, int32_t fd, void *buffer,
 		int32_t buffersize);
+static int pipe_fdinfo(
+		int32_t pid, int32_t fd, void *buffer, int32_t buffersize);
 static int kqueue_fdinfo(
 		int32_t pid, int32_t fd, void *buffer, int32_t buffersize);
 static void taskinfo(const struct process *process, struct proc_taskinfo *info);
@@ -850,6 +866,7 @@ fdinfo(int32_t pid, uint32_t flavor, int32_t fd, void *buffer,
 {
 	enum {
 		PROC_PIDFDVNODEPATHINFO = 2,
+		PROC_PIDFDPIPEINFO = 6,
 		PROC_PIDFDKQUEUEINFO = 7,
 	};
 	struct vnode_fdinfowithpath {
@@ -859,6 +876,9 @@ fdinfo(int32_t pid, uint32_t flavor, int32_t fd, void *buffer,
 	_Static_assert(sizeof(struct vnode_fdinfowithpath) == 1200,
 			"vnode_fdinfowithpath");
 
+	if (flavor == PROC_PIDFDPIPEINFO) {
+		return pipe_fdinfo(pid, fd, buffer, buffersize);
+	}
 	if (flavor == PROC_PIDFDKQUEUEINFO) {
 		return kqueue_fdinfo(pid, fd, buffer, buffersize);
 	}
@@ -896,6 +916,42 @@ fdinfo(int32_t pid, uint32_t flavor, int32_t fd, void *buffer,
 		fclose(file);
 	}
 	info->pfi.fi_type = PROX_FDTYPE_VNODE;
+	return sizeof(*info);
+}
+
+static int
+pipe_fdinfo(int32_t pid, int32_t fd, void *buffer, int32_t buffersize)
+{
+	struct pipe_fdinfo *info = buffer;
+	if (buffersize < (int32_t)sizeof(*info)) {
+		return _ENOMEM;
+	}
+	char proc_dir[64 + NAME_MAX], path[80 + NAME_MAX], link[64];
+	process_proc_dir(pid, proc_dir, sizeof(proc_dir));
+	snprintf(path, sizeof(path), "%s/fd/%d", proc_dir, fd);
+	ssize_t length = readlink(path, link, sizeof(link) - 1);
+	link[length > 0 ? length : 0] = '\0';
+	unsigned long inode;
+	if (sscanf(link, "pipe:[%lu]", &inode) != 1) {
+		return _EBADF;
+	}
+	snprintf(path, sizeof(path), "%s/fdinfo/%d", proc_dir, fd);
+	FILE *file = fopen(path, "r");
+	if (file == NULL) {
+		return _EBADF;
+	}
+	unsigned int flags;
+	fscanf(file, "pos: %*d flags: %o", &flags);
+	fclose(file);
+	bool writes = (flags & O_ACCMODE) == O_WRONLY;
+	memset(info, 0, sizeof(*info));
+	info->pfi.fi_openflags = writes ? FWRITE : FREAD;
+	info->pfi.fi_type = PROX_FDTYPE_PIPE;
+	info->pipeinfo.pipe_stat.vst_mode = S_IFIFO | 0660;
+	info->pipeinfo.pipe_stat.vst_nlink = 1;
+	info->pipeinfo.pipe_stat.vst_blksize = PIPE_SIZE;
+	info->pipeinfo.pipe_handle = inode * 2 + writes;
+	info->pipeinfo.pipe_peerhandle = inode * 2 + !writes;
 	return sizeof(*info);
 }
 
