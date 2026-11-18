@@ -713,6 +713,9 @@ oid_format(const int *oid, void *old, size_t *oldlenp)
 		} else if (node->reader == read_loadavg) {
 			kind = CTLTYPE_OPAQUE;
 			format = "S,loadavg";
+		} else if (node->reader == read_swapusage) {
+			kind = CTLTYPE_OPAQUE;
+			format = "S,xsw_usage";
 		} else if (node->reader == read_hostname
 				|| node->reader == read_bootsessionuuid
 				|| node->reader == read_sandbox_sentinel) {
