@@ -761,7 +761,8 @@ task_set_exc_guard_behavior(task_t task, task_exc_guard_behavior_t behavior)
 kern_return_t
 _kernelrpc_mach_task_is_self(task_name_t task, boolean_t *is_self)
 {
-	unimplemented();
+	*is_self = TRUE;
+	return KERN_SUCCESS;
 }
 
 kern_return_t
