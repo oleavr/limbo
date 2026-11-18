@@ -37,6 +37,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -290,6 +291,16 @@ check_identifiers(void)
 	dispatch_queue_t queue = dispatch_queue_create("limbo.threads", NULL);
 	dispatch_sync_f(queue, queue, check_dispatch_queue);
 	dispatch_release(queue);
+
+	pid_t child = fork();
+	if (child == 0) {
+		CHECK(pthread_threadid_np(NULL, &id) == 0);
+		CHECK(identifier_info(pthread_self()).thread_id == id);
+		_exit(0);
+	}
+	int status;
+	CHECK(waitpid(child, &status, 0) == child);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 }
 
 static void *

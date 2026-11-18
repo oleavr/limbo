@@ -221,6 +221,7 @@ sys_fork(void)
 	}
 	if (pid == 0) {
 		syscall_dispatch_enable();
+		thread_fork_child();
 		trace_fork_child();
 		broker_client_reset();
 		signals_fork_child();
