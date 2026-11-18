@@ -206,6 +206,27 @@ check_converted_state(void)
 }
 
 static void
+check_vector_registers(mach_port_t port)
+{
+#ifndef __x86_64__
+	arm_neon_state64_t given = {0}, found;
+	for (int i = 0; i < 32; i++) {
+		given.__v[i] = ((__uint128_t)i << 64) | (0x2000 + i);
+	}
+	CHECK(thread_set_state(port, ARM_NEON_STATE64, (thread_state_t)&given,
+			      ARM_NEON_STATE64_COUNT)
+			== KERN_SUCCESS);
+	usleep(100000);
+	mach_msg_type_number_t count = ARM_NEON_STATE64_COUNT;
+	CHECK(thread_get_state(port, ARM_NEON_STATE64, (thread_state_t)&found,
+			      &count)
+			== KERN_SUCCESS);
+	CHECK(count == ARM_NEON_STATE64_COUNT);
+	CHECK(memcmp(found.__v, given.__v, sizeof(given.__v)) == 0);
+#endif
+}
+
+static void
 check_created_thread(void)
 {
 #ifndef __x86_64__
@@ -246,6 +267,7 @@ check_created_thread(void)
 			== KERN_SUCCESS);
 	CHECK(found.__x[19] != 0);
 	CHECK(found.__x[20] == given.__x[20]);
+	check_vector_registers(port);
 
 	CHECK(thread_terminate(port) == KERN_SUCCESS);
 	usleep(100000);

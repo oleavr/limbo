@@ -30,6 +30,9 @@
 #define _GNU_SOURCE
 #endif
 
+#ifndef __x86_64__
+#include <asm/sigcontext.h>
+#endif
 #include <mach/mach.h>
 #include <sched.h>
 #include <stdio.h>
@@ -63,6 +66,15 @@ struct darwin_arm_unified_thread_state {
 #define DARWIN_ARM_UNIFIED_THREAD_STATE_COUNT                                  \
 	(sizeof(struct darwin_arm_unified_thread_state) / sizeof(uint32_t))
 
+#define DARWIN_ARM_NEON_STATE64 17
+struct darwin_arm_neon_state64 {
+	__uint128_t v[32];
+	uint32_t fpsr;
+	uint32_t fpcr;
+};
+#define DARWIN_ARM_NEON_STATE64_COUNT                                          \
+	(sizeof(struct darwin_arm_neon_state64) / sizeof(uint32_t))
+
 #define DARWIN_X86_THREAD_STATE64 4
 struct darwin_x86_thread_state64 {
 	uint64_t rax, rbx, rcx, rdx, rdi, rsi, rbp, rsp;
@@ -85,6 +97,7 @@ static void release_guest_context(struct thread *thread);
 static kern_return_t set_state(ucontext_t *context,
 		thread_state_flavor_t flavor, thread_state_t new_state,
 		mach_msg_type_number_t new_stateCnt);
+static struct fpsimd_context *fpsimd_of(const ucontext_t *context);
 static bool thread_state_from_darwin(thread_state_flavor_t flavor,
 		const natural_t *in, mach_msg_type_number_t count,
 		struct thread_state *out);
@@ -205,6 +218,20 @@ get_state(const ucontext_t *context, thread_state_flavor_t flavor,
 		*old_stateCnt = DARWIN_ARM_UNIFIED_THREAD_STATE_COUNT;
 		return KERN_SUCCESS;
 	}
+	case DARWIN_ARM_NEON_STATE64: {
+		if (*old_stateCnt < DARWIN_ARM_NEON_STATE64_COUNT) {
+			return KERN_INVALID_ARGUMENT;
+		}
+		const struct fpsimd_context *fpsimd = fpsimd_of(context);
+		struct darwin_arm_neon_state64 neon = {
+				.fpsr = fpsimd->fpsr,
+				.fpcr = fpsimd->fpcr,
+		};
+		memcpy(neon.v, fpsimd->vregs, sizeof(neon.v));
+		memcpy(old_state, &neon, sizeof(neon));
+		*old_stateCnt = DARWIN_ARM_NEON_STATE64_COUNT;
+		return KERN_SUCCESS;
+	}
 #endif
 	default:
 		return KERN_INVALID_ARGUMENT;
@@ -262,6 +289,18 @@ static kern_return_t
 set_state(ucontext_t *context, thread_state_flavor_t flavor,
 		thread_state_t new_state, mach_msg_type_number_t new_stateCnt)
 {
+	if (flavor == DARWIN_ARM_NEON_STATE64) {
+		if (new_stateCnt < DARWIN_ARM_NEON_STATE64_COUNT) {
+			return KERN_INVALID_ARGUMENT;
+		}
+		struct darwin_arm_neon_state64 neon;
+		memcpy(&neon, new_state, sizeof(neon));
+		struct fpsimd_context *fpsimd = fpsimd_of(context);
+		memcpy(fpsimd->vregs, neon.v, sizeof(neon.v));
+		fpsimd->fpsr = neon.fpsr;
+		fpsimd->fpcr = neon.fpcr;
+		return KERN_SUCCESS;
+	}
 	struct thread_state state;
 	if (!thread_state_from_darwin(
 			    flavor, new_state, new_stateCnt, &state)) {
@@ -272,6 +311,16 @@ set_state(ucontext_t *context, thread_state_flavor_t flavor,
 	mc->sp = state.sp;
 	mc->pc = state.pc;
 	return KERN_SUCCESS;
+}
+
+static struct fpsimd_context *
+fpsimd_of(const ucontext_t *context)
+{
+	struct _aarch64_ctx *record = (void *)context->uc_mcontext.__reserved;
+	while (record->magic != FPSIMD_MAGIC) {
+		record = (void *)((uint8_t *)record + record->size);
+	}
+	return (struct fpsimd_context *)record;
 }
 #endif
 
