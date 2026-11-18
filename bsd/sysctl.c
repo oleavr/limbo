@@ -85,7 +85,10 @@
 #define xnu_IPPROTO_IP 0
 #define IPCTL_DEFTTL   3
 
+#define VM_LOADAVG   2
 #define VM_SWAPUSAGE 5
+
+#define FSCALE 2048
 
 #define CTL_SYSCTL_NAME     1
 #define CTL_SYSCTL_NAME2OID 3
@@ -207,6 +210,7 @@ static int read_cpu_packages(void *old, size_t *oldlenp);
 static int read_cpu_frequency(void *old, size_t *oldlenp);
 #endif
 static int read_cpusubtype(void *old, size_t *oldlenp);
+static int read_loadavg(void *old, size_t *oldlenp);
 static int read_swapusage(void *old, size_t *oldlenp);
 static int read_ip_ttl(void *old, size_t *oldlenp);
 static int read_pressure_level(void *old, size_t *oldlenp);
@@ -266,6 +270,8 @@ static const struct sysctl_node nodes[] = {
 
 		{"kern.memorystatus_vm_pressure_level", {0, 0}, SYSCTL_READER,
 				.reader = read_pressure_level},
+		{"vm.loadavg", {CTL_VM, VM_LOADAVG}, SYSCTL_READER,
+				.reader = read_loadavg},
 		{"vm.swapusage", {CTL_VM, VM_SWAPUSAGE}, SYSCTL_READER,
 				.reader = read_swapusage},
 		{"net.inet.ip.ttl", {0, 0}, SYSCTL_READER,
@@ -663,6 +669,9 @@ oid_format(const int *oid, void *old, size_t *oldlenp)
 		if (node->reader == read_boottime) {
 			kind = CTLTYPE_OPAQUE;
 			format = "S,timeval";
+		} else if (node->reader == read_loadavg) {
+			kind = CTLTYPE_OPAQUE;
+			format = "S,loadavg";
 		} else if (node->reader == read_hostname
 				|| node->reader == read_bootsessionuuid
 				|| node->reader == read_sandbox_sentinel) {
@@ -857,6 +866,23 @@ read_memsize(void *old, size_t *oldlenp)
 {
 	int64_t memsize = (int64_t)sysconf(_SC_PHYS_PAGES) * getpagesize();
 	return read_number(memsize, sizeof(int64_t), old, oldlenp);
+}
+
+static int
+read_loadavg(void *old, size_t *oldlenp)
+{
+	struct {
+		uint32_t ldavg[3];
+		int64_t fscale;
+	} load = {.fscale = FSCALE};
+	double averages[3];
+	FILE *file = fopen("/proc/loadavg", "re");
+	fscanf(file, "%lf %lf %lf", &averages[0], &averages[1], &averages[2]);
+	fclose(file);
+	for (int i = 0; i < 3; i++) {
+		load.ldavg[i] = (uint32_t)(averages[i] * FSCALE + 0.5);
+	}
+	return read_bytes(&load, sizeof(load), old, oldlenp);
 }
 
 static int
