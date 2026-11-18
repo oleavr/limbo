@@ -31,7 +31,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <sys/sysinfo.h>
 #include <unistd.h>
 
 #include "ipc.h"
@@ -44,8 +43,18 @@
 #define HOST_CPU_TYPE CPU_TYPE_X86_64
 #endif
 
+struct linux_vm {
+	uint64_t total, free, active, inactive, internal, external;
+	uint64_t faults, pageins, pageouts, swapins, swapouts;
+	uint64_t compressed_pages, compressor_pages;
+};
+
 static kern_return_t host_load(host_info_t host_info_out,
 		mach_msg_type_number_t *host_info_outCnt);
+static void read_linux_vm(struct linux_vm *vm);
+static uint64_t meminfo_bytes(const char *meminfo, const char *key);
+static natural_t truncate_to_32_bit(uint64_t count);
+static uint64_t wired_pages(const struct linux_vm *vm);
 
 kern_return_t
 host_info(host_t host, host_flavor_t flavor, host_info_t host_info_out,
@@ -289,17 +298,17 @@ host_statistics(host_t host_priv, host_flavor_t flavor,
 		unimplemented();
 	}
 
-	struct sysinfo info;
-	sysinfo(&info);
-	natural_t page_size = getpagesize();
-	natural_t total = (uint64_t)info.totalram * info.mem_unit / page_size;
-	natural_t free = (uint64_t)info.freeram * info.mem_unit / page_size;
-
+	struct linux_vm vm;
+	read_linux_vm(&vm);
 	vm_statistics_t statistics = (vm_statistics_t)host_info_out;
 	memset(statistics, 0, sizeof(*statistics));
-	statistics->free_count = free;
-	statistics->active_count = (total - free) / 2;
-	statistics->inactive_count = (total - free) - statistics->active_count;
+	statistics->free_count = truncate_to_32_bit(vm.free);
+	statistics->active_count = truncate_to_32_bit(vm.active);
+	statistics->inactive_count = truncate_to_32_bit(vm.inactive);
+	statistics->wire_count = truncate_to_32_bit(wired_pages(&vm));
+	statistics->pageins = truncate_to_32_bit(vm.pageins);
+	statistics->pageouts = truncate_to_32_bit(vm.pageouts);
+	statistics->faults = truncate_to_32_bit(vm.faults);
 	*host_info_outCnt = HOST_VM_INFO_COUNT;
 	return KERN_SUCCESS;
 }
@@ -349,19 +358,95 @@ host_statistics64(host_t host_priv, host_flavor_t flavor,
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	struct sysinfo info;
-	sysinfo(&info);
-	natural_t page_size = getpagesize();
-	natural_t total = (uint64_t)info.totalram * info.mem_unit / page_size;
-	natural_t free = (uint64_t)info.freeram * info.mem_unit / page_size;
-
+	struct linux_vm vm;
+	read_linux_vm(&vm);
 	vm_statistics64_t statistics = (vm_statistics64_t)host_info64_out;
 	memset(statistics, 0, sizeof(*statistics));
-	statistics->free_count = free;
-	statistics->active_count = (total - free) / 2;
-	statistics->inactive_count = (total - free) - statistics->active_count;
+	statistics->free_count = vm.free;
+	statistics->active_count = vm.active;
+	statistics->inactive_count = vm.inactive;
+	statistics->wire_count = wired_pages(&vm);
+	statistics->pageins = vm.pageins;
+	statistics->pageouts = vm.pageouts;
+	statistics->faults = vm.faults;
+	statistics->swapins = vm.swapins;
+	statistics->swapouts = vm.swapouts;
+	statistics->compressor_page_count = vm.compressor_pages;
+	statistics->total_uncompressed_pages_in_compressor
+			= vm.compressed_pages;
+	statistics->internal_page_count = vm.internal;
+	statistics->external_page_count = vm.external;
 	*host_info64_outCnt = HOST_VM_INFO64_COUNT;
 	return KERN_SUCCESS;
+}
+
+static void
+read_linux_vm(struct linux_vm *vm)
+{
+	memset(vm, 0, sizeof(*vm));
+	uint64_t page = getpagesize();
+	char meminfo[8192];
+	FILE *file = fopen("/proc/meminfo", "re");
+	meminfo[fread(meminfo, 1, sizeof(meminfo) - 1, file)] = '\0';
+	fclose(file);
+	vm->total = meminfo_bytes(meminfo, "MemTotal:") / page;
+	vm->free = meminfo_bytes(meminfo, "MemFree:") / page;
+	vm->active = meminfo_bytes(meminfo, "Active:") / page;
+	vm->inactive = meminfo_bytes(meminfo, "Inactive:") / page;
+	vm->internal = meminfo_bytes(meminfo, "Active(anon):") / page
+			+ meminfo_bytes(meminfo, "Inactive(anon):") / page;
+	vm->external = meminfo_bytes(meminfo, "Active(file):") / page
+			+ meminfo_bytes(meminfo, "Inactive(file):") / page;
+
+	file = fopen("/proc/vmstat", "re");
+	char line[128];
+	while (fgets(line, sizeof(line), file) != NULL) {
+		char key[64];
+		unsigned long long value;
+		sscanf(line, "%63s %llu", key, &value);
+		if (strcmp(key, "pgfault") == 0) {
+			vm->faults = value;
+		} else if (strcmp(key, "pgpgin") == 0) {
+			vm->pageins = value * 1024 / page;
+		} else if (strcmp(key, "pgpgout") == 0) {
+			vm->pageouts = value * 1024 / page;
+		} else if (strcmp(key, "pswpin") == 0) {
+			vm->swapins = value;
+		} else if (strcmp(key, "pswpout") == 0) {
+			vm->swapouts = value;
+		}
+	}
+	fclose(file);
+
+	file = fopen("/sys/block/zram0/mm_stat", "re");
+	if (file != NULL) {
+		unsigned long long original, compressed, used;
+		fscanf(file, "%llu %llu %llu", &original, &compressed, &used);
+		fclose(file);
+		vm->compressed_pages = original / page;
+		vm->compressor_pages = used / page;
+	}
+}
+
+static uint64_t
+meminfo_bytes(const char *meminfo, const char *key)
+{
+	unsigned long long kilobytes;
+	sscanf(strstr(meminfo, key) + strlen(key), " %llu", &kilobytes);
+	return kilobytes * 1024;
+}
+
+static natural_t
+truncate_to_32_bit(uint64_t count)
+{
+	return count > UINT32_MAX ? UINT32_MAX : (natural_t)count;
+}
+
+static uint64_t
+wired_pages(const struct linux_vm *vm)
+{
+	return vm->total - vm->free - vm->active - vm->inactive
+			- vm->compressor_pages;
 }
 
 kern_return_t
