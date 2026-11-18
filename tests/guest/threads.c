@@ -344,6 +344,14 @@ check_thread_times(void)
 	}
 	CHECK(info.run_state == TH_STATE_WAITING);
 
+	task_thread_times_info_data_t live;
+	mach_msg_type_number_t count = TASK_THREAD_TIMES_INFO_COUNT;
+	CHECK(task_info(mach_task_self(), TASK_THREAD_TIMES_INFO,
+			      (task_info_t)&live, &count)
+			== KERN_SUCCESS);
+	CHECK(microseconds(live.user_time) + microseconds(live.system_time)
+			>= 200000);
+
 	times_read = true;
 	CHECK(pthread_join(spinner, NULL) == 0);
 }
