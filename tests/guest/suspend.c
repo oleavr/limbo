@@ -76,6 +76,23 @@ stopped_at(mach_port_t port, uintptr_t *pc, uintptr_t *sp)
 }
 
 static void
+check_unified_state(mach_port_t port, uintptr_t pc, uintptr_t sp)
+{
+#ifndef __x86_64__
+	arm_unified_thread_state_t state;
+	mach_msg_type_number_t count = ARM_UNIFIED_THREAD_STATE_COUNT;
+	CHECK(thread_get_state(port, ARM_THREAD_STATE, (thread_state_t)&state,
+			      &count)
+			== KERN_SUCCESS);
+	CHECK(count == ARM_UNIFIED_THREAD_STATE_COUNT);
+	CHECK(state.ash.flavor == ARM_THREAD_STATE64);
+	CHECK(state.ash.count == ARM_THREAD_STATE64_COUNT);
+	CHECK((uintptr_t)__darwin_arm_thread_state64_get_pc(state.ts_64) == pc);
+	CHECK((uintptr_t)__darwin_arm_thread_state64_get_sp(state.ts_64) == sp);
+#endif
+}
+
+static void
 check_running_thread(void)
 {
 	pthread_t thread;
@@ -96,6 +113,7 @@ check_running_thread(void)
 
 	stopped_at(port, &pc, &sp);
 	CHECK(pc >= (uintptr_t)spin && pc < (uintptr_t)spin + 64);
+	check_unified_state(port, pc, sp);
 
 	CHECK(thread_resume(port) == KERN_SUCCESS);
 	before = counter;

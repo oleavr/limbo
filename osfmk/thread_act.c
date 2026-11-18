@@ -54,6 +54,15 @@ struct darwin_arm_thread_state64 {
 #define DARWIN_ARM_THREAD_STATE64_COUNT                                        \
 	(sizeof(struct darwin_arm_thread_state64) / sizeof(uint32_t))
 
+#define DARWIN_ARM_THREAD_STATE 1
+struct darwin_arm_unified_thread_state {
+	uint32_t flavor;
+	uint32_t count;
+	struct darwin_arm_thread_state64 state64;
+};
+#define DARWIN_ARM_UNIFIED_THREAD_STATE_COUNT                                  \
+	(sizeof(struct darwin_arm_unified_thread_state) / sizeof(uint32_t))
+
 #define DARWIN_X86_THREAD_STATE64 4
 struct darwin_x86_thread_state64 {
 	uint64_t rax, rbx, rcx, rdx, rdi, rsi, rbp, rsp;
@@ -67,6 +76,10 @@ static const ucontext_t *hold_guest_context(struct thread *thread);
 static kern_return_t get_state(const ucontext_t *context,
 		thread_state_flavor_t flavor, thread_state_t old_state,
 		mach_msg_type_number_t *old_stateCnt);
+#ifndef __x86_64__
+static void get_arm_thread_state64(
+		const mcontext_t *mc, struct darwin_arm_thread_state64 *state);
+#endif
 static void release_guest_context(struct thread *thread);
 static uint64_t started_thread_id(struct thread *thread);
 
@@ -162,17 +175,20 @@ get_state(const ucontext_t *context, thread_state_flavor_t flavor,
 		if (*old_stateCnt < DARWIN_ARM_THREAD_STATE64_COUNT) {
 			return KERN_INVALID_ARGUMENT;
 		}
-		struct darwin_arm_thread_state64 *state = (void *)old_state;
-		memset(state, 0, sizeof(*state));
-		memcpy(state->x, mc->regs, sizeof(state->x));
-		state->fp = mc->regs[29];
-		state->lr = mc->regs[30];
-		state->sp = mc->sp;
-		state->pc = mc->pc;
-		state->cpsr = (uint32_t)mc->pstate;
-
-		state->flags = 0x1;
+		get_arm_thread_state64(mc, (void *)old_state);
 		*old_stateCnt = DARWIN_ARM_THREAD_STATE64_COUNT;
+		return KERN_SUCCESS;
+	}
+	case DARWIN_ARM_THREAD_STATE: {
+		if (*old_stateCnt < DARWIN_ARM_UNIFIED_THREAD_STATE_COUNT) {
+			return KERN_INVALID_ARGUMENT;
+		}
+		struct darwin_arm_unified_thread_state *unified
+				= (void *)old_state;
+		unified->flavor = DARWIN_ARM_THREAD_STATE64;
+		unified->count = DARWIN_ARM_THREAD_STATE64_COUNT;
+		get_arm_thread_state64(mc, &unified->state64);
+		*old_stateCnt = DARWIN_ARM_UNIFIED_THREAD_STATE_COUNT;
 		return KERN_SUCCESS;
 	}
 #endif
@@ -180,6 +196,23 @@ get_state(const ucontext_t *context, thread_state_flavor_t flavor,
 		return KERN_INVALID_ARGUMENT;
 	}
 }
+
+#ifndef __x86_64__
+static void
+get_arm_thread_state64(
+		const mcontext_t *mc, struct darwin_arm_thread_state64 *state)
+{
+	memset(state, 0, sizeof(*state));
+	memcpy(state->x, mc->regs, sizeof(state->x));
+	state->fp = mc->regs[29];
+	state->lr = mc->regs[30];
+	state->sp = mc->sp;
+	state->pc = mc->pc;
+	state->cpsr = (uint32_t)mc->pstate;
+
+	state->flags = 0x1;
+}
+#endif
 
 static void
 release_guest_context(struct thread *thread)
