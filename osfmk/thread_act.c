@@ -1,5 +1,6 @@
 /*
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -30,10 +31,12 @@
 #endif
 
 #include <mach/mach.h>
+#include <sched.h>
 #include <stdio.h>
 #include <string.h>
 #include <ucontext.h>
 
+#include "bsd/handler.h"
 #include "ipc.h"
 #include "commpage.h"
 #include "thread.h"
@@ -59,6 +62,8 @@ struct darwin_x86_thread_state64 {
 };
 #define DARWIN_X86_THREAD_STATE64_COUNT                                        \
 	(sizeof(struct darwin_x86_thread_state64) / sizeof(uint32_t))
+
+static uint64_t started_thread_id(struct thread *thread);
 
 kern_return_t
 thread_terminate(mach_port_t target_act)
@@ -224,6 +229,11 @@ thread_info(thread_inspect_t target_act, thread_flavor_t flavor,
 		thread_info_t thread_info_out,
 		mach_msg_type_number_t *thread_info_outCnt)
 {
+	struct thread *thread
+			= ipc_kobject_lookup(target_act, IPC_KOBJECT_THREAD);
+	if (thread == NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
 	switch (flavor) {
 	case THREAD_BASIC_INFO: {
 		if (*thread_info_outCnt < THREAD_BASIC_INFO_COUNT) {
@@ -267,9 +277,37 @@ thread_info(thread_inspect_t target_act, thread_flavor_t flavor,
 		*thread_info_outCnt = POLICY_TIMESHARE_INFO_COUNT;
 		return KERN_SUCCESS;
 	}
+	case THREAD_IDENTIFIER_INFO: {
+		if (*thread_info_outCnt < THREAD_IDENTIFIER_INFO_COUNT) {
+			return KERN_INVALID_ARGUMENT;
+		}
+		uint64_t handle = thread->tsd_base;
+		uint64_t queue = handle == 0
+				? 0
+				: handle + bsdthread_dispatch_queue_offset();
+		thread_identifier_info_t info
+				= (thread_identifier_info_t)thread_info_out;
+		*info = (thread_identifier_info_data_t){
+				.thread_id = started_thread_id(thread),
+				.thread_handle = handle,
+				.dispatch_qaddr = queue,
+		};
+		*thread_info_outCnt = THREAD_IDENTIFIER_INFO_COUNT;
+		return KERN_SUCCESS;
+	}
 	default:
 		unimplemented();
 	}
+}
+
+static uint64_t
+started_thread_id(struct thread *thread)
+{
+	pid_t tid;
+	while ((tid = __atomic_load_n(&thread->tid, __ATOMIC_ACQUIRE)) == 0) {
+		sched_yield();
+	}
+	return (uint64_t)tid;
 }
 
 kern_return_t

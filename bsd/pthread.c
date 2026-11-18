@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -154,6 +155,7 @@ static struct {
 	uint32_t pthread_size;
 	uint32_t tsd_offset;
 	uint32_t mach_thread_self_offset;
+	uint32_t dispatch_queue_offset;
 } registration;
 
 static struct {
@@ -204,6 +206,7 @@ sys_bsdthread_register(user_addr_t threadstart, user_addr_t wqthread,
 	registration.pthread_size = pthread_size;
 	registration.tsd_offset = d->tsd_offset;
 	registration.mach_thread_self_offset = d->mach_thread_self_offset;
+	registration.dispatch_queue_offset = dispatch_queue_offset;
 	if (data_size >= offsetof(struct pthread_registration_data, main_qos)
 					+ sizeof(d->main_qos)) {
 		d->main_qos = MAIN_THREAD_PRIORITY;
@@ -609,6 +612,12 @@ workq_request_kqueue(struct kqueue *kq, uint32_t qos, bool manager)
 	workq.kqueue_requests_tail = &kr->next;
 	workq_schedule();
 	pthread_mutex_unlock(&workq.lock);
+}
+
+uint32_t
+bsdthread_dispatch_queue_offset(void)
+{
+	return registration.dispatch_queue_offset;
 }
 
 uint64_t

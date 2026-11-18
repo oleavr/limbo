@@ -1,5 +1,6 @@
 /*
  * Copyright © 2021 Keegan Saunders
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -33,6 +34,7 @@
 
 #include "handler.h"
 #include "syscall.h"
+#include "thread.h"
 
 #ifdef __x86_64__
 int arch_prctl(int code, unsigned long addr);
@@ -41,6 +43,7 @@ int arch_prctl(int code, unsigned long addr);
 static int
 sys_thread_set_tsd_base(uint64_t thread, uint64_t tsd_base)
 {
+	thread_current()->tsd_base = thread;
 #ifdef __x86_64__
 	arch_prctl(ARCH_SET_GS, thread);
 #else

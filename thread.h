@@ -1,5 +1,6 @@
 /*
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -83,6 +84,7 @@ struct thread {
 	bool workqueue;
 	int trap_depth;
 	_Atomic int64_t trap_since;
+	_Atomic uint64_t tsd_base;
 };
 
 struct thread *thread_current(void);
