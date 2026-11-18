@@ -189,6 +189,16 @@ check_regions(void)
 	CHECK(top.share_mode == SM_EMPTY || top.share_mode == SM_PRIVATE);
 	CHECK(mach_vm_deallocate(mach_task_self(), address, 4096)
 			== KERN_SUCCESS);
+
+#ifdef __arm64__
+	found = 1ULL << 45;
+	vm_region_basic_info_data_64_t basic_64;
+	count = VM_REGION_BASIC_INFO_COUNT_64;
+	CHECK(mach_vm_region(mach_task_self(), &found, &size,
+			      VM_REGION_BASIC_INFO_64,
+			      (vm_region_info_t)&basic_64, &count, &object)
+			== KERN_INVALID_ADDRESS);
+#endif
 }
 
 static void
