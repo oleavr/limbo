@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -45,6 +46,7 @@
 
 #include "commpage.h"
 #include "linker.h"
+#include "osfmk/mach_vm.h"
 #include "shared_cache.h"
 #include "syscall.h"
 #include "sysroot.h"
@@ -113,6 +115,7 @@ reserve_high_address_space(void)
 	close(f);
 	maps[length] = '\0';
 
+	mach_vm_set_guest_limit(GUEST_ADDRESS_LIMIT);
 	uint64_t cursor = GUEST_ADDRESS_LIMIT;
 	for (char *line = maps; *line != '\0';) {
 		char *next = strchrnul(line, '\n');

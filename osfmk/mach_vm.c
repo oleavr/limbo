@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -885,6 +886,8 @@ region_top_info(mach_vm_address_t address, mach_vm_size_t size, bool shared,
 	};
 }
 
+static uint64_t guest_limit = UINT64_MAX;
+
 static bool
 region_find(mach_vm_address_t address, mach_vm_address_t *start,
 		mach_vm_size_t *size, vm_prot_t *protection, bool *shared,
@@ -899,9 +902,9 @@ region_find(mach_vm_address_t address, mach_vm_address_t *start,
 		if (sscanf(line, "%lx-%lx %4s %lx", &low, &high, perms,
 				    &file_offset)
 						== 4
-				&& high > address) {
+				&& high > address && low < guest_limit) {
 			*start = low;
-			*size = high - low;
+			*size = (high < guest_limit ? high : guest_limit) - low;
 			*protection = ((perms[0] == 'r') ? VM_PROT_READ : 0)
 					| ((perms[1] == 'w') ? VM_PROT_WRITE
 							     : 0)
@@ -915,6 +918,12 @@ region_find(mach_vm_address_t address, mach_vm_address_t *start,
 	}
 	fclose(maps);
 	return found;
+}
+
+void
+mach_vm_set_guest_limit(uint64_t limit)
+{
+	guest_limit = limit;
 }
 
 kern_return_t
