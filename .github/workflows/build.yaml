@@ -65,7 +65,7 @@ jobs:
 
     - run: |
         mkdir sysroot
-        tar --zstd -xf sysroot.tar.zst -C sysroot
+        tar --zstd -xpf sysroot.tar.zst -C sysroot
         rm sysroot.tar.zst
       name: Extract sysroot
 

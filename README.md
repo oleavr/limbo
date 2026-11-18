@@ -56,7 +56,7 @@ supported, but must match your architecture.
 writes it as a tar archive to standard output, so it can be run over SSH:
 ```
 mkdir -p $LIMBO_SYSROOT
-ssh $MAC sh -s < etc/make-sysroot | tar -x -C $LIMBO_SYSROOT
+ssh $MAC sh -s < etc/make-sysroot | tar -xp -C $LIMBO_SYSROOT
 ```
 
 The Mac's Xcode must contain x86_64 code, and its license must have been
