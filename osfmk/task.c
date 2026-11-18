@@ -37,6 +37,7 @@
 #include <unistd.h>
 
 #include "bsd/process.h"
+#include "commpage.h"
 #include "ipc.h"
 #include "semaphore.h"
 #include "task.h"
@@ -96,6 +97,7 @@ static kern_return_t memory_and_time_info(task_flavor_t flavor,
 static void live_thread_times(uint64_t *user, uint64_t *system);
 static uint64_t ended_time(
 		uint64_t total, uint64_t live, _Atomic uint64_t *most);
+static uint64_t nanoseconds_to_absolute(uint64_t nanoseconds);
 
 /* Darwin's pages, which the guest's sizes count in */
 #ifdef __x86_64__
@@ -155,6 +157,7 @@ task_info(task_name_t target_task, task_flavor_t flavor,
 	case TASK_EVENTS_INFO:
 	case TASK_POWER_INFO:
 	case TASK_POWER_INFO_V2:
+	case TASK_ABSOLUTETIME_INFO:
 	case TASK_FLAGS_INFO:
 		return memory_and_time_info(flavor, task_info_out,
 				task_info_outCnt);
@@ -227,6 +230,7 @@ memory_and_time_info(task_flavor_t flavor, task_info_t out,
 	uint64_t ended_system = ended_time(system, live_system, &most_system);
 
 	union {
+		struct task_absolutetime_info absolute;
 		struct mach_task_basic_info basic;
 		struct task_basic_info_64_arm basic_64;
 		struct task_vm_info vm;
@@ -274,6 +278,14 @@ memory_and_time_info(task_flavor_t flavor, task_info_t out,
 		time_value(live_user, &info.times.user_time);
 		time_value(live_system, &info.times.system_time);
 		size = TASK_THREAD_TIMES_INFO_COUNT;
+		break;
+	case TASK_ABSOLUTETIME_INFO:
+		info.absolute.total_user = nanoseconds_to_absolute(user);
+		info.absolute.total_system = nanoseconds_to_absolute(system);
+		info.absolute.threads_user = nanoseconds_to_absolute(live_user);
+		info.absolute.threads_system
+				= nanoseconds_to_absolute(live_system);
+		size = TASK_ABSOLUTETIME_INFO_COUNT;
 		break;
 	case TASK_EVENTS_INFO:
 		info.events.faults = (integer_t)rusage.ru_minflt;
@@ -338,6 +350,14 @@ ended_time(uint64_t total, uint64_t live, _Atomic uint64_t *most)
 			&& !atomic_compare_exchange_weak(most, &seen, ended)) {
 	}
 	return ended > seen ? ended : seen;
+}
+
+static uint64_t
+nanoseconds_to_absolute(uint64_t nanoseconds)
+{
+	uint32_t numer, denom;
+	commpage_timebase(&numer, &denom);
+	return (uint64_t)((unsigned __int128)nanoseconds * denom / numer);
 }
 
 static kern_return_t memory_and_time_info(task_flavor_t flavor,
