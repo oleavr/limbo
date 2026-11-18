@@ -42,6 +42,13 @@ __asm__(".text\n"
 	".p2align 2\n"
 	"_spin_in_place:\n"
 	"	b _spin_in_place\n");
+
+void count_in_place(void);
+__asm__(".text\n"
+	".p2align 2\n"
+	"_count_in_place:\n"
+	"	add x19, x19, #1\n"
+	"	b _count_in_place\n");
 #endif
 
 static void *
@@ -227,6 +234,18 @@ check_created_thread(void)
 	CHECK(arm_thread_state64_get_sp(found)
 			== (uintptr_t)stack + sizeof(stack));
 	CHECK(arm_thread_state64_get_fp(found) == (uintptr_t)stack);
+
+	arm_thread_state64_set_pc_fptr(found, count_in_place);
+	found.__x[19] = 0;
+	CHECK(thread_set_state(port, ARM_THREAD_STATE64, (thread_state_t)&found,
+			      ARM_THREAD_STATE64_COUNT)
+			== KERN_SUCCESS);
+	usleep(100000);
+	CHECK(thread_get_state(port, ARM_THREAD_STATE64, (thread_state_t)&found,
+			      &count)
+			== KERN_SUCCESS);
+	CHECK(found.__x[19] != 0);
+	CHECK(found.__x[20] == given.__x[20]);
 
 	CHECK(thread_terminate(port) == KERN_SUCCESS);
 	usleep(100000);

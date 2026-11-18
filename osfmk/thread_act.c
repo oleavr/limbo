@@ -82,6 +82,9 @@ static void get_arm_thread_state64(
 #endif
 static void release_guest_context(struct thread *thread);
 #ifndef __x86_64__
+static kern_return_t set_state(ucontext_t *context,
+		thread_state_flavor_t flavor, thread_state_t new_state,
+		mach_msg_type_number_t new_stateCnt);
 static bool thread_state_from_darwin(thread_state_flavor_t flavor,
 		const natural_t *in, mach_msg_type_number_t count,
 		struct thread_state *out);
@@ -237,8 +240,40 @@ kern_return_t
 thread_set_state(thread_act_t target_act, thread_state_flavor_t flavor,
 		thread_state_t new_state, mach_msg_type_number_t new_stateCnt)
 {
+#ifdef __x86_64__
 	unimplemented();
+#else
+	struct thread *thread
+			= ipc_kobject_lookup(target_act, IPC_KOBJECT_THREAD);
+	if (thread == NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	ucontext_t *context = (ucontext_t *)hold_guest_context(thread);
+	kern_return_t kr = context != NULL
+			? set_state(context, flavor, new_state, new_stateCnt)
+			: KERN_FAILURE;
+	release_guest_context(thread);
+	return kr;
+#endif
 }
+
+#ifndef __x86_64__
+static kern_return_t
+set_state(ucontext_t *context, thread_state_flavor_t flavor,
+		thread_state_t new_state, mach_msg_type_number_t new_stateCnt)
+{
+	struct thread_state state;
+	if (!thread_state_from_darwin(
+			    flavor, new_state, new_stateCnt, &state)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	mcontext_t *mc = &context->uc_mcontext;
+	memcpy(mc->regs, state.regs, sizeof(state.regs));
+	mc->sp = state.sp;
+	mc->pc = state.pc;
+	return KERN_SUCCESS;
+}
+#endif
 
 kern_return_t
 thread_create(task_t parent_task, thread_act_t *child_act)
