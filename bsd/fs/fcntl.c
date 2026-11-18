@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -278,6 +279,7 @@ sys_sys_fcntl(int fd, int cmd, long arg)
 	case _F_RDADVISE:
 	case _F_RDAHEAD:
 	case _F_NOCACHE:
+	case _F_NODIRECT:
 	case _F_SINGLE_WRITER:
 	case _F_SETNOSIGPIPE:
 		return 0;
