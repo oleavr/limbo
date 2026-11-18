@@ -47,6 +47,20 @@ static mach_port_t registered_ports[3];
 static mach_vm_address_t dyld_all_image_info_addr;
 static mach_vm_size_t dyld_all_image_info_size;
 
+struct task_policy_state {
+	uint64_t requested;
+	uint64_t effective;
+	uint64_t pending;
+	uint32_t imp_assertcnt;
+	uint32_t imp_externcnt;
+	uint64_t flags;
+	uint64_t imp_transitions;
+	uint64_t tps_requested_policy;
+	uint64_t tps_effective_policy;
+};
+#define TASK_POLICY_STATE_COUNT                                                \
+	(sizeof(struct task_policy_state) / sizeof(integer_t))
+
 kern_return_t
 task_create(task_t target_task, ledger_array_t ledgers,
 		mach_msg_type_number_t ledgersCnt, boolean_t inherit_memory,
@@ -497,7 +511,29 @@ task_policy_get(task_policy_get_t task, task_policy_flavor_t flavor,
 		task_policy_t policy_info,
 		mach_msg_type_number_t *policy_infoCnt, boolean_t *get_default)
 {
-	unimplemented();
+	mach_msg_type_number_t count;
+	switch (flavor) {
+	case TASK_CATEGORY_POLICY:
+		count = TASK_CATEGORY_POLICY_COUNT;
+		break;
+	case TASK_BASE_QOS_POLICY:
+	case TASK_OVERRIDE_QOS_POLICY:
+		count = TASK_QOS_POLICY_COUNT;
+		break;
+	case TASK_POLICY_STATE:
+		count = TASK_POLICY_STATE_COUNT;
+		break;
+	default:
+		return KERN_INVALID_ARGUMENT;
+	}
+	if (*policy_infoCnt < count) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	if (flavor == TASK_POLICY_STATE && geteuid() != 0) {
+		return KERN_PROTECTION_FAILURE;
+	}
+	memset(policy_info, 0, count * sizeof(integer_t));
+	return KERN_SUCCESS;
 }
 
 kern_return_t
