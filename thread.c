@@ -34,6 +34,7 @@
 #ifdef __x86_64__
 #include <asm/prctl.h>
 #endif
+#include <linux/futex.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -55,11 +56,15 @@ int arch_prctl(int, unsigned long);
 #endif
 
 static __thread struct thread *current;
+static struct thread *all_threads;
+static pthread_mutex_t all_threads_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void *thread_main(void *arg);
 static void thread_destroy(struct thread *thread);
 static void release_exception_actions(struct thread *thread);
 static uint64_t thread_state_tsd_base(const struct thread_state *state);
+static bool outside_guest_code(struct thread *thread);
+static void restart(struct thread *thread);
 static void exit_if_terminated(struct thread *thread);
 
 struct thread *
@@ -78,6 +83,9 @@ thread_fork_child(void)
 	current->tid = gettid();
 	pthread_mutex_init(&current->suspend_lock, NULL);
 	pthread_cond_init(&current->resumed, NULL);
+	pthread_mutex_init(&all_threads_lock, NULL);
+	current->all_next = NULL;
+	all_threads = current;
 }
 
 struct thread *
@@ -90,6 +98,10 @@ thread_new(thread_continuation_t continuation, void *context)
 	thread->context = context;
 	pthread_mutex_init(&thread->suspend_lock, NULL);
 	pthread_cond_init(&thread->resumed, NULL);
+	pthread_mutex_lock(&all_threads_lock);
+	thread->all_next = all_threads;
+	all_threads = thread;
+	pthread_mutex_unlock(&all_threads_lock);
 	return thread;
 }
 
@@ -151,6 +163,7 @@ thread_main(void *arg)
 		sigdelset(&others, SIGTRAP);
 		sigdelset(&others, SIGFPE);
 		sigdelset(&others, thread_suspend_signal());
+		sigdelset(&others, thread_restart_signal());
 		sigdelset(&others, credentials_signal());
 		pthread_sigmask(SIG_BLOCK, &others, NULL);
 	}
@@ -199,6 +212,13 @@ thread_main(void *arg)
 static void
 thread_destroy(struct thread *thread)
 {
+	pthread_mutex_lock(&all_threads_lock);
+	struct thread **link = &all_threads;
+	while (*link != thread) {
+		link = &(*link)->all_next;
+	}
+	*link = thread->all_next;
+	pthread_mutex_unlock(&all_threads_lock);
 	free(thread->parked_context);
 	if (thread->stack_size != 0) {
 		munmap(thread->stack, thread->stack_size);
@@ -237,6 +257,7 @@ thread_state_tsd_base(const struct thread_state *state)
 void
 thread_enter(const struct thread_state *state)
 {
+	thread_current()->guest = true;
 	if (state->gs_base != 0) {
 		arch_prctl(ARCH_SET_GS, state->gs_base);
 	}
@@ -255,6 +276,7 @@ thread_enter(const struct thread_state *state)
 void
 thread_enter(const struct thread_state *state)
 {
+	thread_current()->guest = true;
 	if (state->full) {
 		asm volatile("msr tpidr_el0, %0" ::"r"(state->tpidr));
 		register const struct thread_state *full asm("x16") = state;
@@ -368,6 +390,64 @@ thread_suspend_other(struct thread *thread)
 	}
 	pthread_mutex_unlock(&thread->suspend_lock);
 	return KERN_SUCCESS;
+}
+
+int
+thread_restart_signal(void)
+{
+	return SIGRTMIN + 7;
+}
+
+void
+thread_restart_others(void)
+{
+	struct thread *self = thread_current();
+	pthread_mutex_lock(&all_threads_lock);
+	for (struct thread *thread = all_threads; thread != NULL;
+			thread = thread->all_next) {
+		if (thread != self && thread->guest
+				&& !outside_guest_code(thread)) {
+			restart(thread);
+		}
+	}
+	pthread_mutex_unlock(&all_threads_lock);
+}
+
+static bool
+outside_guest_code(struct thread *thread)
+{
+	pthread_mutex_lock(&thread->suspend_lock);
+	bool outside = thread->trap_context != NULL
+			|| thread->stopped_context != NULL;
+	pthread_mutex_unlock(&thread->suspend_lock);
+	return outside;
+}
+
+static void
+restart(struct thread *thread)
+{
+	uint32_t taken = atomic_load(&thread->restart_acks);
+	if (syscall(SYS_tgkill, getpid(), thread->tid, thread_restart_signal())
+			!= 0) {
+		return;
+	}
+	const struct timespec millisecond = {.tv_nsec = 1000000};
+	for (int tries = 0; tries < 1000; tries++) {
+		syscall(SYS_futex, &thread->restart_acks, FUTEX_WAIT_PRIVATE,
+				taken, &millisecond, NULL, 0);
+		if (atomic_load(&thread->restart_acks) != taken
+				|| outside_guest_code(thread)) {
+			return;
+		}
+	}
+}
+
+void
+thread_restart_taken(void)
+{
+	atomic_fetch_add(&current->restart_acks, 1);
+	syscall(SYS_futex, &current->restart_acks, FUTEX_WAKE_PRIVATE, 1, NULL,
+			NULL, 0);
 }
 
 const void *

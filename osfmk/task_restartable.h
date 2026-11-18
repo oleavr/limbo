@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -38,3 +39,5 @@ typedef struct {
 } task_restartable_range_t;
 
 typedef task_restartable_range_t *task_restartable_range_array_t;
+
+uint64_t task_restartable_recovery(uint64_t pc);

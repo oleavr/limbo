@@ -95,6 +95,9 @@ struct thread {
 	int trap_depth;
 	_Atomic int64_t trap_since;
 	_Atomic uint64_t tsd_base;
+	struct thread *all_next;
+	bool guest;
+	_Atomic uint32_t restart_acks;
 };
 
 struct thread *thread_current(void);
@@ -114,4 +117,7 @@ void thread_stop_if_suspended(void *context);
 void thread_enter_trap(void *context, void **outer);
 void thread_leave_trap(void *context, void *outer);
 int thread_suspend_signal(void);
+int thread_restart_signal(void);
+void thread_restart_others(void);
+void thread_restart_taken(void);
 void __attribute__((noreturn)) thread_exit(void *stack, size_t stack_size);
