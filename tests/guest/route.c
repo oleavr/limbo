@@ -32,6 +32,8 @@
 #include <net/if_dl.h>
 #include <net/route.h>
 #include <netinet/in.h>
+#include <netinet6/in6_var.h>
+#include <netinet6/nd6.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -287,6 +289,12 @@ main(void)
 	conf.ifc_len = (int)first + 1;
 	CHECK(ioctl(d, SIOCGIFCONF, &conf) == 0 && conf.ifc_len == (int)first);
 	CHECK(close(d) == 0);
+
+	int d6 = socket(AF_INET6, SOCK_DGRAM, 0);
+	CHECK(d6 != -1);
+	struct in6_nbrinfo stranger = {.ifname = "lo0"};
+	CHECK(ioctl(d6, SIOCGNBRINFO_IN6, &stranger) == -1 && errno == EINVAL);
+	CHECK(close(d6) == 0);
 
 	printf("route: ok\n");
 	return 0;
