@@ -82,6 +82,7 @@ main(void)
 	int ncpu;
 	size = sizeof(ncpu);
 	CHECK(sysctlbyname("hw.ncpu", &ncpu, &size, NULL, 0) == 0 && ncpu > 0);
+	CHECK(sysconf(_SC_NGROUPS_MAX) == NGROUPS_MAX);
 	int64_t memsize;
 	size = sizeof(memsize);
 	CHECK(sysctlbyname("hw.memsize", &memsize, &size, NULL, 0) == 0);
