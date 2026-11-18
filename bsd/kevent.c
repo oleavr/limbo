@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -110,6 +111,7 @@
 #define NOTE_WL_END_OWNERSHIP  0x00000020
 #define NOTE_WL_DISCOVER_OWNER 0x00000080
 #define NOTE_WL_IGNORE_ESTALE  0x00000100
+#define NOTE_WL_OWNER_ONLY     0x00000200
 
 #define EV_EXTIDX_WL_ADDR  1
 #define EV_EXTIDX_WL_MASK  2
@@ -954,8 +956,10 @@ workloop_touch(struct knote *kn, const struct kevent_qos_s *change)
 	case NOTE_WL_SYNC_WAIT:
 		return 0;
 	case NOTE_WL_SYNC_WAKE:
-		kn->woken = true;
-		pthread_cond_broadcast(&sync_wakeup);
+		if (!(change->fflags & NOTE_WL_OWNER_ONLY)) {
+			kn->woken = true;
+			pthread_cond_broadcast(&sync_wakeup);
+		}
 		return 0;
 	case NOTE_WL_SYNC_IPC:
 		return 0;
