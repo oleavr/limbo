@@ -91,7 +91,13 @@ static uint64_t started_thread_id(struct thread *thread);
 kern_return_t
 thread_terminate(mach_port_t target_act)
 {
-	unimplemented();
+	struct thread *thread
+			= ipc_kobject_lookup(target_act, IPC_KOBJECT_THREAD);
+	if (thread == NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	thread_terminate_thread(thread);
+	return KERN_SUCCESS;
 }
 
 kern_return_t

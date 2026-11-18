@@ -73,6 +73,7 @@ struct thread {
 	bool spawned;
 	bool continuation_pending;
 	bool terminating;
+	bool terminate_requested;
 	void *stack;
 	size_t stack_size;
 	pthread_mutex_t suspend_lock;
@@ -98,6 +99,7 @@ void __attribute__((noreturn)) thread_enter(const struct thread_state *state);
 void __attribute__((noreturn)) thread_block(void);
 void thread_suspend_self(void);
 void thread_resume_thread(struct thread *thread);
+void thread_terminate_thread(struct thread *thread);
 kern_return_t thread_suspend_other(struct thread *thread);
 const void *thread_guest_context(struct thread *thread);
 void thread_stop_if_suspended(void *context);
