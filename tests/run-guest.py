@@ -53,7 +53,8 @@ def skip(reason):
 
 
 def enter_namespace():
-    env = dict(os.environ, LIMBO_TEST_NAMESPACE="1")
+    env = dict(os.environ, LIMBO_TEST_NAMESPACE="1",
+               LIMBO_TEST_UNPRIVILEGED="1")
     if os.environ.get("LIMBO_TEST_USER") is not None and os.geteuid() == 0:
         enter_namespace_as_root()
         return

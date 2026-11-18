@@ -52,6 +52,8 @@ typedef struct {
 #define FSE_ARG_STRING               0x0002
 #define FSE_ARG_DONE                 0xb33f
 
+#define SKIPPED 77
+
 static bool
 created(const uint8_t *buffer, ssize_t length, const char *path)
 {
@@ -117,6 +119,12 @@ main(void)
 		} else {
 			usleep(100000);
 		}
+	}
+	if (!found && getenv("LIMBO_TEST_UNPRIVILEGED") != NULL) {
+		CHECK(unlink(path) == 0);
+		printf("skipping: fanotify marks no file system in a user "
+		       "namespace\n");
+		return SKIPPED;
 	}
 	CHECK(found);
 	CHECK(unlink(path) == 0);
