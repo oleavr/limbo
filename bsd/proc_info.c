@@ -165,6 +165,7 @@ struct proc_taskallinfo {
 #define PROC_PIDTASKINFO    4
 
 #define PROC_PIDPATHINFO 11
+#define PROC_PIDREGIONINFO      7
 #define PROC_PIDVNODEPATHINFO   9
 #define PROC_PIDREGIONPATHINFO2 22
 #define PROC_PIDLISTFILEPORTS   14
@@ -252,8 +253,11 @@ static bool vnode_info_path(
 		const char *proc_link, struct vnode_info_path *info);
 static void fill_vnode_info(const char *file, const struct stat *st,
 		struct vnode_info_path *info);
-static bool region_with_path(int32_t pid, uint64_t address,
+static bool region_with_path(int32_t pid, uint64_t address, bool files_only,
 		struct proc_regionwithpathinfo *info);
+static void fill_region_info(struct proc_regioninfo *region,
+		unsigned long start, unsigned long end, const char *perms,
+		unsigned long offset);
 static void uniqidentifierinfo(const struct process *process,
 		struct proc_uniqidentifierinfo *info);
 static void bsdinfo(const struct process *process, struct proc_bsdinfo *info);
@@ -413,8 +417,20 @@ pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, user_addr_t buffer,
 		if (buffersize < (int32_t)sizeof(*info)) {
 			return _ENOMEM;
 		}
-		return region_with_path(pid, arg, info) ? (int)sizeof(*info)
-							: _EINVAL;
+		return region_with_path(pid, arg, true, info)
+				? (int)sizeof(*info)
+				: _EINVAL;
+	}
+	case PROC_PIDREGIONINFO: {
+		struct proc_regionwithpathinfo region;
+		if (buffersize < (int32_t)sizeof(region.prp_prinfo)) {
+			return _ENOMEM;
+		}
+		if (!region_with_path(pid, arg, false, &region)) {
+			return _EINVAL;
+		}
+		memcpy(buffer, &region.prp_prinfo, sizeof(region.prp_prinfo));
+		return sizeof(region.prp_prinfo);
 	}
 	case PROC_PIDLISTFILEPORTS:
 		return 0;
@@ -900,7 +916,7 @@ fill_vnode_info(const char *file, const struct stat *st,
 }
 
 static bool
-region_with_path(int32_t pid, uint64_t address,
+region_with_path(int32_t pid, uint64_t address, bool files_only,
 		struct proc_regionwithpathinfo *info)
 {
 	char dir[64 + NAME_MAX], maps_path[80 + NAME_MAX];
@@ -921,25 +937,33 @@ region_with_path(int32_t pid, uint64_t address,
 		line[strcspn(line, "\n")] = '\0';
 		const char *file = line + name;
 		struct stat st;
-		if (name == 0 || end <= address || file[0] != '/'
-				|| strstr(file, " (deleted)") != NULL
-				|| stat(file, &st) != 0) {
+		if (name == 0 || end <= address) {
 			continue;
 		}
 		memset(info, 0, sizeof(*info));
-		fill_vnode_info(file, &st, &info->prp_vip);
-		struct proc_regioninfo *region = &info->prp_prinfo;
-		region->pri_protection = (perms[0] == 'r' ? 1 : 0)
-				| (perms[1] == 'w' ? 2 : 0)
-				| (perms[2] == 'x' ? 4 : 0);
-		region->pri_max_protection = 7;
-		region->pri_offset = offset;
-		region->pri_share_mode
-				= perms[3] == 's' ? SM_SHARED : SM_PRIVATE;
-		region->pri_address = start;
-		region->pri_size = end - start;
+		if (files_only) {
+			if (file[0] != '/' || strstr(file, " (deleted)") != NULL
+					|| stat(file, &st) != 0) {
+				continue;
+			}
+			fill_vnode_info(file, &st, &info->prp_vip);
+		}
+		fill_region_info(&info->prp_prinfo, start, end, perms, offset);
 		found = true;
 	}
 	fclose(maps);
 	return found;
+}
+
+static void
+fill_region_info(struct proc_regioninfo *region, unsigned long start,
+		unsigned long end, const char *perms, unsigned long offset)
+{
+	region->pri_protection = (perms[0] == 'r' ? 1 : 0)
+			| (perms[1] == 'w' ? 2 : 0) | (perms[2] == 'x' ? 4 : 0);
+	region->pri_max_protection = 7;
+	region->pri_offset = offset;
+	region->pri_share_mode = perms[3] == 's' ? SM_SHARED : SM_PRIVATE;
+	region->pri_address = start;
+	region->pri_size = end - start;
 }
