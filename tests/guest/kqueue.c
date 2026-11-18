@@ -1,5 +1,6 @@
 /*
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -26,6 +27,7 @@
  */
 
 #include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <sys/event.h>
@@ -121,6 +123,18 @@ main(void)
 	CHECK(kevent(inner, NULL, 0, events, 4, &zero) == 1);
 	CHECK(events[0].filter == EVFILT_USER);
 	CHECK(kevent(outer, NULL, 0, events, 4, &zero) == 0);
+
+	CHECK(kevent(inner, changes, 1, NULL, 0, NULL) == 0);
+	CHECK(kevent(outer, NULL, 0, events, 4, &zero) == 1);
+	CHECK(kevent(inner, NULL, 0, events, 1, &zero) == 1);
+	CHECK(kevent(outer, NULL, 0, events, 4, &zero) == 0);
+	EV_SET(&changes[0], 8, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, NULL);
+	CHECK(kevent(inner, changes, 1, NULL, 0, NULL) == 0);
+	CHECK(kevent(outer, NULL, 0, events, 4, &zero) == 0);
+	EV_SET(&changes[0], SIGTERM, EVFILT_SIGNAL, EV_ADD, 0, 0, NULL);
+	CHECK(kevent(inner, changes, 1, NULL, 0, NULL) == 0);
+	struct pollfd watch = {.fd = inner, .events = POLLIN};
+	CHECK(poll(&watch, 1, 0) == 0);
 	CHECK(close(outer) == 0 && close(inner) == 0);
 
 	enum { CHILDREN = 8 };
