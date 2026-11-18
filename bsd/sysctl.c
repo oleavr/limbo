@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -112,6 +113,8 @@
 #define KERN_USRSTACK64 59
 #define KERN_OSVERSION  65
 #define KERN_PROCARGS2  49
+
+#define EXCLAVES_STATUS_NOT_SUPPORTED 0xff
 
 #define KERN_PROC_ALL     0
 #define KERN_PROC_PID     1
@@ -253,6 +256,9 @@ static const struct sysctl_node nodes[] = {
 		{"kern.osvariant_status", {0, 0}, SYSCTL_QUAD,
 				.number = (int64_t)8070732011310449290ULL},
 		{"kern.willshutdown", {0, 0}, SYSCTL_INT, .number = 0},
+
+		{"kern.exclaves_status", {0, 0}, SYSCTL_INT,
+				.number = EXCLAVES_STATUS_NOT_SUPPORTED},
 
 		{"kern.wq_max_threads", {0, 0}, SYSCTL_INT, .number = 512},
 		{"kern.wq_max_constrained_threads", {0, 0}, SYSCTL_INT,

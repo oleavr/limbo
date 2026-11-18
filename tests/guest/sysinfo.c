@@ -53,6 +53,8 @@
 #define HOST_MACHINE  "x86_64"
 #endif
 
+#define EXCLAVES_STATUS_NOT_SUPPORTED 0xff
+
 #ifndef PROC_PIDREGIONPATHINFO2
 #define PROC_PIDREGIONPATHINFO2 22
 #endif
@@ -107,6 +109,12 @@ main(void)
 			      &size, NULL, 0)
 			== 0);
 	CHECK(pressure == 1 || pressure == 2 || pressure == 4);
+
+	int exclaves = 0;
+	size = sizeof(exclaves);
+	CHECK(sysctlbyname("kern.exclaves_status", &exclaves, &size, NULL, 0)
+			== 0);
+	CHECK(exclaves == EXCLAVES_STATUS_NOT_SUPPORTED);
 
 	struct proc_vnodepathinfo vnodes;
 	CHECK(proc_pidinfo(getpid(), PROC_PIDVNODEPATHINFO, 0, &vnodes,
