@@ -290,6 +290,12 @@ main(void)
 	double loads[3] = {-1, -1, -1};
 	CHECK(getloadavg(loads, 3) == 3);
 	CHECK(loads[0] >= 0 && loads[1] >= 0 && loads[2] >= 0);
+	host_load_info_data_t load;
+	mach_msg_type_number_t load_count = HOST_LOAD_INFO_COUNT;
+	CHECK(host_statistics(mach_host_self(), HOST_LOAD_INFO,
+			      (host_info_t)&load, &load_count)
+			== KERN_SUCCESS);
+	CHECK(load.avenrun[0] >= 0 && load.mach_factor[0] >= 0);
 	return 0;
 }
 

@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -42,6 +43,9 @@
 #else
 #define HOST_CPU_TYPE CPU_TYPE_X86_64
 #endif
+
+static kern_return_t host_load(host_info_t host_info_out,
+		mach_msg_type_number_t *host_info_outCnt);
 
 kern_return_t
 host_info(host_t host, host_flavor_t flavor, host_info_t host_info_out,
@@ -278,6 +282,9 @@ host_statistics(host_t host_priv, host_flavor_t flavor,
 	if (flavor == HOST_CPU_LOAD_INFO) {
 		return host_cpu_load(host_info_out, host_info_outCnt);
 	}
+	if (flavor == HOST_LOAD_INFO) {
+		return host_load(host_info_out, host_info_outCnt);
+	}
 	if (flavor != HOST_VM_INFO) {
 		unimplemented();
 	}
@@ -294,6 +301,27 @@ host_statistics(host_t host_priv, host_flavor_t flavor,
 	statistics->active_count = (total - free) / 2;
 	statistics->inactive_count = (total - free) - statistics->active_count;
 	*host_info_outCnt = HOST_VM_INFO_COUNT;
+	return KERN_SUCCESS;
+}
+
+static kern_return_t
+host_load(host_info_t host_info_out, mach_msg_type_number_t *host_info_outCnt)
+{
+	if (*host_info_outCnt < HOST_LOAD_INFO_COUNT) {
+		return KERN_FAILURE;
+	}
+	double averages[3];
+	FILE *file = fopen("/proc/loadavg", "re");
+	fscanf(file, "%lf %lf %lf", &averages[0], &averages[1], &averages[2]);
+	fclose(file);
+	long cpus = sysconf(_SC_NPROCESSORS_ONLN);
+	host_load_info_t load = (host_load_info_t)host_info_out;
+	for (int i = 0; i < 3; i++) {
+		load->avenrun[i] = (integer_t)(averages[i] * LOAD_SCALE + 0.5);
+		double idle = averages[i] < cpus ? cpus - averages[i] : 0;
+		load->mach_factor[i] = (integer_t)(idle * LOAD_SCALE);
+	}
+	*host_info_outCnt = HOST_LOAD_INFO_COUNT;
 	return KERN_SUCCESS;
 }
 
