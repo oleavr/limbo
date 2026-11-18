@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -57,6 +58,7 @@ static __thread struct thread *current;
 
 static void *thread_main(void *arg);
 static void thread_destroy(struct thread *thread);
+static uint64_t thread_state_tsd_base(const struct thread_state *state);
 
 struct thread *
 thread_current(void)
@@ -88,6 +90,7 @@ thread_start(struct thread *thread, const struct thread_state *state)
 	thread->continuation_pending = state == NULL;
 	if (state != NULL) {
 		thread->state = *state;
+		thread->tsd_base = thread_state_tsd_base(state);
 	}
 
 	pthread_attr_t attr;
@@ -176,6 +179,7 @@ thread_main(void *arg)
 			return NULL;
 		}
 	}
+	thread->tsd_base = thread_state_tsd_base(&thread->state);
 #ifndef __x86_64__
 	syscall_set_guest_thread_pointer(thread->state.tpidr);
 #endif
@@ -193,6 +197,16 @@ thread_destroy(struct thread *thread)
 	ipc_port_deallocate(thread->port);
 	current = NULL;
 	free(thread);
+}
+
+static uint64_t
+thread_state_tsd_base(const struct thread_state *state)
+{
+#ifdef __x86_64__
+	return state->gs_base;
+#else
+	return state->tpidr;
+#endif
 }
 
 #ifdef __x86_64__

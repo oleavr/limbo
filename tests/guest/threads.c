@@ -1,5 +1,6 @@
 /*
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -25,8 +26,10 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <dispatch/dispatch.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <mach/mach.h>
 #include <pthread.h>
 #include <pthread/qos.h>
 #include <stdatomic.h>
@@ -64,6 +67,10 @@ static void *read_and_write(void *arg);
 static void *change_directory(void *arg);
 static void *take_turns(void *arg);
 static void hand_over(pthread_t to);
+static void check_identifiers(void);
+static void *wait_for_lock(void *arg);
+static void check_dispatch_queue(void *queue);
+static thread_identifier_info_data_t identifier_info(pthread_t thread);
 
 extern int __pthread_fchdir(int fd);
 
@@ -143,6 +150,8 @@ main(void)
 	CHECK(pthread_setname_np("limbo-main") == 0);
 	CHECK(pthread_getname_np(pthread_self(), name, sizeof(name)) == 0);
 	CHECK(strcmp(name, "limbo-main") == 0);
+
+	check_identifiers();
 	return 0;
 }
 
@@ -245,4 +254,57 @@ change_directory(void *arg)
 	CHECK(getcwd(own, sizeof(own)) != NULL);
 	CHECK(strcmp(own, process) == 0);
 	return NULL;
+}
+
+static void
+check_identifiers(void)
+{
+	thread_identifier_info_data_t info = identifier_info(pthread_self());
+	uint64_t id;
+	CHECK(pthread_threadid_np(NULL, &id) == 0);
+	CHECK(info.thread_id == id);
+	CHECK(*(pthread_t *)info.thread_handle == pthread_self());
+
+	pthread_t waiter;
+	pthread_mutex_lock(&lock);
+	CHECK(pthread_create(&waiter, NULL, wait_for_lock, NULL) == 0);
+	info = identifier_info(waiter);
+	CHECK(*(pthread_t *)info.thread_handle == waiter);
+	pthread_mutex_unlock(&lock);
+	void *waiter_id;
+	CHECK(pthread_join(waiter, &waiter_id) == 0);
+	CHECK(info.thread_id == (uint64_t)waiter_id);
+
+	dispatch_queue_t queue = dispatch_queue_create("limbo.threads", NULL);
+	dispatch_sync_f(queue, queue, check_dispatch_queue);
+	dispatch_release(queue);
+}
+
+static void *
+wait_for_lock(void *arg)
+{
+	uint64_t id;
+	CHECK(pthread_threadid_np(NULL, &id) == 0);
+	pthread_mutex_lock(&lock);
+	pthread_mutex_unlock(&lock);
+	return (void *)id;
+}
+
+static void
+check_dispatch_queue(void *queue)
+{
+	thread_identifier_info_data_t info = identifier_info(pthread_self());
+	CHECK(*(void **)info.dispatch_qaddr == queue);
+}
+
+static thread_identifier_info_data_t
+identifier_info(pthread_t thread)
+{
+	thread_identifier_info_data_t info;
+	mach_msg_type_number_t count = THREAD_IDENTIFIER_INFO_COUNT;
+	CHECK(thread_info(pthread_mach_thread_np(thread),
+			      THREAD_IDENTIFIER_INFO, (thread_info_t)&info,
+			      &count)
+			== KERN_SUCCESS);
+	return info;
 }

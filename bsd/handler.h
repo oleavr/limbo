@@ -1,5 +1,6 @@
 /*
  * Copyright © 2021 Keegan Saunders
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -375,6 +376,7 @@ int sys_lchown(user_addr_t path, void *owner, void *group);
 int sys_bsdthread_register(user_addr_t threadstart, user_addr_t wqthread,
 		uint32_t pthread_size, user_addr_t data, uint32_t data_size,
 		uint32_t dispatch_queue_offset);
+uint32_t bsdthread_dispatch_queue_offset(void);
 int sys_workq_open(void);
 int sys_workq_kernreturn(int options, user_addr_t item, int affinity, int prio);
 int sys_kevent64(int fd, void *changelist, int nchanges, void *eventlist,
