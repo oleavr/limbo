@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -60,6 +61,7 @@
 #include "bsd/xnu-errno.h"
 #include "mdep/handler.h"
 #include "osfmk/handler.h"
+#include "osfmk/task_restartable.h"
 #include "syscall.h"
 #include "thread.h"
 #include "trace.h"
@@ -112,6 +114,7 @@ static uintptr_t vdso_start, vdso_end;
 static void find_limbo_text(void);
 static bool in_limbo(uint64_t pc);
 static void handle_suspend(int sig, siginfo_t *info, void *ucontext);
+static void handle_restart(int sig, siginfo_t *info, void *ucontext);
 
 #ifndef __x86_64__
 #ifndef SA_RESTORER
@@ -210,6 +213,17 @@ handle_suspend(int sig, siginfo_t *info, void *ucontext)
 		thread_stop_if_suspended(uc);
 	}
 }
+
+static void
+handle_restart(int sig, siginfo_t *info, void *ucontext)
+{
+	ucontext_t *uc = ucontext;
+	greg_t *pc = &uc->uc_mcontext.gregs[REG_RIP];
+	if (!in_limbo(*pc)) {
+		*pc = (greg_t)task_restartable_recovery((uint64_t)*pc);
+	}
+	thread_restart_taken();
+}
 #endif
 
 int
@@ -248,6 +262,12 @@ syscall_handler_install(void)
 	suspend.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART | SA_RESTORER;
 	suspend.sa_restorer = limbo_rt_sigreturn;
 	sigaction(thread_suspend_signal(), &suspend, NULL);
+
+	struct sigaction restart = {0};
+	restart.sa_sigaction = handle_restart;
+	restart.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART | SA_RESTORER;
+	restart.sa_restorer = limbo_rt_sigreturn;
+	sigaction(thread_restart_signal(), &restart, NULL);
 #endif
 #ifdef __x86_64__
 
@@ -257,6 +277,10 @@ syscall_handler_install(void)
 	suspend.sa_sigaction = handle_suspend;
 	suspend.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART;
 	sigaction(thread_suspend_signal(), &suspend, NULL);
+	struct sigaction restart = {0};
+	restart.sa_sigaction = handle_restart;
+	restart.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART;
+	sigaction(thread_restart_signal(), &restart, NULL);
 #endif
 	credentials_init();
 	return 0;
@@ -321,6 +345,18 @@ handle_suspend(int sig, siginfo_t *info, void *ucontext)
 	if (!in_limbo(uc->uc_mcontext.pc)) {
 		thread_stop_if_suspended(uc);
 	}
+	asm volatile("msr tpidr_el0, %0" ::"r"(entry_pointer));
+}
+
+__attribute__((no_stack_protector)) static void
+handle_restart(int sig, siginfo_t *info, void *ucontext)
+{
+	mcontext_t *mc = &((ucontext_t *)ucontext)->uc_mcontext;
+	uint64_t entry_pointer = enter_limbo();
+	if (!in_limbo(mc->pc)) {
+		mc->pc = task_restartable_recovery(mc->pc);
+	}
+	thread_restart_taken();
 	asm volatile("msr tpidr_el0, %0" ::"r"(entry_pointer));
 }
 #endif
