@@ -36,6 +36,7 @@
 #include <mach/mach.h>
 #include <sched.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <ucontext.h>
 
@@ -103,6 +104,14 @@ static bool thread_state_from_darwin(thread_state_flavor_t flavor,
 		struct thread_state *out);
 #endif
 static uint64_t started_thread_id(struct thread *thread);
+static void handlers_of(struct thread *thread, exception_mask_t mask,
+		exception_mask_array_t masks, mach_msg_type_number_t *count,
+		exception_handler_array_t handlers,
+		exception_behavior_array_t behaviors,
+		exception_flavor_array_t flavors);
+static void set_handlers(struct thread *thread, exception_mask_t mask,
+		mach_port_t new_port, exception_behavior_t behavior,
+		thread_state_flavor_t flavor, bool keep_old);
 
 kern_return_t
 thread_terminate(mach_port_t target_act)
@@ -531,6 +540,12 @@ thread_set_exception_ports(thread_act_t thread, exception_mask_t exception_mask,
 		mach_port_t new_port, exception_behavior_t behavior,
 		thread_state_flavor_t new_flavor)
 {
+	struct thread *target = ipc_kobject_lookup(thread, IPC_KOBJECT_THREAD);
+	if (target == NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	set_handlers(target, exception_mask, new_port, behavior, new_flavor,
+			false);
 	return KERN_SUCCESS;
 }
 
@@ -541,7 +556,12 @@ thread_get_exception_ports(thread_act_t thread, exception_mask_t exception_mask,
 		exception_behavior_array_t old_behaviors,
 		exception_flavor_array_t old_flavors)
 {
-	*masksCnt = 0;
+	struct thread *target = ipc_kobject_lookup(thread, IPC_KOBJECT_THREAD);
+	if (target == NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	handlers_of(target, exception_mask, masks, masksCnt, old_handlers,
+			old_behaviors, old_flavors);
 	return KERN_SUCCESS;
 }
 
@@ -554,7 +574,81 @@ thread_swap_exception_ports(thread_act_t thread,
 		exception_behavior_array_t old_behaviors,
 		exception_flavor_array_t old_flavors)
 {
-	unimplemented();
+	struct thread *target = ipc_kobject_lookup(thread, IPC_KOBJECT_THREAD);
+	if (target == NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	handlers_of(target, exception_mask, masks, masksCnt, old_handlers,
+			old_behaviors, old_flavors);
+	set_handlers(target, exception_mask, new_port, behavior, new_flavor,
+			true);
+	return KERN_SUCCESS;
+}
+
+static void
+handlers_of(struct thread *thread, exception_mask_t mask,
+		exception_mask_array_t masks, mach_msg_type_number_t *count,
+		exception_handler_array_t handlers,
+		exception_behavior_array_t behaviors,
+		exception_flavor_array_t flavors)
+{
+	if (thread->exception_actions == NULL) {
+		*count = 0;
+		return;
+	}
+	mach_msg_type_number_t found = 0;
+	for (int type = FIRST_EXCEPTION; type < EXC_TYPES_COUNT; type++) {
+		if (!(mask & (1 << type))) {
+			continue;
+		}
+		const struct exception_action *action
+				= &thread->exception_actions[type];
+		mach_msg_type_number_t i = 0;
+		while (i < found
+				&& !(handlers[i] == action->port
+						&& behaviors[i] == action->behavior
+						&& flavors[i] == action->flavor)) {
+			i++;
+		}
+		if (i == found) {
+			if (found == *count) {
+				continue;
+			}
+			masks[found] = 0;
+			handlers[found] = action->port;
+			behaviors[found] = action->behavior;
+			flavors[found] = action->flavor;
+			found++;
+		}
+		masks[i] |= 1 << type;
+	}
+	*count = found;
+}
+
+static void
+set_handlers(struct thread *thread, exception_mask_t mask, mach_port_t new_port,
+		exception_behavior_t behavior, thread_state_flavor_t flavor,
+		bool keep_old)
+{
+	if (thread->exception_actions == NULL) {
+		thread->exception_actions = calloc(EXC_TYPES_COUNT,
+				sizeof(*thread->exception_actions));
+	}
+	for (int type = FIRST_EXCEPTION; type < EXC_TYPES_COUNT; type++) {
+		if (!(mask & (1 << type))) {
+			continue;
+		}
+		struct exception_action *action
+				= &thread->exception_actions[type];
+		mach_port_name_t old = action->port;
+		ipc_port_mod_refs(new_port, MACH_PORT_RIGHT_SEND, 1);
+		action->port = new_port;
+		action->behavior = behavior;
+		action->flavor = flavor;
+		if (!keep_old) {
+			ipc_port_mod_refs(old, MACH_PORT_RIGHT_SEND, -1);
+		}
+	}
 }
 
 kern_return_t
