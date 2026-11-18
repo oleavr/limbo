@@ -44,6 +44,8 @@
 mach_port_name_t mk_timer_create(void);
 kern_return_t mk_timer_arm(mach_port_name_t name, uint64_t expire_time);
 kern_return_t mk_timer_destroy(mach_port_name_t name);
+kern_return_t _kernelrpc_mach_task_is_self(
+		task_name_t task, boolean_t *is_self);
 
 typedef struct {
 	mach_msg_header_t header;
@@ -608,6 +610,10 @@ check_tasks(void)
 	CHECK(task_policy_get(task, TASK_BASE_LATENCY_QOS_POLICY,
 			      (task_policy_t)&qos, &count, &get_default)
 			== KERN_INVALID_ARGUMENT);
+
+	boolean_t is_self = FALSE;
+	CHECK(_kernelrpc_mach_task_is_self(task, &is_self) == KERN_SUCCESS);
+	CHECK(is_self);
 }
 
 static void
