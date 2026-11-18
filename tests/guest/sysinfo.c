@@ -1,5 +1,6 @@
 /*
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -54,6 +55,9 @@
 
 #ifndef PROC_PIDREGIONPATHINFO2
 #define PROC_PIDREGIONPATHINFO2 22
+#endif
+#ifndef PROC_PIDVMRTFAULTINFO
+#define PROC_PIDVMRTFAULTINFO 29
 #endif
 
 int proc_get_cpumon_params(pid_t pid, int *percentage, int *interval);
@@ -192,6 +196,10 @@ main(void)
 		found = found || fds[i].proc_fd == STDERR_FILENO;
 	}
 	CHECK(found);
+	uint8_t faults[4096];
+	CHECK(proc_pidinfo(getpid(), PROC_PIDVMRTFAULTINFO, 0, faults,
+			      sizeof(faults))
+			== 0);
 
 	char name[64];
 	CHECK(proc_name(getpid(), name, sizeof(name)) > 0);
