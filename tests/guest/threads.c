@@ -136,13 +136,16 @@ main(void)
 	CHECK(getcwd(after, sizeof(after)) != NULL);
 	CHECK(strcmp(before, after) == 0);
 
+	uint64_t wall_start = clock_gettime_nsec_np(CLOCK_MONOTONIC);
 	uint64_t start = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID);
 	CHECK(start != 0);
 	volatile uint64_t sum = 0;
 	for (int i = 0; i != 10000000; i++) {
 		sum += i;
 	}
-	CHECK(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) > start);
+	uint64_t spent = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - start;
+	CHECK(spent > 0);
+	CHECK(spent <= clock_gettime_nsec_np(CLOCK_MONOTONIC) - wall_start);
 
 	CHECK(qos_class_main() != QOS_CLASS_UNSPECIFIED);
 
