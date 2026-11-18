@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -38,6 +39,7 @@
 #include <time.h>
 
 #include "handler.h"
+#include "signals.h"
 #include "thread.h"
 #include "xnu-errno.h"
 
@@ -53,8 +55,7 @@ struct ulock_waiter {
 	struct ulock_waiter *next;
 	void *address;
 	mach_port_name_t thread;
-	pthread_cond_t wakeup;
-	bool woken;
+	_Atomic uint32_t woken;
 };
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -87,8 +88,6 @@ ulock_wait(uint32_t operation, void *addr, uint64_t value, uint64_t timeout_ns)
 			.address = addr,
 			.thread = thread_current()->port,
 	};
-	pthread_cond_init(&waiter.wakeup, NULL);
-
 	pthread_mutex_lock(&lock);
 	int result;
 	if (load_value(operation, addr) != value) {
@@ -99,8 +98,6 @@ ulock_wait(uint32_t operation, void *addr, uint64_t value, uint64_t timeout_ns)
 		result = wait_for_wakeup(&waiter, timeout_ns);
 	}
 	pthread_mutex_unlock(&lock);
-
-	pthread_cond_destroy(&waiter.wakeup);
 	return result;
 }
 
@@ -134,13 +131,15 @@ wait_for_wakeup(struct ulock_waiter *waiter, uint64_t timeout_ns)
 	}
 
 	while (!waiter->woken) {
-		int error = (timeout_ns != 0)
-				? pthread_cond_timedwait(&waiter->wakeup, &lock,
-						  &deadline)
-				: pthread_cond_wait(&waiter->wakeup, &lock);
+		int error = signals_futex_wait(&waiter->woken, &lock,
+				timeout_ns != 0 ? &deadline : NULL);
 		if (error == ETIMEDOUT && !waiter->woken) {
 			remove_waiter(waiter);
 			return _ETIMEDOUT;
+		}
+		if (error == EINTR && !waiter->woken) {
+			remove_waiter(waiter);
+			return _EINTR;
 		}
 	}
 	return count_waiters(waiter->address);
@@ -187,8 +186,7 @@ sys_ulock_wake(uint32_t operation, void *addr, uint64_t wake_value)
 		}
 
 		*p = w->next;
-		w->woken = true;
-		pthread_cond_signal(&w->wakeup);
+		signals_futex_wake(&w->woken);
 		woken++;
 		if (!all) {
 			break;
