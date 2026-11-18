@@ -133,6 +133,18 @@ main(void)
 			      &mapped, sizeof(mapped))
 			<= 0);
 
+	struct proc_regioninfo region;
+	uint64_t code = (uint64_t)(uintptr_t)main;
+	CHECK(proc_pidinfo(getpid(), PROC_PIDREGIONINFO, code, &region,
+			      sizeof(region))
+			== sizeof(region));
+	CHECK(region.pri_address <= code
+			&& code < region.pri_address + region.pri_size);
+	CHECK(region.pri_protection == (VM_PROT_READ | VM_PROT_EXECUTE));
+	CHECK(proc_pidinfo(getpid(), PROC_PIDREGIONINFO, UINT64_MAX, &region,
+			      sizeof(region))
+			<= 0);
+
 	check_main_thread_gone();
 
 	int value = -1;
