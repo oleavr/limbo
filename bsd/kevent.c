@@ -1401,7 +1401,7 @@ kqueue_wait(struct kqueue *kq, struct kevent_qos_s *events, int nevents,
 		size_t data_size = 0;
 		int count = kqueue_collect(
 				kq, false, events, nevents, &data, &data_size);
-		if (count == nevents) {
+		if (count == nevents && kqueue_has_events(kq, 0)) {
 			eventfd_write(kq->fd, 1);
 		}
 		if (count != 0 || timeout == 0) {

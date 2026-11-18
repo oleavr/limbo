@@ -135,6 +135,14 @@ main(void)
 	CHECK(kevent(inner, changes, 1, NULL, 0, NULL) == 0);
 	struct pollfd watch = {.fd = inner, .events = POLLIN};
 	CHECK(poll(&watch, 1, 0) == 0);
+	EV_SET(&changes[0], 7, EVFILT_USER, 0, NOTE_TRIGGER, 0, NULL);
+	EV_SET(&changes[1], 8, EVFILT_USER, 0, NOTE_TRIGGER, 0, NULL);
+	CHECK(kevent(inner, changes, 2, NULL, 0, NULL) == 0);
+	CHECK(poll(&watch, 1, 0) == 1);
+	CHECK(kevent(inner, NULL, 0, events, 1, &zero) == 1);
+	CHECK(poll(&watch, 1, 0) == 1);
+	CHECK(kevent(inner, NULL, 0, events, 1, &zero) == 1);
+	CHECK(poll(&watch, 1, 0) == 0);
 	CHECK(close(outer) == 0 && close(inner) == 0);
 
 	enum { CHILDREN = 8 };
