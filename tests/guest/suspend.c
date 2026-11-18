@@ -205,10 +205,10 @@ check_converted_state(void)
 			== KERN_INVALID_ARGUMENT);
 }
 
+#ifndef __x86_64__
 static void
 check_vector_registers(mach_port_t port)
 {
-#ifndef __x86_64__
 	arm_neon_state64_t given = {0}, found;
 	for (int i = 0; i < 32; i++) {
 		given.__v[i] = ((__uint128_t)i << 64) | (0x2000 + i);
@@ -223,8 +223,8 @@ check_vector_registers(mach_port_t port)
 			== KERN_SUCCESS);
 	CHECK(count == ARM_NEON_STATE64_COUNT);
 	CHECK(memcmp(found.__v, given.__v, sizeof(given.__v)) == 0);
-#endif
 }
+#endif
 
 static void
 check_created_thread(void)
