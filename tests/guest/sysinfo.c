@@ -296,6 +296,18 @@ main(void)
 			      (host_info_t)&load, &load_count)
 			== KERN_SUCCESS);
 	CHECK(load.avenrun[0] >= 0 && load.mach_factor[0] >= 0);
+
+	vm_statistics64_data_t vm;
+	mach_msg_type_number_t vm_count = HOST_VM_INFO64_COUNT;
+	CHECK(host_statistics64(mach_host_self(), HOST_VM_INFO64,
+			      (host_info64_t)&vm, &vm_count)
+			== KERN_SUCCESS);
+	uint64_t pages = (uint64_t)vm.free_count + vm.active_count
+			+ vm.inactive_count + vm.wire_count;
+	CHECK(pages > 0);
+	CHECK(pages * (uint64_t)getpagesize() <= (uint64_t)memsize);
+	CHECK(vm.wire_count > 0);
+	CHECK(vm.internal_page_count + vm.external_page_count > 0);
 	return 0;
 }
 
