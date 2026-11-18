@@ -228,6 +228,9 @@ main(void)
 	char name[64];
 	CHECK(proc_name(getpid(), name, sizeof(name)) > 0);
 	CHECK(strcmp(name, "sysinfo") == 0);
+	CHECK(pthread_setname_np("main-thread") == 0);
+	CHECK(proc_name(getpid(), name, sizeof(name)) > 0);
+	CHECK(strcmp(name, "sysinfo") == 0);
 
 	struct utsname uts;
 	CHECK(uname(&uts) == 0 && strcmp(uts.sysname, "Darwin") == 0);
