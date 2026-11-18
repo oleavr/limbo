@@ -27,6 +27,7 @@
 
 #include <dispatch/dispatch.h>
 #include <mach/mach_time.h>
+#include <os/lock.h>
 #include <pthread.h>
 #include <setjmp.h>
 #include <signal.h>
@@ -377,6 +378,7 @@ check_source(void)
 enum wait_kind {
 	WAIT_CONDITION,
 	WAIT_MUTEX,
+	WAIT_UNFAIR_LOCK,
 	WAIT_KINDS,
 };
 
@@ -386,6 +388,7 @@ static volatile sig_atomic_t interrupted_during_wait;
 static pthread_mutex_t late_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t late_cond = PTHREAD_COND_INITIALIZER;
 static bool late_ready;
+static os_unfair_lock late_lock = OS_UNFAIR_LOCK_INIT;
 static dispatch_semaphore_t late_held;
 
 static void
@@ -403,6 +406,9 @@ end_wait_late(void *arg)
 	if (kind == WAIT_MUTEX) {
 		pthread_mutex_lock(&late_mutex);
 		dispatch_semaphore_signal(late_held);
+	} else if (kind == WAIT_UNFAIR_LOCK) {
+		os_unfair_lock_lock(&late_lock);
+		dispatch_semaphore_signal(late_held);
 	}
 	usleep(300000);
 	wait_ended = 1;
@@ -415,6 +421,9 @@ end_wait_late(void *arg)
 		break;
 	case WAIT_MUTEX:
 		pthread_mutex_unlock(&late_mutex);
+		break;
+	case WAIT_UNFAIR_LOCK:
+		os_unfair_lock_unlock(&late_lock);
 		break;
 	case WAIT_KINDS:
 		break;
@@ -435,7 +444,7 @@ check_waits_interrupted(void)
 		CHECK(pthread_create(&ender, NULL, end_wait_late,
 				      (void *)(intptr_t)kind)
 				== 0);
-		if (kind == WAIT_MUTEX) {
+		if (kind != WAIT_CONDITION) {
 			dispatch_semaphore_wait(
 					late_held, DISPATCH_TIME_FOREVER);
 		}
@@ -451,6 +460,10 @@ check_waits_interrupted(void)
 		case WAIT_MUTEX:
 			pthread_mutex_lock(&late_mutex);
 			pthread_mutex_unlock(&late_mutex);
+			break;
+		case WAIT_UNFAIR_LOCK:
+			os_unfair_lock_lock(&late_lock);
+			os_unfair_lock_unlock(&late_lock);
 			break;
 		case WAIT_KINDS:
 			break;
