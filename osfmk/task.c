@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -590,7 +591,7 @@ kern_return_t
 task_map_corpse_info(task_t task, task_read_t corspe_task,
 		vm_address_t *kcd_addr_begin, uint32_t *kcd_size)
 {
-	unimplemented();
+	return KERN_INVALID_ARGUMENT;
 }
 
 kern_return_t
@@ -642,7 +643,7 @@ kern_return_t
 task_map_corpse_info_64(task_t task, task_read_t corspe_task,
 		mach_vm_address_t *kcd_addr_begin, mach_vm_size_t *kcd_size)
 {
-	unimplemented();
+	return KERN_INVALID_ARGUMENT;
 }
 
 kern_return_t

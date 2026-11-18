@@ -1,5 +1,6 @@
 /*
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -72,6 +73,7 @@ static void check_shared_range_entries(void);
 static void check_exception_ports(void);
 static void check_vouchers(void);
 static void check_destroy(void);
+static void check_tasks(void);
 static mach_port_t allocate_port(void);
 
 int
@@ -89,6 +91,7 @@ main(void)
 	check_exception_ports();
 	check_vouchers();
 	check_destroy();
+	check_tasks();
 	return 0;
 }
 
@@ -552,4 +555,19 @@ check_remaps(void)
 		CHECK(mach_vm_deallocate(mach_task_self(), tables[i], sizes[i])
 				== KERN_SUCCESS);
 	}
+}
+
+static void
+check_tasks(void)
+{
+	mach_port_t task = mach_task_self();
+	vm_address_t corpse_info;
+	uint32_t corpse_size;
+	CHECK(task_map_corpse_info(task, task, &corpse_info, &corpse_size)
+			== KERN_INVALID_ARGUMENT);
+	mach_vm_address_t corpse_info_64;
+	mach_vm_size_t corpse_size_64;
+	CHECK(task_map_corpse_info_64(
+			      task, task, &corpse_info_64, &corpse_size_64)
+			== KERN_INVALID_ARGUMENT);
 }
