@@ -258,6 +258,8 @@ main(void)
 			      &count)
 			== KERN_SUCCESS);
 	CHECK(basic.cpu_type == HOST_CPU_TYPE && basic.avail_cpus > 0);
+	CHECK(host_set_multiuser_config_flags(mach_host_self(), 0)
+			== KERN_NOT_SUPPORTED);
 
 	int msgbuf_size = 0;
 	size = sizeof(msgbuf_size);

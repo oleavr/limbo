@@ -504,7 +504,7 @@ mach_memory_info(mach_port_t host, mach_zone_name_array_t *names,
 kern_return_t
 host_set_multiuser_config_flags(host_priv_t host_priv, uint32_t multiuser_flags)
 {
-	unimplemented();
+	return KERN_NOT_SUPPORTED;
 }
 
 kern_return_t
