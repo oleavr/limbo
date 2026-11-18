@@ -577,8 +577,9 @@ kevent_register(struct kqueue *kq, const struct kevent_qos_s *change)
 			return _EINPROGRESS;
 		}
 		if (change->filter == EVFILT_WORKLOOP
-				&& (change->fflags & NOTE_WL_COMMANDS_MASK)
-						== NOTE_WL_SYNC_WAKE) {
+				&& ((change->fflags & NOTE_WL_COMMANDS_MASK)
+								== NOTE_WL_SYNC_WAKE
+						|| kn->waiting)) {
 			kn->woken = true;
 			pthread_cond_broadcast(&sync_wakeup);
 		}
