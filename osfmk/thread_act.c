@@ -38,9 +38,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <ucontext.h>
+#include <unistd.h>
 
 #include "bsd/handler.h"
+#include "bsd/process.h"
 #include "ipc.h"
 #include "commpage.h"
 #include "thread.h"
@@ -85,6 +88,12 @@ struct darwin_x86_thread_state64 {
 #define DARWIN_X86_THREAD_STATE64_COUNT                                        \
 	(sizeof(struct darwin_x86_thread_state64) / sizeof(uint32_t))
 
+struct thread_times {
+	uint64_t user;
+	uint64_t system;
+	integer_t run_state;
+};
+
 static const ucontext_t *hold_guest_context(struct thread *thread);
 static kern_return_t get_state(const ucontext_t *context,
 		thread_state_flavor_t flavor, thread_state_t old_state,
@@ -103,6 +112,10 @@ static bool thread_state_from_darwin(thread_state_flavor_t flavor,
 		const natural_t *in, mach_msg_type_number_t count,
 		struct thread_state *out);
 #endif
+static struct thread_times thread_times(struct thread *thread);
+static uint64_t timeval_nanoseconds(const struct timeval *time);
+static integer_t run_state(char linux_state);
+static time_value_t time_value(uint64_t nanoseconds);
 static uint64_t started_thread_id(struct thread *thread);
 static void handlers_of(struct thread *thread, exception_mask_t mask,
 		exception_mask_array_t masks, mach_msg_type_number_t *count,
@@ -464,10 +477,13 @@ thread_info(thread_inspect_t target_act, thread_flavor_t flavor,
 		if (*thread_info_outCnt < THREAD_BASIC_INFO_COUNT) {
 			return KERN_INVALID_ARGUMENT;
 		}
+		struct thread_times times = thread_times(thread);
 		thread_basic_info_t info = (thread_basic_info_t)thread_info_out;
 		*info = (thread_basic_info_data_t){
+				.user_time = time_value(times.user),
+				.system_time = time_value(times.system),
 				.policy = POLICY_TIMESHARE,
-				.run_state = TH_STATE_RUNNING,
+				.run_state = times.run_state,
 		};
 		*thread_info_outCnt = THREAD_BASIC_INFO_COUNT;
 		return KERN_SUCCESS;
@@ -476,11 +492,14 @@ thread_info(thread_inspect_t target_act, thread_flavor_t flavor,
 		if (*thread_info_outCnt < THREAD_EXTENDED_INFO_COUNT) {
 			return KERN_INVALID_ARGUMENT;
 		}
+		struct thread_times times = thread_times(thread);
 		thread_extended_info_t info
 				= (thread_extended_info_t)thread_info_out;
 		*info = (thread_extended_info_data_t){
+				.pth_user_time = times.user,
+				.pth_system_time = times.system,
 				.pth_policy = POLICY_TIMESHARE,
-				.pth_run_state = TH_STATE_RUNNING,
+				.pth_run_state = times.run_state,
 				.pth_curpri = 31,
 				.pth_priority = 31,
 				.pth_maxpriority = 63,
@@ -523,6 +542,63 @@ thread_info(thread_inspect_t target_act, thread_flavor_t flavor,
 	default:
 		unimplemented();
 	}
+}
+
+static struct thread_times
+thread_times(struct thread *thread)
+{
+	struct thread_times times = {.run_state = TH_STATE_RUNNING};
+	if (thread == thread_current()) {
+		struct rusage usage;
+		getrusage(RUSAGE_THREAD, &usage);
+		times.user = timeval_nanoseconds(&usage.ru_utime);
+		times.system = timeval_nanoseconds(&usage.ru_stime);
+		return times;
+	}
+	pid_t tid = __atomic_load_n(&thread->tid, __ATOMIC_ACQUIRE);
+	struct process_thread stat;
+	if (process_thread_lookup(getpid(), tid, &stat) == 0) {
+		times.user = process_ticks_to_nanoseconds(stat.user_ticks);
+		times.system = process_ticks_to_nanoseconds(stat.system_ticks);
+		times.run_state = run_state(stat.state);
+	}
+	return times;
+}
+
+static uint64_t
+timeval_nanoseconds(const struct timeval *time)
+{
+	return (uint64_t)time->tv_sec * 1000000000
+			+ (uint64_t)time->tv_usec * 1000;
+}
+
+static integer_t
+run_state(char linux_state)
+{
+	switch (linux_state) {
+	case 'R':
+		return TH_STATE_RUNNING;
+	case 'D':
+		return TH_STATE_UNINTERRUPTIBLE;
+	case 'T':
+	case 't':
+		return TH_STATE_STOPPED;
+	case 'Z':
+	case 'X':
+		return TH_STATE_HALTED;
+	default:
+		return TH_STATE_WAITING;
+	}
+}
+
+static time_value_t
+time_value(uint64_t nanoseconds)
+{
+	uint64_t microseconds = nanoseconds / 1000;
+	return (time_value_t){
+			.seconds = (integer_t)(microseconds / 1000000),
+			.microseconds = (integer_t)(microseconds % 1000000),
+	};
 }
 
 static uint64_t

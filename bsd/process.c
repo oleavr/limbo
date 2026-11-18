@@ -1,5 +1,6 @@
 /*
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -85,6 +86,29 @@ process_lookup(int32_t pid, struct process *process)
 	read_ids(status, "Uid:", process->uid);
 	read_ids(status, "Gid:", process->gid);
 	fclose(status);
+	return 0;
+}
+
+int
+process_thread_lookup(int32_t pid, int32_t tid, struct process_thread *thread)
+{
+	char path[64];
+	snprintf(path, sizeof(path), "/proc/%d/task/%d/stat", pid, tid);
+	FILE *stat = fopen(path, "r");
+	if (stat == NULL) {
+		return 1;
+	}
+	char line[1024];
+	char *fields = (fgets(line, sizeof(line), stat) != NULL)
+			? strrchr(line, ')')
+			: NULL;
+	fclose(stat);
+	if (fields == NULL) {
+		return 1;
+	}
+	sscanf(fields + 2, "%c %*d %*d %*d %*u %*d %*u %*u %*u %*u %*u %lu %lu",
+			&thread->state, &thread->user_ticks,
+			&thread->system_ticks);
 	return 0;
 }
 
