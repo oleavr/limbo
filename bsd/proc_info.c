@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -71,6 +72,7 @@
 #define PROC_PIDT_BSDINFOWITHUNIQID 18
 #define PROC_PIDCOALITIONINFO      20
 #define PROC_PIDLISTDYNKQUEUES     27
+#define PROC_PIDVMRTFAULTINFO      29
 
 #define PROC_PIDDYNKQUEUES_MAX 1024
 
@@ -451,6 +453,11 @@ pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, user_addr_t buffer,
 						? count
 						: PROC_PIDDYNKQUEUES_MAX);
 	}
+	case PROC_PIDVMRTFAULTINFO:
+		if (pid != getpid()) {
+			return _EINVAL;
+		}
+		return 0;
 	default:
 		unimplemented();
 	}
