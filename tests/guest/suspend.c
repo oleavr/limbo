@@ -27,6 +27,7 @@
 
 #include <mach/mach.h>
 #include <pthread.h>
+#include <string.h>
 #include <unistd.h>
 
 #include "check.h"
@@ -150,11 +151,51 @@ check_own_thread(void)
 	CHECK(sp <= frame && frame - sp < 65536);
 }
 
+static void
+check_converted_state(void)
+{
+#ifdef __x86_64__
+	thread_state_flavor_t flavor = x86_THREAD_STATE64;
+	x86_thread_state64_t state, converted;
+	mach_msg_type_number_t count = x86_THREAD_STATE64_COUNT;
+#else
+	thread_state_flavor_t flavor = ARM_THREAD_STATE64;
+	arm_thread_state64_t state, converted;
+	mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
+#endif
+	mach_port_t self = pthread_mach_thread_np(pthread_self());
+	CHECK(thread_get_state(self, flavor, (thread_state_t)&state, &count)
+			== KERN_SUCCESS);
+	int directions[] = {THREAD_CONVERT_THREAD_STATE_TO_SELF,
+			THREAD_CONVERT_THREAD_STATE_FROM_SELF};
+	for (int i = 0; i < 2; i++) {
+		mach_msg_type_number_t converted_count = count;
+		CHECK(thread_convert_thread_state(self, directions[i], flavor,
+				      (thread_state_t)&state, count,
+				      (thread_state_t)&converted,
+				      &converted_count)
+				== KERN_SUCCESS);
+		CHECK(converted_count == count);
+		CHECK(memcmp(&converted, &state, sizeof(state)) == 0);
+	}
+	mach_msg_type_number_t short_count = count - 1;
+	CHECK(thread_convert_thread_state(self,
+			      THREAD_CONVERT_THREAD_STATE_TO_SELF, flavor,
+			      (thread_state_t)&state, count,
+			      (thread_state_t)&converted, &short_count)
+			== KERN_INSUFFICIENT_BUFFER_SIZE);
+	CHECK(thread_convert_thread_state(self, 0, flavor,
+			      (thread_state_t)&state, count,
+			      (thread_state_t)&converted, &count)
+			== KERN_INVALID_ARGUMENT);
+}
+
 int
 main(void)
 {
 	check_running_thread();
 	check_blocked_thread();
 	check_own_thread();
+	check_converted_state();
 	return 0;
 }

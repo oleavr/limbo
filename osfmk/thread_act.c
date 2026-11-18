@@ -536,7 +536,16 @@ thread_convert_thread_state(thread_act_t thread, int direction,
 		mach_msg_type_number_t in_stateCnt, thread_state_t out_state,
 		mach_msg_type_number_t *out_stateCnt)
 {
-	unimplemented();
+	if (direction != THREAD_CONVERT_THREAD_STATE_TO_SELF
+			&& direction != THREAD_CONVERT_THREAD_STATE_FROM_SELF) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	if (*out_stateCnt < in_stateCnt) {
+		return KERN_INSUFFICIENT_BUFFER_SIZE;
+	}
+	memcpy(out_state, in_state, in_stateCnt * sizeof(natural_t));
+	*out_stateCnt = in_stateCnt;
+	return KERN_SUCCESS;
 }
 
 kern_return_t
