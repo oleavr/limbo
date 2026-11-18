@@ -27,12 +27,16 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <dirent.h>
 #include <mach/mach.h>
+#include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
 #include <unistd.h>
 
+#include "bsd/process.h"
 #include "ipc.h"
 #include "semaphore.h"
 #include "task.h"
@@ -89,6 +93,9 @@ _kernelrpc_mach_ports_lookup3(task_t target_task, mach_port_t *port1,
 
 static kern_return_t memory_and_time_info(task_flavor_t flavor,
 		task_info_t out, mach_msg_type_number_t *count);
+static void live_thread_times(uint64_t *user, uint64_t *system);
+static uint64_t ended_time(
+		uint64_t total, uint64_t live, _Atomic uint64_t *most);
 
 /* Darwin's pages, which the guest's sizes count in */
 #ifdef __x86_64__
@@ -195,10 +202,10 @@ memory_usage(struct memory_usage *usage)
 }
 
 static void
-time_value(const struct timeval *from, time_value_t *to)
+time_value(uint64_t nanoseconds, time_value_t *to)
 {
-	to->seconds = (integer_t)from->tv_sec;
-	to->microseconds = (integer_t)from->tv_usec;
+	to->seconds = (integer_t)(nanoseconds / 1000000000);
+	to->microseconds = (integer_t)(nanoseconds % 1000000000 / 1000);
 }
 
 static kern_return_t
@@ -209,6 +216,15 @@ memory_and_time_info(task_flavor_t flavor, task_info_t out,
 	memory_usage(&usage);
 	struct rusage rusage;
 	getrusage(RUSAGE_SELF, &rusage);
+	struct process process;
+	process_lookup(getpid(), &process);
+	uint64_t user = process_ticks_to_nanoseconds(process.user_ticks);
+	uint64_t system = process_ticks_to_nanoseconds(process.system_ticks);
+	uint64_t live_user, live_system;
+	live_thread_times(&live_user, &live_system);
+	static _Atomic uint64_t most_user, most_system;
+	uint64_t ended_user = ended_time(user, live_user, &most_user);
+	uint64_t ended_system = ended_time(system, live_system, &most_system);
 
 	union {
 		struct mach_task_basic_info basic;
@@ -226,16 +242,16 @@ memory_and_time_info(task_flavor_t flavor, task_info_t out,
 		info.basic.virtual_size = usage.virtual_size;
 		info.basic.resident_size = usage.resident_size;
 		info.basic.resident_size_max = usage.resident_peak;
-		time_value(&rusage.ru_utime, &info.basic.user_time);
-		time_value(&rusage.ru_stime, &info.basic.system_time);
+		time_value(ended_user, &info.basic.user_time);
+		time_value(ended_system, &info.basic.system_time);
 		info.basic.policy = POLICY_TIMESHARE;
 		size = MACH_TASK_BASIC_INFO_COUNT;
 		break;
 	case TASK_BASIC_INFO_64_ARM:
 		info.basic_64.virtual_size = usage.virtual_size;
 		info.basic_64.resident_size = usage.resident_size;
-		time_value(&rusage.ru_utime, &info.basic_64.user_time);
-		time_value(&rusage.ru_stime, &info.basic_64.system_time);
+		time_value(ended_user, &info.basic_64.user_time);
+		time_value(ended_system, &info.basic_64.system_time);
 		info.basic_64.policy = POLICY_TIMESHARE;
 		size = sizeof(info.basic_64) / sizeof(natural_t);
 		break;
@@ -255,8 +271,8 @@ memory_and_time_info(task_flavor_t flavor, task_info_t out,
 		size = TASK_VM_INFO_COUNT;
 		break;
 	case TASK_THREAD_TIMES_INFO:
-		time_value(&rusage.ru_utime, &info.times.user_time);
-		time_value(&rusage.ru_stime, &info.times.system_time);
+		time_value(live_user, &info.times.user_time);
+		time_value(live_system, &info.times.system_time);
 		size = TASK_THREAD_TIMES_INFO_COUNT;
 		break;
 	case TASK_EVENTS_INFO:
@@ -289,6 +305,39 @@ memory_and_time_info(task_flavor_t flavor, task_info_t out,
 	memcpy(out, &info, size * sizeof(natural_t));
 	*count = size;
 	return KERN_SUCCESS;
+}
+
+static void
+live_thread_times(uint64_t *user, uint64_t *system)
+{
+	uint64_t user_ticks = 0, system_ticks = 0;
+	DIR *threads = opendir("/proc/self/task");
+	struct dirent *entry;
+	while ((entry = readdir(threads)) != NULL) {
+		if (entry->d_name[0] == '.') {
+			continue;
+		}
+		int32_t tid = atoi(entry->d_name);
+		struct process_thread thread;
+		if (process_thread_lookup(getpid(), tid, &thread) == 0) {
+			user_ticks += thread.user_ticks;
+			system_ticks += thread.system_ticks;
+		}
+	}
+	closedir(threads);
+	*user = process_ticks_to_nanoseconds(user_ticks);
+	*system = process_ticks_to_nanoseconds(system_ticks);
+}
+
+static uint64_t
+ended_time(uint64_t total, uint64_t live, _Atomic uint64_t *most)
+{
+	uint64_t ended = total > live ? total - live : 0;
+	uint64_t seen = atomic_load(most);
+	while (ended > seen
+			&& !atomic_compare_exchange_weak(most, &seen, ended)) {
+	}
+	return ended > seen ? ended : seen;
 }
 
 static kern_return_t memory_and_time_info(task_flavor_t flavor,
