@@ -30,6 +30,8 @@
 #include <pthread.h>
 #include <setjmp.h>
 #include <signal.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -361,7 +363,7 @@ check_source(void)
 			DISPATCH_SOURCE_TYPE_SIGNAL, SIGTERM, 0,
 			dispatch_get_global_queue(0, 0));
 	dispatch_source_set_event_handler(source, ^{
-		dispatch_semaphore_signal(done);
+	  dispatch_semaphore_signal(done);
 	});
 	dispatch_resume(source);
 	kill(getpid(), SIGTERM);
@@ -370,6 +372,93 @@ check_source(void)
 					      5 * NSEC_PER_SEC))
 			== 0);
 	dispatch_source_cancel(source);
+}
+
+enum wait_kind {
+	WAIT_CONDITION,
+	WAIT_MUTEX,
+	WAIT_KINDS,
+};
+
+static volatile sig_atomic_t interruptions;
+static volatile sig_atomic_t wait_ended;
+static volatile sig_atomic_t interrupted_during_wait;
+static pthread_mutex_t late_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t late_cond = PTHREAD_COND_INITIALIZER;
+static bool late_ready;
+static dispatch_semaphore_t late_held;
+
+static void
+count_interruption(int sig)
+{
+	(void)sig;
+	interruptions++;
+	interrupted_during_wait = !wait_ended;
+}
+
+static void *
+end_wait_late(void *arg)
+{
+	enum wait_kind kind = (enum wait_kind)(intptr_t)arg;
+	if (kind == WAIT_MUTEX) {
+		pthread_mutex_lock(&late_mutex);
+		dispatch_semaphore_signal(late_held);
+	}
+	usleep(300000);
+	wait_ended = 1;
+	switch (kind) {
+	case WAIT_CONDITION:
+		pthread_mutex_lock(&late_mutex);
+		late_ready = true;
+		pthread_cond_signal(&late_cond);
+		pthread_mutex_unlock(&late_mutex);
+		break;
+	case WAIT_MUTEX:
+		pthread_mutex_unlock(&late_mutex);
+		break;
+	case WAIT_KINDS:
+		break;
+	}
+	return NULL;
+}
+
+static void
+check_waits_interrupted(void)
+{
+	signal(SIGALRM, count_interruption);
+	late_held = dispatch_semaphore_create(0);
+	for (enum wait_kind kind = 0; kind != WAIT_KINDS; kind++) {
+		interruptions = 0;
+		interrupted_during_wait = 0;
+		wait_ended = 0;
+		pthread_t ender;
+		CHECK(pthread_create(&ender, NULL, end_wait_late,
+				      (void *)(intptr_t)kind)
+				== 0);
+		if (kind == WAIT_MUTEX) {
+			dispatch_semaphore_wait(
+					late_held, DISPATCH_TIME_FOREVER);
+		}
+		ualarm(100000, 0);
+		switch (kind) {
+		case WAIT_CONDITION:
+			pthread_mutex_lock(&late_mutex);
+			while (!late_ready) {
+				pthread_cond_wait(&late_cond, &late_mutex);
+			}
+			pthread_mutex_unlock(&late_mutex);
+			break;
+		case WAIT_MUTEX:
+			pthread_mutex_lock(&late_mutex);
+			pthread_mutex_unlock(&late_mutex);
+			break;
+		case WAIT_KINDS:
+			break;
+		}
+		pthread_join(ender, NULL);
+		CHECK(interruptions == 1 && interrupted_during_wait);
+	}
+	signal(SIGALRM, SIG_DFL);
 }
 
 int
@@ -385,5 +474,6 @@ main(void)
 	check_self_pipe();
 	check_sigwait();
 	check_source();
+	check_waits_interrupted();
 	return 0;
 }
