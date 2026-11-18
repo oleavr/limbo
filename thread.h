@@ -53,6 +53,8 @@ struct thread_state {
 	uint64_t sp;
 	uint64_t x[8];
 	uint64_t tpidr;
+	bool full;
+	uint64_t regs[31];
 #endif
 };
 

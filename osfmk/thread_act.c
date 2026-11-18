@@ -81,6 +81,11 @@ static void get_arm_thread_state64(
 		const mcontext_t *mc, struct darwin_arm_thread_state64 *state);
 #endif
 static void release_guest_context(struct thread *thread);
+#ifndef __x86_64__
+static bool thread_state_from_darwin(thread_state_flavor_t flavor,
+		const natural_t *in, mach_msg_type_number_t count,
+		struct thread_state *out);
+#endif
 static uint64_t started_thread_id(struct thread *thread);
 
 kern_return_t
@@ -228,6 +233,63 @@ thread_set_state(thread_act_t target_act, thread_state_flavor_t flavor,
 {
 	unimplemented();
 }
+
+kern_return_t
+thread_create(task_t parent_task, thread_act_t *child_act)
+{
+	unimplemented();
+}
+
+kern_return_t
+thread_create_running(task_t parent_task, thread_state_flavor_t flavor,
+		thread_state_t new_state, mach_msg_type_number_t new_stateCnt,
+		thread_act_t *child_act)
+{
+#ifdef __x86_64__
+	unimplemented();
+#else
+	struct thread_state state;
+	if (!thread_state_from_darwin(
+			    flavor, new_state, new_stateCnt, &state)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	struct thread *thread = thread_new(NULL, NULL);
+	*child_act = ipc_kobject_copy_send(thread->port);
+	if (thread_start(thread, &state) != 0) {
+		return KERN_RESOURCE_SHORTAGE;
+	}
+	return KERN_SUCCESS;
+#endif
+}
+
+#ifndef __x86_64__
+static bool
+thread_state_from_darwin(thread_state_flavor_t flavor, const natural_t *in,
+		mach_msg_type_number_t count, struct thread_state *out)
+{
+	const struct darwin_arm_unified_thread_state *unified
+			= (const void *)in;
+	const struct darwin_arm_thread_state64 *state;
+	if (flavor == DARWIN_ARM_THREAD_STATE
+			&& count >= DARWIN_ARM_UNIFIED_THREAD_STATE_COUNT
+			&& unified->flavor == DARWIN_ARM_THREAD_STATE64) {
+		state = &unified->state64;
+	} else if (flavor == DARWIN_ARM_THREAD_STATE64
+			&& count >= DARWIN_ARM_THREAD_STATE64_COUNT) {
+		state = (const void *)in;
+	} else {
+		return false;
+	}
+	memset(out, 0, sizeof(*out));
+	out->full = true;
+	memcpy(out->regs, state->x, sizeof(state->x));
+	out->regs[29] = state->fp;
+	out->regs[30] = state->lr;
+	out->sp = state->sp;
+	out->pc = state->pc;
+	return true;
+}
+#endif
 
 kern_return_t
 thread_suspend(thread_read_t target_act)

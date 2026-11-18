@@ -36,6 +36,14 @@ static volatile unsigned long counter;
 static int fds[2];
 static volatile int got;
 
+#ifndef __x86_64__
+void spin_in_place(void);
+__asm__(".text\n"
+	".p2align 2\n"
+	"_spin_in_place:\n"
+	"	b _spin_in_place\n");
+#endif
+
 static void *
 spin(void *arg)
 {
@@ -190,6 +198,38 @@ check_converted_state(void)
 			== KERN_INVALID_ARGUMENT);
 }
 
+static void
+check_created_thread(void)
+{
+#ifndef __x86_64__
+	static _Alignas(16) char stack[16384];
+	arm_thread_state64_t given = {0}, found;
+	for (int i = 0; i < 29; i++) {
+		given.__x[i] = 0x1000 + i;
+	}
+	arm_thread_state64_set_pc_fptr(given, spin_in_place);
+	arm_thread_state64_set_sp(given, stack + sizeof(stack));
+	arm_thread_state64_set_fp(given, stack);
+	mach_port_t port;
+	CHECK(thread_create_running(mach_task_self(), ARM_THREAD_STATE64,
+			      (thread_state_t)&given, ARM_THREAD_STATE64_COUNT,
+			      &port)
+			== KERN_SUCCESS);
+	usleep(100000);
+	mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
+	CHECK(thread_get_state(port, ARM_THREAD_STATE64, (thread_state_t)&found,
+			      &count)
+			== KERN_SUCCESS);
+	for (int i = 0; i < 29; i++) {
+		CHECK(found.__x[i] == given.__x[i] || (i >= 16 && i <= 18));
+	}
+	CHECK(arm_thread_state64_get_pc(found) == (uintptr_t)spin_in_place);
+	CHECK(arm_thread_state64_get_sp(found)
+			== (uintptr_t)stack + sizeof(stack));
+	CHECK(arm_thread_state64_get_fp(found) == (uintptr_t)stack);
+#endif
+}
+
 int
 main(void)
 {
@@ -197,5 +237,6 @@ main(void)
 	check_blocked_thread();
 	check_own_thread();
 	check_converted_state();
+	check_created_thread();
 	return 0;
 }
