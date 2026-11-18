@@ -73,8 +73,10 @@
 #define xnu_RTF_HOST      0x4
 #define xnu_RTF_DONE      0x40
 #define xnu_RTF_CLONING   0x100
+#define xnu_RTF_LLINFO    0x400
 #define xnu_RTF_STATIC    0x800
 #define xnu_RTF_PRCLONING 0x10000
+#define xnu_RTF_WASCLONED 0x20000
 #define xnu_RTF_LOCAL     0x200000
 #define xnu_RTF_IFSCOPE   0x1000000
 
@@ -281,6 +283,11 @@ struct route_list {
 	size_t capacity;
 };
 
+struct neighbour_dump {
+	struct output *out;
+	int family;
+};
+
 static struct link {
 	bool present;
 	bool seen;
@@ -345,6 +352,7 @@ static bool interface_address(unsigned int index, int family, uint8_t *out);
 static int host_family(int xnu_family);
 static struct route_list load_routes(int family);
 static void collect_route(const struct nlmsghdr *header, void *context);
+static void collect_neighbour(const struct nlmsghdr *header, void *context);
 static void parse_addresses(const uint8_t *cursor, const uint8_t *end,
 		int addrs, const uint8_t *found[xnu_RTAX_MAX]);
 static int sockaddr_address(const uint8_t *sockaddr, uint8_t *address);
@@ -1390,6 +1398,12 @@ route_dump(int operation, int family, int flags, void *old, size_t *oldlenp)
 				route, false);
 	}
 	free(list.routes);
+	if ((operation == xnu_NET_RT_FLAGS
+			    || operation == xnu_NET_RT_FLAGS_PRIV)
+			&& (flags & xnu_RTF_LLINFO)) {
+		struct neighbour_dump dump = {.out = &out, .family = host};
+		netlink_dump(RTM_GETNEIGH, host, collect_neighbour, &dump);
+	}
 
 	int result = 0;
 	if (old == NULL) {
@@ -1441,6 +1455,68 @@ collect_route(const struct nlmsghdr *header, void *context)
 				list->capacity * sizeof(*list->routes));
 	}
 	list->routes[list->count++] = route;
+}
+
+static void
+collect_neighbour(const struct nlmsghdr *header, void *context)
+{
+	struct neighbour_dump *dump = context;
+	if (header->nlmsg_type != RTM_NEWNEIGH) {
+		return;
+	}
+	const struct ndmsg *message = NLMSG_DATA(header);
+	if ((message->ndm_family != AF_INET && message->ndm_family != AF_INET6)
+			|| (dump->family != AF_UNSPEC
+					&& message->ndm_family != dump->family)
+			|| (message->ndm_state & (NUD_NOARP | NUD_FAILED))) {
+		return;
+	}
+	const uint8_t *destination = NULL, *link = NULL;
+	size_t link_length = 0;
+	int length = (int)RTM_PAYLOAD(header);
+	for (const struct rtattr *attribute
+			= (const struct rtattr *)((const uint8_t *)message
+					+ NLMSG_ALIGN(sizeof(*message)));
+			RTA_OK(attribute, length);
+			attribute = RTA_NEXT(attribute, length)) {
+		if (attribute->rta_type == NDA_DST) {
+			destination = RTA_DATA(attribute);
+		} else if (attribute->rta_type == NDA_LLADDR) {
+			link = RTA_DATA(attribute);
+			link_length = RTA_PAYLOAD(attribute);
+		}
+	}
+	if (destination == NULL) {
+		return;
+	}
+	struct output *out = dump->out;
+	unsigned int index = (unsigned int)message->ndm_ifindex;
+	size_t start = out->length;
+	struct xnu_rt_msghdr *header_out = grow(out, sizeof(*header_out));
+	header_out->rtm_version = RTM_VERSION;
+	header_out->rtm_type = xnu_RTM_GET;
+	header_out->rtm_index = (uint16_t)index;
+	header_out->rtm_flags = xnu_RTF_UP | xnu_RTF_HOST | xnu_RTF_LLINFO
+			| xnu_RTF_WASCLONED | xnu_RTF_DONE;
+	header_out->rtm_addrs = xnu_RTA_DST | xnu_RTA_GATEWAY;
+	append_address(out, message->ndm_family, destination, index);
+	char name[IF_NAMESIZE] = "";
+	if_indextoname(index, name);
+	if (link_length > 8) {
+		link_length = 8;
+	}
+	uint8_t *dl = grow(out, 20);
+	dl[0] = 20;
+	dl[1] = xnu_AF_LINK;
+	dl[2] = (uint8_t)index;
+	dl[3] = (uint8_t)(index >> 8);
+	dl[4] = name[0] != '\0' ? interface_type(name) : IFT_OTHER;
+	dl[6] = (uint8_t)link_length;
+	if (link != NULL) {
+		memcpy(dl + 8, link, link_length);
+	}
+	header_out = (struct xnu_rt_msghdr *)(out->bytes + start);
+	header_out->rtm_msglen = (uint16_t)(out->length - start);
 }
 
 long
