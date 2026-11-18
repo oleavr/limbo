@@ -86,6 +86,11 @@
 
 #define PROC_PIDDYNKQUEUES_MAX 1024
 
+#define FREAD  0x1
+#define FWRITE 0x2
+
+#define KEVENT_SIZE 32
+
 #define SRUN           2
 #define PROC_FLAG_LP64 0x10
 
@@ -192,6 +197,21 @@ struct proc_workqueueinfo {
 #endif
 
 enum {
+	PROX_FDTYPE_VNODE = 1,
+	PROX_FDTYPE_SOCKET = 2,
+	PROX_FDTYPE_KQUEUE = 5,
+	PROX_FDTYPE_PIPE = 6,
+};
+
+struct proc_fileinfo {
+	uint32_t fi_openflags;
+	uint32_t fi_status;
+	int64_t fi_offset;
+	int32_t fi_type;
+	uint32_t fi_guardflags;
+};
+
+enum {
 	VREG = 1,
 	VDIR = 2,
 	VBLK = 3,
@@ -233,6 +253,16 @@ struct vnode_info_path {
 	char vip_path[1024];
 };
 _Static_assert(sizeof(struct vnode_info_path) == 1176, "vnode_info_path");
+
+struct kqueue_fdinfo {
+	struct proc_fileinfo pfi;
+	struct {
+		struct vinfo_stat kq_stat;
+		uint32_t kq_state;
+		uint32_t rfu_1;
+	} kqueueinfo;
+};
+_Static_assert(sizeof(struct kqueue_fdinfo) == 168, "kqueue_fdinfo");
 
 struct proc_regioninfo {
 	uint32_t pri_protection;
@@ -282,6 +312,8 @@ static uint32_t file_table_size(int32_t pid);
 static int listfds(int32_t pid, void *buffer, int32_t buffersize);
 static int fdinfo(int32_t pid, uint32_t flavor, int32_t fd, void *buffer,
 		int32_t buffersize);
+static int kqueue_fdinfo(
+		int32_t pid, int32_t fd, void *buffer, int32_t buffersize);
 static void taskinfo(const struct process *process, struct proc_taskinfo *info);
 static int pidrusage(int32_t pid, uint32_t flavor, user_addr_t buffer);
 static uint64_t nanoseconds_to_absolute(uint64_t nanoseconds);
@@ -818,20 +850,18 @@ fdinfo(int32_t pid, uint32_t flavor, int32_t fd, void *buffer,
 {
 	enum {
 		PROC_PIDFDVNODEPATHINFO = 2,
+		PROC_PIDFDKQUEUEINFO = 7,
 	};
 	struct vnode_fdinfowithpath {
-		struct {
-			uint32_t fi_openflags;
-			uint32_t fi_status;
-			int64_t fi_offset;
-			int32_t fi_type;
-			uint32_t fi_guardflags;
-		} pfi;
+		struct proc_fileinfo pfi;
 		struct vnode_info_path pvip;
 	};
 	_Static_assert(sizeof(struct vnode_fdinfowithpath) == 1200,
 			"vnode_fdinfowithpath");
 
+	if (flavor == PROC_PIDFDKQUEUEINFO) {
+		return kqueue_fdinfo(pid, fd, buffer, buffersize);
+	}
 	if (flavor != PROC_PIDFDVNODEPATHINFO) {
 		return _ENOTSUP;
 	}
@@ -865,19 +895,36 @@ fdinfo(int32_t pid, uint32_t flavor, int32_t fd, void *buffer,
 		}
 		fclose(file);
 	}
-	info->pfi.fi_type = 1; /* PROX_FDTYPE_VNODE */
+	info->pfi.fi_type = PROX_FDTYPE_VNODE;
+	return sizeof(*info);
+}
+
+static int
+kqueue_fdinfo(int32_t pid, int32_t fd, void *buffer, int32_t buffersize)
+{
+	struct kqueue_fdinfo *info = buffer;
+	if (buffersize < (int32_t)sizeof(*info)) {
+		return _ENOMEM;
+	}
+	char proc_dir[64 + NAME_MAX], path[80 + NAME_MAX], link[64];
+	process_proc_dir(pid, proc_dir, sizeof(proc_dir));
+	snprintf(path, sizeof(path), "%s/fd/%d", proc_dir, fd);
+	ssize_t length = readlink(path, link, sizeof(link) - 1);
+	link[length > 0 ? length : 0] = '\0';
+	if (strncmp(link, "anon_inode:", 11) != 0) {
+		return _EBADF;
+	}
+	memset(info, 0, sizeof(*info));
+	info->pfi.fi_openflags = FREAD | FWRITE;
+	info->pfi.fi_type = PROX_FDTYPE_KQUEUE;
+	info->kqueueinfo.kq_stat.vst_mode = S_IFIFO;
+	info->kqueueinfo.kq_stat.vst_blksize = KEVENT_SIZE;
 	return sizeof(*info);
 }
 
 static int
 listfds(int32_t pid, void *buffer, int32_t buffersize)
 {
-	enum {
-		PROX_FDTYPE_VNODE = 1,
-		PROX_FDTYPE_SOCKET = 2,
-		PROX_FDTYPE_KQUEUE = 5,
-		PROX_FDTYPE_PIPE = 6,
-	};
 	struct proc_fdinfo_entry {
 		int32_t proc_fd;
 		uint32_t proc_fdtype;
