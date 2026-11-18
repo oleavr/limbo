@@ -39,6 +39,16 @@ void route_close(int fd);
 
 int route_ioctl(int fd, uint64_t command, void *data);
 
+struct route_neighbour {
+	uint16_t state;
+	bool router;
+	uint32_t updated_ms;
+	uint32_t used_ms;
+};
+
+bool route_neighbour6(const char *name, const uint8_t address[16],
+		struct route_neighbour *neighbour);
+
 int route_dump(int operation, int family, int flags, void *old,
 		size_t *oldlenp);
 

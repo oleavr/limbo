@@ -37,6 +37,7 @@
 #include <linux/if_ether.h>
 #include <linux/if_link.h>
 #include <linux/if_packet.h>
+#include <linux/neighbour.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <stdbool.h>
@@ -47,9 +48,11 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "net.h"
+#include "route.h"
 #include "xnu-errno.h"
 
 #define xnu_AF_INET  2
@@ -228,6 +231,7 @@ _Static_assert(sizeof(struct xnu_ifconf) == 12, "ifconf");
 #define xnu_SIOCGIFNAT64PREFIX       0xc06069c1
 #define xnu_SIOCGIFCLAT46ADDR        0xc02469c9
 #define xnu_SIOCGIFINFO_IN6          0xc030694c
+#define xnu_SIOCGNBRINFO_IN6         0xc038694e
 #define xnu_SIOCARPIPLL              0xc0206928
 #define xnu_SIOCPROTOATTACH          0xc0206950
 #define xnu_SIOCSDEFIFACE_IN6        0xc0186955
@@ -261,6 +265,24 @@ struct xnu_in6_ondireq {
 };
 
 _Static_assert(sizeof(struct xnu_in6_ondireq) == 48, "in6_ondireq");
+
+#define ND6_LLINFO_NOSTATE    (-2)
+#define ND6_LLINFO_INCOMPLETE 0
+#define ND6_LLINFO_REACHABLE  1
+#define ND6_LLINFO_STALE      2
+#define ND6_LLINFO_DELAY      3
+#define ND6_LLINFO_PROBE      4
+
+struct xnu_in6_nbrinfo {
+	char name[IFNAMSIZ];
+	uint8_t address[16];
+	int64_t asked;
+	int32_t isrouter;
+	int32_t state;
+	int32_t expire;
+};
+
+_Static_assert(sizeof(struct xnu_in6_nbrinfo) == 56, "in6_nbrinfo");
 
 #define IFRTYPE_FAMILY_ANY      0
 #define IFRTYPE_FAMILY_LOOPBACK 1
@@ -363,6 +385,7 @@ static void append_sockaddr(struct output *out, const struct sockaddr *address,
 static int bpf_ioctl(int fd, uint64_t command, void *data);
 static int host_interface_ioctl(
 		unsigned long command, const char *name, struct ifreq *out);
+static int neighbour_info(const char *name, struct xnu_in6_nbrinfo *info);
 static unsigned int read_ipv6_number(const char *directory, const char *name,
 		const char *setting, unsigned int fallback);
 static bool interface_address(const char *name, int family,
@@ -750,6 +773,8 @@ net_ioctl(int fd, uint64_t command, void *data)
 	case xnu_SIOCGIFNAT64PREFIX:
 	case xnu_SIOCGIFCLAT46ADDR:
 		return if_nametoindex(name) == 0 ? _ENXIO : _ENOENT;
+	case xnu_SIOCGNBRINFO_IN6:
+		return neighbour_info(name, data);
 	case xnu_SIOCGIFINFO_IN6: {
 		struct xnu_in6_ondireq *info = data;
 		error = host_interface_ioctl(SIOCGIFMTU, name, &host);
@@ -1085,6 +1110,49 @@ host_interface_ioctl(unsigned long command, const char *name, struct ifreq *out)
 	close(fd);
 	if (result == -1) {
 		return error == ENODEV ? _ENXIO : err_map(error);
+	}
+	return 0;
+}
+
+static int
+neighbour_info(const char *name, struct xnu_in6_nbrinfo *info)
+{
+	struct route_neighbour neighbour;
+	if (!route_neighbour6(name, info->address, &neighbour)) {
+		return _EINVAL;
+	}
+	int64_t now = time(NULL);
+	info->asked = 0;
+	info->isrouter = neighbour.router;
+	info->expire = 0;
+	if (neighbour.state & (NUD_PERMANENT | NUD_NOARP)) {
+		info->state = ND6_LLINFO_REACHABLE;
+	} else if (neighbour.state & NUD_REACHABLE) {
+		info->state = ND6_LLINFO_REACHABLE;
+		int64_t reachable_ms = read_ipv6_number(
+				"neigh", name, "base_reachable_time_ms", 30000);
+		int64_t left_ms = reachable_ms - neighbour.updated_ms;
+		info->expire = (int32_t)(now
+				+ (left_ms > 1000 ? left_ms / 1000 : 1));
+	} else if (neighbour.state & (NUD_STALE | NUD_DELAY | NUD_PROBE)) {
+		info->state = ND6_LLINFO_PROBE;
+		if (neighbour.state & NUD_STALE) {
+			info->state = ND6_LLINFO_STALE;
+		} else if (neighbour.state & NUD_DELAY) {
+			info->state = ND6_LLINFO_DELAY;
+		}
+		int64_t stale_ms = 1000
+				* (int64_t)read_ipv6_number("neigh", name,
+						"gc_stale_time", 60);
+		int64_t left_ms = stale_ms - neighbour.used_ms;
+		info->expire = (int32_t)(left_ms > 0
+						? now + (left_ms + 999) / 1000
+						: now - 1);
+	} else if (neighbour.state & NUD_INCOMPLETE) {
+		info->state = ND6_LLINFO_INCOMPLETE;
+		info->expire = (int32_t)(now + 1);
+	} else {
+		info->state = ND6_LLINFO_NOSTATE;
 	}
 	return 0;
 }

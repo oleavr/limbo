@@ -97,6 +97,8 @@
 #define IFT_ETHER 0x6
 #define IFT_LOOP  0x18
 
+#define CLOCK_T_MS 10
+
 #define KEV_ANY_VENDOR     0
 #define KEV_ANY_CLASS      0
 #define KEV_ANY_SUBCLASS   0
@@ -283,6 +285,13 @@ struct route_list {
 	size_t capacity;
 };
 
+struct neighbour_find {
+	int index;
+	const uint8_t *address;
+	struct route_neighbour *neighbour;
+	bool found;
+};
+
 struct neighbour_dump {
 	struct output *out;
 	int family;
@@ -349,6 +358,7 @@ static void append_route(struct output *out, uint8_t type,
 		const struct host_route *route, bool interface);
 static int route_flags(const struct host_route *route);
 static bool interface_address(unsigned int index, int family, uint8_t *out);
+static void find_neighbour(const struct nlmsghdr *header, void *context);
 static int host_family(int xnu_family);
 static struct route_list load_routes(int family);
 static void collect_route(const struct nlmsghdr *header, void *context);
@@ -1369,6 +1379,57 @@ route_close(int fd)
 	close(sockets[fd].peer);
 	sockets[fd].open = false;
 	pthread_mutex_unlock(&lock);
+}
+
+bool
+route_neighbour6(const char *name, const uint8_t address[16],
+		struct route_neighbour *neighbour)
+{
+	struct neighbour_find find = {
+			.index = (int)if_nametoindex(name),
+			.address = address,
+			.neighbour = neighbour,
+	};
+	netlink_dump(RTM_GETNEIGH, AF_INET6, find_neighbour, &find);
+	return find.found;
+}
+
+static void
+find_neighbour(const struct nlmsghdr *header, void *context)
+{
+	struct neighbour_find *find = context;
+	if (header->nlmsg_type != RTM_NEWNEIGH || find->found) {
+		return;
+	}
+	const struct ndmsg *message = NLMSG_DATA(header);
+	if (message->ndm_family != AF_INET6
+			|| message->ndm_ifindex != find->index) {
+		return;
+	}
+	struct route_neighbour neighbour = {
+			.state = message->ndm_state,
+			.router = message->ndm_flags & NTF_ROUTER,
+	};
+	bool match = false;
+	int length = (int)RTM_PAYLOAD(header);
+	for (const struct rtattr *attribute
+			= (const struct rtattr *)((const uint8_t *)message
+					+ NLMSG_ALIGN(sizeof(*message)));
+			RTA_OK(attribute, length);
+			attribute = RTA_NEXT(attribute, length)) {
+		if (attribute->rta_type == NDA_DST) {
+			match = memcmp(RTA_DATA(attribute), find->address, 16)
+					== 0;
+		} else if (attribute->rta_type == NDA_CACHEINFO) {
+			const struct nda_cacheinfo *info = RTA_DATA(attribute);
+			neighbour.updated_ms = info->ndm_updated * CLOCK_T_MS;
+			neighbour.used_ms = info->ndm_used * CLOCK_T_MS;
+		}
+	}
+	if (match) {
+		*find->neighbour = neighbour;
+		find->found = true;
+	}
 }
 
 int
