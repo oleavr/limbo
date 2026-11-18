@@ -227,6 +227,13 @@ check_created_thread(void)
 	CHECK(arm_thread_state64_get_sp(found)
 			== (uintptr_t)stack + sizeof(stack));
 	CHECK(arm_thread_state64_get_fp(found) == (uintptr_t)stack);
+
+	CHECK(thread_terminate(port) == KERN_SUCCESS);
+	usleep(100000);
+	count = ARM_THREAD_STATE64_COUNT;
+	CHECK(thread_get_state(port, ARM_THREAD_STATE64, (thread_state_t)&found,
+			      &count)
+			!= KERN_SUCCESS);
 #endif
 }
 

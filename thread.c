@@ -59,6 +59,7 @@ static __thread struct thread *current;
 static void *thread_main(void *arg);
 static void thread_destroy(struct thread *thread);
 static uint64_t thread_state_tsd_base(const struct thread_state *state);
+static void exit_if_terminated(struct thread *thread);
 
 struct thread *
 thread_current(void)
@@ -367,6 +368,7 @@ thread_stop_if_suspended(void *context)
 		return;
 	}
 	pthread_mutex_lock(&thread->suspend_lock);
+	exit_if_terminated(thread);
 	if (thread->suspend_count != 0) {
 		thread->stopped_context = context;
 		while (thread->suspend_count != 0) {
@@ -374,6 +376,7 @@ thread_stop_if_suspended(void *context)
 		}
 		thread->stopped_context = NULL;
 	}
+	exit_if_terminated(thread);
 	pthread_mutex_unlock(&thread->suspend_lock);
 }
 
@@ -407,12 +410,23 @@ thread_leave_trap(void *context, void *outer)
 		}
 		thread->stopped_context = NULL;
 	}
+	exit_if_terminated(thread);
 	thread->trap_context = outer;
 	pthread_mutex_unlock(&thread->suspend_lock);
 	if (thread->workqueue && thread->trap_depth > 0
 			&& --thread->trap_depth == 0) {
 		atomic_store_explicit(
 				&thread->trap_since, 0, memory_order_relaxed);
+	}
+}
+
+static void
+exit_if_terminated(struct thread *thread)
+{
+	if (thread->terminate_requested) {
+		thread->stopped_context = NULL;
+		pthread_mutex_unlock(&thread->suspend_lock);
+		thread_exit(NULL, 0);
 	}
 }
 
@@ -424,4 +438,24 @@ thread_resume_thread(struct thread *thread)
 		pthread_cond_broadcast(&thread->resumed);
 	}
 	pthread_mutex_unlock(&thread->suspend_lock);
+}
+
+void
+thread_terminate_thread(struct thread *thread)
+{
+	if (thread == thread_current()) {
+		thread_exit(NULL, 0);
+	}
+	pthread_mutex_lock(&thread->suspend_lock);
+	thread->terminate_requested = true;
+	thread->terminating = true;
+	if (thread->suspend_count != 0) {
+		thread->suspend_count = 0;
+		pthread_cond_broadcast(&thread->resumed);
+	}
+	pthread_mutex_unlock(&thread->suspend_lock);
+	if (thread->tid != 0) {
+		syscall(SYS_tgkill, getpid(), thread->tid,
+				thread_suspend_signal());
+	}
 }
