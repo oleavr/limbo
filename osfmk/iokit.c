@@ -1,5 +1,6 @@
 /*
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -41,6 +42,9 @@
 #define kOSSerializeString          0x09000000
 #define kOSSerializeData            0x0a000000
 
+#define kIOTerminatedNotification "IOServiceTerminate"
+#define kIOProviderClassKey       "IOProviderClass"
+
 enum identity_kind {
 	IDENTITY_STRING,
 	IDENTITY_DATA,
@@ -81,12 +85,15 @@ static const struct identity_property identity[] = {
 	{"manufacturer", IDENTITY_DATA, "Apple Inc.\0", 11},
 };
 
+static bool platform_expert_conforms_to(const char *class_name);
 static kern_return_t match_platform_expert(mach_port_t *service);
 static kern_return_t match_iterator(mach_port_t *existing);
 static const struct identity_property *identity_lookup(const char *name);
 static void identity_configure(void);
 static void *identity_serialize(const struct identity_property *prop,
 		mach_msg_type_number_t *out_size);
+static bool is_plane_root(const char *path);
+static bool platform_expert_matches(const void *matching, size_t size);
 
 
 kern_return_t
@@ -100,10 +107,16 @@ kern_return_t
 is_io_object_conforms_to(
 		mach_port_t object, io_name_t className, boolean_t *conforms)
 {
-	*conforms = strcmp(className, "IOPlatformExpertDevice") == 0
-			|| strcmp(className, "IOService") == 0
-			|| strcmp(className, "IORegistryEntry") == 0;
+	*conforms = platform_expert_conforms_to(className);
 	return KERN_SUCCESS;
+}
+
+static bool
+platform_expert_conforms_to(const char *class_name)
+{
+	return strcmp(class_name, "IOPlatformExpertDevice") == 0
+			|| strcmp(class_name, "IOService") == 0
+			|| strcmp(class_name, "IORegistryEntry") == 0;
 }
 
 kern_return_t
@@ -257,7 +270,18 @@ is_io_registry_entry_from_path(mach_port_t main_port,
 		io_string_t path,
 		mach_port_t *registry_entry)
 {
-	unimplemented();
+	if (is_plane_root(path)) {
+		return match_platform_expert(registry_entry);
+	}
+	*registry_entry = MACH_PORT_NULL;
+	return KERN_SUCCESS;
+}
+
+static bool
+is_plane_root(const char *path)
+{
+	return strcmp(path, "IOService:/") == 0
+			|| strcmp(path, "IODeviceTree:/") == 0;
 }
 
 kern_return_t
@@ -819,7 +843,24 @@ is_io_service_add_notification_bin(mach_port_t main_port,
 		mach_msg_type_number_t referenceCnt,
 		mach_port_t *notification)
 {
-	unimplemented();
+	if (strcmp(notification_type, kIOTerminatedNotification) != 0
+			&& platform_expert_matches(matching, matchingCnt)) {
+		return match_iterator(notification);
+	}
+	return exhausted_iterator(notification);
+}
+
+static bool
+platform_expert_matches(const void *matching, size_t size)
+{
+	struct os_object *table = os_unserialize(matching, size);
+	const struct os_object *class_name
+			= os_dictionary_get(table, kIOProviderClassKey);
+	bool matches = class_name != NULL
+			&& platform_expert_conforms_to(
+					(const char *)class_name->data.bytes);
+	os_release(table);
+	return matches;
 }
 
 kern_return_t
