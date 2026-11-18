@@ -113,6 +113,8 @@
 #define NOTE_WL_IGNORE_ESTALE  0x00000100
 #define NOTE_WL_OWNER_ONLY     0x00000200
 
+#define KQUEUE_NESTING_MAX 4
+
 #define EV_EXTIDX_WL_ADDR  1
 #define EV_EXTIDX_WL_MASK  2
 #define EV_EXTIDX_WL_VALUE 3
@@ -267,6 +269,7 @@ static void fd_watch_start(void);
 static int kqueue_collect(struct kqueue *kq, bool manager,
 		struct kevent_qos_s *events, int max_events, uint8_t **data,
 		size_t *data_size);
+static bool kqueue_has_events(struct kqueue *kq, int depth);
 static bool machport_receive(
 		struct kevent_qos_s *event, uint8_t **data, size_t *data_size);
 static void knote_delivered(struct knote *kn);
@@ -521,8 +524,14 @@ kevent_internal(struct kqueue *kq, const struct kevent_qos_s *changes,
 		nerrors++;
 	}
 
-	kqueue_request(kq, false);
-	kqueue_request(kq, true);
+	if (kq->kind == KQUEUE_FD) {
+		if (kq->pollers != 0 || kqueue_has_events(kq, 0)) {
+			eventfd_write(kq->fd, 1);
+		}
+	} else {
+		kqueue_request(kq, false);
+		kqueue_request(kq, true);
+	}
 
 	if (nerrors != 0 || (flags & KEVENT_FLAG_ERROR_EVENTS)
 			|| nevents == 0) {
@@ -1341,6 +1350,16 @@ sock_ready(struct knote *kn)
 static bool
 fd_ready(struct knote *kn)
 {
+	if (kn->kev.filter == EVFILT_READ) {
+		struct kqueue *inner = fd_kqueue_lookup((int)kn->kev.ident);
+		if (inner != NULL) {
+			if (!kqueue_has_events(inner, 0)) {
+				return false;
+			}
+			kn->kev.data = 1;
+			return true;
+		}
+	}
 	struct pollfd pfd = {
 			.fd = kn->kev.ident,
 			.events
@@ -1453,6 +1472,33 @@ kqueue_collect(struct kqueue *kq, bool manager, struct kevent_qos_s *events,
 		kn = next;
 	}
 	return count;
+}
+
+static bool
+kqueue_has_events(struct kqueue *kq, int depth)
+{
+	bool ready = false;
+	for (struct knote *kn = kq->knotes; kn != NULL && !ready;
+			kn = kn->next) {
+		if (kn->disabled) {
+			continue;
+		}
+		if (kn->kev.filter == EVFILT_READ
+				&& depth < KQUEUE_NESTING_MAX) {
+			struct kqueue *inner
+					= fd_kqueue_lookup((int)kn->kev.ident);
+			if (inner != NULL) {
+				ready = kqueue_has_events(inner, depth + 1);
+				continue;
+			}
+		}
+		ready = knote_active(kn);
+	}
+	if (!ready && kq->pollers == 0) {
+		eventfd_t value;
+		eventfd_read(kq->fd, &value);
+	}
+	return ready;
 }
 
 int
