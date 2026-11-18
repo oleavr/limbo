@@ -28,12 +28,15 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 small=$work/small
-mkdir -p "$small/System/Library/CoreServices" "$small/bin" "$small/usr/bin" \
+mkdir -p "$small/System/Library/CoreServices" \
+	"$small/System/Library/PrivateFrameworks" "$small/bin" "$small/usr/bin" \
 	"$small/usr/lib" "$small/usr/share" "$small/private/etc" \
 	"$small/private/var/db" "$small/private/var/select" \
-	"$small/Library/Preferences"
+	"$small/private/var/run" "$small/private/tmp" "$small/Library/Preferences"
 cp /System/Library/CoreServices/SystemVersion.plist \
 	"$small/System/Library/CoreServices/"
+cp -RP /System/Library/PrivateFrameworks/AppleSystemInfo.framework \
+	"$small/System/Library/PrivateFrameworks/"
 cp -RP /bin/sh /bin/bash /bin/echo /bin/ls "$small/bin/"
 cp -RP /usr/bin/xcrun /usr/bin/xcode-select "$small/usr/bin/"
 cp -RP /usr/lib/dyld /usr/lib/*.dylib "$small/usr/lib/"
@@ -48,14 +51,16 @@ ln -s /Applications/Xcode.app/Contents/Developer \
 	"$small/private/var/db/xcode_select_link"
 ln -s private/etc "$small/etc"
 ln -s private/var "$small/var"
+ln -s private/tmp "$small/tmp"
+chmod 1777 "$small/private/tmp"
 (cd "$small" && tar -c --no-acls --no-fflags --no-xattrs -f "$work/small.tar" .)
 
 large=$work/large
-mkdir -p "$large/System/Library/dyld" "$large/Applications"
+mkdir -p "$large/System/Cryptexes/OS/System/Library/dyld" "$large/Applications"
 for file in "$cache"/dyld_shared_cache_x86_64*; do
 	case $file in
 	*.atlas | *.map) ;;
-	*) ln -s "$file" "$large/System/Library/dyld/" ;;
+	*) ln -s "$file" "$large/System/Cryptexes/OS/System/Library/dyld/" ;;
 	esac
 done
 ln -s "$xcode" "$large/Applications/Xcode.app"
