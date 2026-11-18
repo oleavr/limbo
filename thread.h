@@ -58,6 +58,12 @@ struct thread_state {
 #endif
 };
 
+struct exception_action {
+	mach_port_name_t port;
+	exception_behavior_t behavior;
+	thread_state_flavor_t flavor;
+};
+
 struct thread;
 
 typedef bool (*thread_continuation_t)(
@@ -74,6 +80,7 @@ struct thread {
 	bool continuation_pending;
 	bool terminating;
 	bool terminate_requested;
+	struct exception_action *exception_actions;
 	void *stack;
 	size_t stack_size;
 	pthread_mutex_t suspend_lock;

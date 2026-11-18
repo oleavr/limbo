@@ -57,6 +57,14 @@ typedef struct {
 	mach_msg_trailer_t trailer;
 } received_t;
 
+typedef struct {
+	mach_msg_type_number_t count;
+	exception_mask_t masks[EXC_TYPES_COUNT];
+	mach_port_t ports[EXC_TYPES_COUNT];
+	exception_behavior_t behaviors[EXC_TYPES_COUNT];
+	thread_state_flavor_t flavors[EXC_TYPES_COUNT];
+} handlers_t;
+
 static semaphore_t semaphore;
 
 static void check_messages(void);
@@ -74,6 +82,10 @@ static void check_exception_ports(void);
 static void check_vouchers(void);
 static void check_destroy(void);
 static void check_tasks(void);
+static void check_thread_exception_ports(void);
+static handlers_t thread_handlers(mach_port_t thread, exception_mask_t mask);
+static mach_port_urefs_t send_refs(mach_port_t port);
+static void *handle_own_exceptions(void *arg);
 static mach_port_t allocate_port(void);
 
 int
@@ -92,6 +104,7 @@ main(void)
 	check_vouchers();
 	check_destroy();
 	check_tasks();
+	check_thread_exception_ports();
 	return 0;
 }
 
@@ -570,4 +583,107 @@ check_tasks(void)
 	CHECK(task_map_corpse_info_64(
 			      task, task, &corpse_info_64, &corpse_size_64)
 			== KERN_INVALID_ARGUMENT);
+}
+
+static void
+check_thread_exception_ports(void)
+{
+	mach_port_t handler = allocate_port();
+	CHECK(mach_port_insert_right(mach_task_self(), handler, handler,
+			      MACH_MSG_TYPE_MAKE_SEND)
+			== KERN_SUCCESS);
+	mach_port_t self = pthread_mach_thread_np(pthread_self());
+	exception_mask_t both = EXC_MASK_BAD_ACCESS | EXC_MASK_BAD_INSTRUCTION;
+	exception_behavior_t behavior = EXCEPTION_STATE | MACH_EXCEPTION_CODES;
+	CHECK(thread_handlers(self, both).count == 0);
+
+	CHECK(thread_set_exception_ports(
+			      self, 0, handler, behavior, MACHINE_THREAD_STATE)
+			== KERN_SUCCESS);
+	CHECK(send_refs(handler) == 1);
+
+	CHECK(thread_set_exception_ports(self, both, handler, behavior,
+			      MACHINE_THREAD_STATE)
+			== KERN_SUCCESS);
+	mach_port_urefs_t refs = send_refs(handler);
+	handlers_t set = thread_handlers(self, both);
+	CHECK(set.count == 1);
+	CHECK(set.masks[0] == both);
+	CHECK(set.ports[0] == handler);
+	CHECK(set.behaviors[0] == behavior);
+	CHECK(set.flavors[0] == MACHINE_THREAD_STATE);
+	CHECK(send_refs(handler) == refs + 1);
+	CHECK(mach_port_deallocate(mach_task_self(), handler) == KERN_SUCCESS);
+
+	handlers_t old = {.count = EXC_TYPES_COUNT};
+	CHECK(thread_swap_exception_ports(self, EXC_MASK_BAD_ACCESS,
+			      MACH_PORT_NULL, EXCEPTION_DEFAULT,
+			      THREAD_STATE_NONE, old.masks, &old.count,
+			      old.ports, old.behaviors, old.flavors)
+			== KERN_SUCCESS);
+	CHECK(old.count == 1);
+	CHECK(old.masks[0] == EXC_MASK_BAD_ACCESS);
+	CHECK(old.ports[0] == handler);
+	CHECK(mach_port_deallocate(mach_task_self(), handler) == KERN_SUCCESS);
+
+	handlers_t swapped = thread_handlers(self, both);
+	CHECK(swapped.count == 2);
+	CHECK(swapped.masks[0] == EXC_MASK_BAD_ACCESS);
+	CHECK(swapped.ports[0] == MACH_PORT_NULL);
+	CHECK(swapped.behaviors[0] == EXCEPTION_DEFAULT);
+	CHECK(swapped.flavors[0] == THREAD_STATE_NONE);
+	CHECK(swapped.masks[1] == EXC_MASK_BAD_INSTRUCTION);
+	CHECK(swapped.ports[1] == handler);
+	CHECK(mach_port_deallocate(mach_task_self(), handler) == KERN_SUCCESS);
+
+	CHECK(thread_set_exception_ports(self, both, MACH_PORT_NULL,
+			      EXCEPTION_DEFAULT, THREAD_STATE_NONE)
+			== KERN_SUCCESS);
+	handlers_t cleared = thread_handlers(self, both);
+	CHECK(cleared.count == 1);
+	CHECK(cleared.ports[0] == MACH_PORT_NULL);
+
+	refs = send_refs(handler);
+	pthread_t thread;
+	CHECK(pthread_create(&thread, NULL, handle_own_exceptions,
+			      (void *)(uintptr_t)handler)
+			== 0);
+	CHECK(pthread_join(thread, NULL) == 0);
+	for (int i = 0; i < 100 && send_refs(handler) != refs; i++) {
+		usleep(10000);
+	}
+	CHECK(send_refs(handler) == refs);
+}
+
+static handlers_t
+thread_handlers(mach_port_t thread, exception_mask_t mask)
+{
+	handlers_t handlers = {.count = EXC_TYPES_COUNT};
+	CHECK(thread_get_exception_ports(thread, mask, handlers.masks,
+			      &handlers.count, handlers.ports,
+			      handlers.behaviors, handlers.flavors)
+			== KERN_SUCCESS);
+	return handlers;
+}
+
+static mach_port_urefs_t
+send_refs(mach_port_t port)
+{
+	mach_port_urefs_t refs;
+	CHECK(mach_port_get_refs(mach_task_self(), port, MACH_PORT_RIGHT_SEND,
+			      &refs)
+			== KERN_SUCCESS);
+	return refs;
+}
+
+static void *
+handle_own_exceptions(void *arg)
+{
+	mach_port_t handler = (mach_port_t)(uintptr_t)arg;
+	CHECK(thread_set_exception_ports(pthread_mach_thread_np(pthread_self()),
+			      EXC_MASK_BAD_ACCESS, handler,
+			      EXCEPTION_STATE | MACH_EXCEPTION_CODES,
+			      MACHINE_THREAD_STATE)
+			== KERN_SUCCESS);
+	return NULL;
 }

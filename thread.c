@@ -58,6 +58,7 @@ static __thread struct thread *current;
 
 static void *thread_main(void *arg);
 static void thread_destroy(struct thread *thread);
+static void release_exception_actions(struct thread *thread);
 static uint64_t thread_state_tsd_base(const struct thread_state *state);
 static void exit_if_terminated(struct thread *thread);
 
@@ -194,10 +195,24 @@ thread_destroy(struct thread *thread)
 	if (thread->stack_size != 0) {
 		munmap(thread->stack, thread->stack_size);
 	}
+	release_exception_actions(thread);
 	ipc_kobject_destroy(thread->port);
 	ipc_port_deallocate(thread->port);
 	current = NULL;
 	free(thread);
+}
+
+static void
+release_exception_actions(struct thread *thread)
+{
+	if (thread->exception_actions == NULL) {
+		return;
+	}
+	for (int type = FIRST_EXCEPTION; type < EXC_TYPES_COUNT; type++) {
+		ipc_port_mod_refs(thread->exception_actions[type].port,
+				MACH_PORT_RIGHT_SEND, -1);
+	}
+	free(thread->exception_actions);
 }
 
 static uint64_t
