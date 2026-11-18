@@ -30,6 +30,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <mach/mach.h>
+#include <mach/mach_time.h>
 #include <pthread.h>
 #include <pthread/qos.h>
 #include <stdatomic.h>
@@ -351,6 +352,17 @@ check_thread_times(void)
 			== KERN_SUCCESS);
 	CHECK(microseconds(live.user_time) + microseconds(live.system_time)
 			>= 200000);
+
+	task_absolutetime_info_data_t absolute;
+	count = TASK_ABSOLUTETIME_INFO_COUNT;
+	CHECK(task_info(mach_task_self(), TASK_ABSOLUTETIME_INFO,
+			      (task_info_t)&absolute, &count)
+			== KERN_SUCCESS);
+	mach_timebase_info_data_t timebase;
+	mach_timebase_info(&timebase);
+	uint64_t live_absolute
+			= absolute.threads_user + absolute.threads_system;
+	CHECK(live_absolute * timebase.numer / timebase.denom >= 200000000);
 
 	times_read = true;
 	CHECK(pthread_join(spinner, NULL) == 0);
