@@ -286,6 +286,10 @@ main(void)
 			&& errno == ESRCH);
 
 	CHECK(labs(time(NULL) - info.kp_proc.p_starttime.tv_sec) < 60);
+
+	double loads[3] = {-1, -1, -1};
+	CHECK(getloadavg(loads, 3) == 3);
+	CHECK(loads[0] >= 0 && loads[1] >= 0 && loads[2] >= 0);
 	return 0;
 }
 
