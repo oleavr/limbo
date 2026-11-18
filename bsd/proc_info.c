@@ -56,9 +56,18 @@
 #define PROC_INFO_CALL_SETCONTROL      0x5
 #define PROC_INFO_CALL_DIRTYCONTROL    0x8
 #define PROC_INFO_CALL_PIDRUSAGE       0x9
+#define PROC_INFO_CALL_PIDORIGINATORINFO 0xa
 #define PROC_INFO_CALL_SET_DYLD_IMAGES 0xf
 
 #define PROC_SELFSET_THREADNAME 2
+
+#define PROC_PIDORIGINATOR_UUID     0x1
+#define PROC_PIDORIGINATOR_BGSTATE  0x2
+#define PROC_PIDORIGINATOR_PID_UUID 0x3
+
+#define PROC_PIDORIGINATOR_UUID_SIZE     16
+#define PROC_PIDORIGINATOR_BGSTATE_SIZE  4
+#define PROC_PIDORIGINATOR_PID_UUID_SIZE 48
 
 #define PROC_ALL_PIDS  1
 #define PROC_UID_ONLY  4
@@ -277,6 +286,8 @@ static void taskinfo(const struct process *process, struct proc_taskinfo *info);
 static int pidrusage(int32_t pid, uint32_t flavor, user_addr_t buffer);
 static uint64_t nanoseconds_to_absolute(uint64_t nanoseconds);
 static int setcontrol(uint32_t flavor, user_addr_t buffer, int32_t buffersize);
+static int pidoriginatorinfo(int32_t pid, uint32_t flavor, user_addr_t buffer,
+		int32_t buffersize);
 static int listpids(uint32_t type, uint32_t typeinfo, user_addr_t buffer,
 		int32_t buffersize);
 static bool status_field(pid_t pid, const char *field, int index,
@@ -310,6 +321,8 @@ sys_proc_info(int32_t callnum, int32_t pid, uint32_t flavor, uint64_t arg,
 		return 0;
 	case PROC_INFO_CALL_PIDRUSAGE:
 		return pidrusage(pid, flavor, buffer);
+	case PROC_INFO_CALL_PIDORIGINATORINFO:
+		return pidoriginatorinfo(pid, flavor, buffer, buffersize);
 	default:
 		unimplemented();
 	}
@@ -686,6 +699,36 @@ setcontrol(uint32_t flavor, user_addr_t buffer, int32_t buffersize)
 	snprintf(name, sizeof(name), "%.*s", buffersize, (char *)buffer);
 	prctl(PR_SET_NAME, name);
 	return 0;
+}
+
+static int
+pidoriginatorinfo(int32_t pid, uint32_t flavor, user_addr_t buffer,
+		int32_t buffersize)
+{
+	int32_t size;
+	switch (flavor) {
+	case PROC_PIDORIGINATOR_UUID:
+		size = PROC_PIDORIGINATOR_UUID_SIZE;
+		break;
+	case PROC_PIDORIGINATOR_BGSTATE:
+		size = PROC_PIDORIGINATOR_BGSTATE_SIZE;
+		break;
+	case PROC_PIDORIGINATOR_PID_UUID:
+		size = PROC_PIDORIGINATOR_PID_UUID_SIZE;
+		break;
+	default:
+		return _EINVAL;
+	}
+	if (buffersize < size) {
+		return _ENOMEM;
+	}
+	if ((pid != 0 && pid != getpid())
+			|| flavor != PROC_PIDORIGINATOR_BGSTATE) {
+		return _EINVAL;
+	}
+	uint32_t backgrounded = 0;
+	memcpy(buffer, &backgrounded, sizeof(backgrounded));
+	return size;
 }
 
 static int

@@ -62,8 +62,13 @@
 #ifndef PROC_PIDVMRTFAULTINFO
 #define PROC_PIDVMRTFAULTINFO 29
 #endif
+#ifndef PROC_PIDORIGINATOR_UUID
+#define PROC_PIDORIGINATOR_UUID    1
+#define PROC_PIDORIGINATOR_BGSTATE 2
+#endif
 
 int proc_get_cpumon_params(pid_t pid, int *percentage, int *interval);
+int proc_pidoriginatorinfo(int flavor, void *buffer, int buffersize);
 
 static void check_main_thread_gone(void);
 static void check_sysctl_walk(void);
@@ -299,6 +304,18 @@ main(void)
 	errno = 0;
 	CHECK(proc_get_cpumon_params(99998, &percentage, &interval) == -1
 			&& errno == ESRCH);
+
+	uint32_t backgrounded = 1;
+	CHECK(proc_pidoriginatorinfo(PROC_PIDORIGINATOR_BGSTATE, &backgrounded,
+			      sizeof(backgrounded))
+			== sizeof(backgrounded));
+	CHECK(backgrounded == 0);
+	uuid_t originator;
+	errno = 0;
+	CHECK(proc_pidoriginatorinfo(PROC_PIDORIGINATOR_UUID, originator,
+			      sizeof(originator))
+					== 0
+			&& errno == EINVAL);
 
 	CHECK(labs(time(NULL) - info.kp_proc.p_starttime.tv_sec) < 60);
 
