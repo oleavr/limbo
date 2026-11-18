@@ -26,6 +26,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <dispatch/dispatch.h>
 #include <errno.h>
 #include <libproc.h>
 #include <mach/mach.h>
@@ -65,6 +66,8 @@
 int proc_get_cpumon_params(pid_t pid, int *percentage, int *interval);
 
 static void check_main_thread_gone(void);
+static void check_workqueue(void);
+static void signal_done(void *done);
 
 int
 main(void)
@@ -146,6 +149,7 @@ main(void)
 			<= 0);
 
 	check_main_thread_gone();
+	check_workqueue();
 
 	int value = -1;
 	size = sizeof(value);
@@ -358,4 +362,27 @@ check_main_thread_gone(void)
 
 	int status;
 	CHECK(waitpid(pid, &status, 0) == pid);
+}
+
+static void
+check_workqueue(void)
+{
+	dispatch_semaphore_t done = dispatch_semaphore_create(0);
+	dispatch_async_f(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), done,
+			signal_done);
+	dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+
+	struct proc_workqueueinfo info;
+	CHECK(proc_pidinfo(getpid(), PROC_PIDWORKQUEUEINFO, 0, &info,
+			      sizeof(info))
+			== sizeof(info));
+	CHECK(info.pwq_nthreads > 0);
+	CHECK(info.pwq_runthreads + info.pwq_blockedthreads
+			<= info.pwq_nthreads);
+}
+
+static void
+signal_done(void *done)
+{
+	dispatch_semaphore_signal(done);
 }

@@ -67,6 +67,7 @@
 
 #define PROC_PIDLISTFDS            1
 #define PROC_PIDTBSDINFO           3
+#define PROC_PIDWORKQUEUEINFO      12
 #define PROC_PIDT_SHORTBSDINFO     13
 #define PROC_PIDUNIQIDENTIFIERINFO 17
 #define PROC_PIDT_BSDINFOWITHUNIQID 18
@@ -159,6 +160,13 @@ struct proc_taskinfo {
 struct proc_taskallinfo {
 	struct proc_bsdinfo pbsd;
 	struct proc_taskinfo ptinfo;
+};
+
+struct proc_workqueueinfo {
+	uint32_t pwq_nthreads;
+	uint32_t pwq_runthreads;
+	uint32_t pwq_blockedthreads;
+	uint32_t pwq_state;
 };
 
 #define PROC_PIDTASKALLINFO 2
@@ -474,6 +482,19 @@ pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, user_addr_t buffer,
 			return _EINVAL;
 		}
 		return 0;
+	case PROC_PIDWORKQUEUEINFO: {
+		struct proc_workqueueinfo *info = buffer;
+		if (buffersize < (int32_t)sizeof(*info)) {
+			return _ENOMEM;
+		}
+		if (pid != getpid()) {
+			return _ESRCH;
+		}
+		info->pwq_state = 0;
+		workq_counts(&info->pwq_nthreads, &info->pwq_runthreads,
+				&info->pwq_blockedthreads);
+		return sizeof(*info);
+	}
 	default:
 		unimplemented();
 	}
