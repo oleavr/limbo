@@ -38,6 +38,7 @@
 #include <time.h>
 
 #include "handler.h"
+#include "signals.h"
 #include "thread.h"
 #include "xnu-errno.h"
 
@@ -48,8 +49,7 @@ struct psynch_waiter {
 	struct psynch_waiter *next;
 	user_addr_t object;
 	mach_port_name_t thread;
-	pthread_cond_t wakeup;
-	bool woken;
+	_Atomic uint32_t woken;
 };
 
 struct psynch_prepost {
@@ -114,7 +114,6 @@ psynch_wait(user_addr_t object, bool sequenced, uint32_t seq, int64_t sec,
 			.object = object,
 			.thread = thread_current()->port,
 	};
-	pthread_cond_init(&waiter.wakeup, NULL);
 
 	pthread_mutex_lock(&lock);
 	int result = 0;
@@ -124,8 +123,6 @@ psynch_wait(user_addr_t object, bool sequenced, uint32_t seq, int64_t sec,
 		result = wait_for_signal(&waiter, sec, nsec);
 	}
 	pthread_mutex_unlock(&lock);
-
-	pthread_cond_destroy(&waiter.wakeup);
 	return result;
 }
 
@@ -169,12 +166,15 @@ wait_for_signal(struct psynch_waiter *waiter, int64_t sec, uint32_t nsec)
 	}
 
 	while (!waiter->woken) {
-		int error = timed ? pthread_cond_timedwait(&waiter->wakeup,
-						    &lock, &deadline)
-				  : pthread_cond_wait(&waiter->wakeup, &lock);
+		int error = signals_futex_wait(&waiter->woken, &lock,
+				timed ? &deadline : NULL);
 		if (error == ETIMEDOUT && !waiter->woken) {
 			remove_waiter(waiter);
 			return _ETIMEDOUT;
+		}
+		if (error == EINTR && !waiter->woken) {
+			remove_waiter(waiter);
+			return _EINTR;
 		}
 	}
 	return 0;
@@ -249,8 +249,7 @@ wake_waiters(user_addr_t object, mach_port_name_t thread, uint32_t count)
 		}
 
 		*p = w->next;
-		w->woken = true;
-		pthread_cond_signal(&w->wakeup);
+		signals_futex_wake(&w->woken);
 		woken++;
 	}
 	return woken;

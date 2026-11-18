@@ -27,9 +27,12 @@
 
 #pragma once
 
+#include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <time.h>
 #include <ucontext.h>
 
 enum signal_context {
@@ -44,6 +47,9 @@ enum signal_context {
 void signals_init(void);
 void signals_handle(int sig, siginfo_t *info, ucontext_t *uc,
 		enum signal_context context);
+int signals_futex_wait(_Atomic uint32_t *word, pthread_mutex_t *mutex,
+		const struct timespec *deadline);
+void signals_futex_wake(_Atomic uint32_t *word);
 bool signals_trap_enter(ucontext_t *uc);
 bool signals_restart(unsigned long number);
 void signals_trap_exit(ucontext_t *uc);

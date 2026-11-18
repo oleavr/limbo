@@ -30,6 +30,7 @@
 #endif
 
 #include <errno.h>
+#include <linux/futex.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -544,6 +545,36 @@ signals_handle(int sig, siginfo_t *info, ucontext_t *uc,
 		atomic_fetch_or(&process_pending, bit);
 		break;
 	}
+}
+
+int
+signals_futex_wait(_Atomic uint32_t *word, pthread_mutex_t *mutex,
+		const struct timespec *deadline)
+{
+	int error = 0;
+	pthread_mutex_unlock(mutex);
+	while (atomic_load(word) == 0) {
+		long result = syscall(SYS_futex, word,
+				FUTEX_WAIT_BITSET | FUTEX_CLOCK_REALTIME, 0,
+				deadline, NULL, FUTEX_BITSET_MATCH_ANY);
+		if (result == -1 && errno == ETIMEDOUT) {
+			error = ETIMEDOUT;
+			break;
+		}
+		if (result == -1 && errno == EINTR && thread_pending != 0) {
+			error = EINTR;
+			break;
+		}
+	}
+	pthread_mutex_lock(mutex);
+	return error;
+}
+
+void
+signals_futex_wake(_Atomic uint32_t *word)
+{
+	atomic_store(word, 1);
+	syscall(SYS_futex, word, FUTEX_WAKE, 1, NULL, NULL, 0);
 }
 
 bool
