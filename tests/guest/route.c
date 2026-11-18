@@ -208,6 +208,23 @@ main(void)
 	CHECK(loopback);
 	free(table);
 
+	int neighbours[6] = {CTL_NET, PF_ROUTE, 0, AF_INET, NET_RT_FLAGS,
+			RTF_LLINFO};
+	uint8_t entries[65536];
+	size = sizeof(entries);
+	CHECK(sysctl(neighbours, 6, entries, &size, NULL, 0) == 0);
+	for (size_t offset = 0; offset < size;) {
+		const struct rt_msghdr *header
+				= (const struct rt_msghdr *)(entries + offset);
+		CHECK(header->rtm_flags & RTF_LLINFO);
+		addresses(header, found);
+		CHECK(found[RTAX_DST] != NULL
+				&& found[RTAX_DST]->sa_family == AF_INET);
+		CHECK(found[RTAX_GATEWAY] != NULL
+				&& found[RTAX_GATEWAY]->sa_family == AF_LINK);
+		offset += header->rtm_msglen;
+	}
+
 	int e = socket(PF_SYSTEM, SOCK_RAW, SYSPROTO_EVENT);
 	CHECK(e != -1);
 	struct kev_request back = {0};
