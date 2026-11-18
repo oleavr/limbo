@@ -360,20 +360,6 @@ task_set_special_port(task_t task, int which_port, mach_port_t special_port)
 }
 
 kern_return_t
-thread_create(task_t parent_task, thread_act_t *child_act)
-{
-	unimplemented();
-}
-
-kern_return_t
-thread_create_running(task_t parent_task, thread_state_flavor_t flavor,
-		thread_state_t new_state, mach_msg_type_number_t new_stateCnt,
-		thread_act_t *child_act)
-{
-	unimplemented();
-}
-
-kern_return_t
 task_set_exception_ports(task_t task, exception_mask_t exception_mask,
 		mach_port_t new_port, exception_behavior_t behavior,
 		thread_state_flavor_t new_flavor)

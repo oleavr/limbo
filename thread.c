@@ -231,6 +231,35 @@ thread_enter(const struct thread_state *state)
 void
 thread_enter(const struct thread_state *state)
 {
+	if (state->full) {
+		asm volatile("msr tpidr_el0, %0" ::"r"(state->tpidr));
+		register const struct thread_state *full asm("x16") = state;
+		asm volatile("ldr x17, [%0, %c[sp]]\n"
+			     "mov sp, x17\n"
+			     "ldp x0, x1, [%0, %c[regs] + 0]\n"
+			     "ldp x2, x3, [%0, %c[regs] + 16]\n"
+			     "ldp x4, x5, [%0, %c[regs] + 32]\n"
+			     "ldp x6, x7, [%0, %c[regs] + 48]\n"
+			     "ldp x8, x9, [%0, %c[regs] + 64]\n"
+			     "ldp x10, x11, [%0, %c[regs] + 80]\n"
+			     "ldp x12, x13, [%0, %c[regs] + 96]\n"
+			     "ldp x14, x15, [%0, %c[regs] + 112]\n"
+			     "ldp x18, x19, [%0, %c[regs] + 144]\n"
+			     "ldp x20, x21, [%0, %c[regs] + 160]\n"
+			     "ldp x22, x23, [%0, %c[regs] + 176]\n"
+			     "ldp x24, x25, [%0, %c[regs] + 192]\n"
+			     "ldp x26, x27, [%0, %c[regs] + 208]\n"
+			     "ldp x28, x29, [%0, %c[regs] + 224]\n"
+			     "ldr x30, [%0, %c[regs] + 240]\n"
+			     "ldr x17, [%0, %c[pc]]\n"
+			     "ldr x16, [%0, %c[regs] + 128]\n"
+			     "br x17\n" ::"r"(full),
+				[sp] "i"(offsetof(struct thread_state, sp)),
+				[pc] "i"(offsetof(struct thread_state, pc)),
+				[regs] "i"(offsetof(struct thread_state, regs))
+				: "memory");
+		__builtin_unreachable();
+	}
 	if (state->tpidr != 0) {
 		asm volatile("msr tpidr_el0, %0" ::"r"(state->tpidr));
 	}
