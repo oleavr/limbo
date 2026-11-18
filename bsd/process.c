@@ -37,6 +37,7 @@
 #include "broker.h"
 #include "process.h"
 
+static void executable_name(int32_t pid, struct process *process);
 static void read_ids(FILE *status, const char *key, uint32_t ids[3]);
 static uint64_t boot_time(void);
 static ssize_t read_process_file(
@@ -67,6 +68,8 @@ process_lookup(int32_t pid, struct process *process)
 	char *comm = strchr(line, '(') + 1;
 	snprintf(process->comm, sizeof(process->comm), "%.*s",
 			(int)(fields - comm), comm);
+	snprintf(process->name, sizeof(process->name), "%s", process->comm);
+	executable_name(pid, process);
 	long resident = 0;
 	sscanf(fields + 2,
 			"%*c %d %d %d %u %d %*u %*u %*u %*u %*u %lu %lu %*d "
@@ -87,6 +90,29 @@ process_lookup(int32_t pid, struct process *process)
 	read_ids(status, "Gid:", process->gid);
 	fclose(status);
 	return 0;
+}
+
+static void
+executable_name(int32_t pid, struct process *process)
+{
+	char arguments[PATH_MAX * 2];
+	ssize_t size = read_process_file(
+			pid, "cmdline", arguments, sizeof(arguments) - 1);
+	if (size <= 0) {
+		return;
+	}
+	arguments[size] = '\0';
+	const char *program = strrchr(arguments, '/');
+	program = program != NULL ? program + 1 : arguments;
+	size_t first = strlen(arguments) + 1;
+	if (strcmp(program, "limbo") != 0 || (ssize_t)first >= size) {
+		return;
+	}
+	const char *path = arguments + first;
+	const char *name = strrchr(path, '/');
+	name = name != NULL ? name + 1 : path;
+	snprintf(process->comm, sizeof(process->comm), "%s", name);
+	snprintf(process->name, sizeof(process->name), "%s", name);
 }
 
 int

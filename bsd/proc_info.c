@@ -515,7 +515,7 @@ bsdinfo(const struct process *process, struct proc_bsdinfo *info)
 	info->pbi_svuid = process->uid[2];
 	info->pbi_svgid = process->gid[2];
 	memcpy(info->pbi_comm, process->comm, sizeof(process->comm));
-	memcpy(info->pbi_name, process->comm, sizeof(process->comm));
+	memcpy(info->pbi_name, process->name, sizeof(process->name));
 	info->pbi_pgid = process->pgid;
 	info->e_tdev = process_terminal(process);
 	info->e_tpgid = process->tpgid;

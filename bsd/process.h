@@ -47,6 +47,7 @@ struct process {
 	uint64_t virtual_size;
 	uint64_t resident_pages;
 	char comm[16];
+	char name[32];
 	uint32_t uid[3];
 	uint32_t gid[3];
 };
