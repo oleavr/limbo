@@ -44,6 +44,7 @@
 #include "check.h"
 static void check_icmp(void);
 static void check_connection_info(void);
+static void check_refused_error(void);
 static void check_control_with_many_open(void);
 
 int
@@ -94,6 +95,7 @@ main(void)
 	CHECK(close(s) == 0);
 	CHECK(unlink(path) == 0);
 	check_connection_info();
+	check_refused_error();
 	check_control_with_many_open();
 	check_icmp();
 	return 0;
@@ -149,6 +151,46 @@ check_connection_info(void)
 	CHECK(request.dst_len == sizeof(destination));
 	CHECK(destination.sin_port == address.sin_port);
 	CHECK(close(client) == 0 && close(listener) == 0);
+}
+
+static void
+check_refused_error(void)
+{
+	int listener = socket(AF_INET, SOCK_STREAM, 0);
+	CHECK(listener != -1);
+	struct sockaddr_in address = {
+			.sin_len = sizeof(address),
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+	};
+	socklen_t length = sizeof(address);
+	CHECK(bind(listener, (struct sockaddr *)&address, sizeof(address))
+			== 0);
+	CHECK(getsockname(listener, (struct sockaddr *)&address, &length) == 0);
+	CHECK(close(listener) == 0);
+
+	int s = socket(AF_INET, SOCK_STREAM, 0);
+	CHECK(s != -1);
+	CHECK(fcntl(s, F_SETFL, O_NONBLOCK) == 0);
+	int result = connect(s, (struct sockaddr *)&address, sizeof(address));
+	CHECK(result == -1 && (errno == EINPROGRESS || errno == ECONNREFUSED));
+	if (errno == EINPROGRESS) {
+		fd_set writable;
+		FD_ZERO(&writable);
+		FD_SET(s, &writable);
+		struct timeval timeout = {5, 0};
+		CHECK(select(s + 1, NULL, &writable, NULL, &timeout) == 1);
+		int error = 0;
+		length = sizeof(error);
+		CHECK(getsockopt(s, SOL_SOCKET, SO_ERROR, &error, &length)
+				== 0);
+		CHECK(error == ECONNREFUSED);
+		length = sizeof(error);
+		CHECK(getsockopt(s, SOL_SOCKET, SO_ERROR, &error, &length)
+				== 0);
+		CHECK(error == 0);
+	}
+	CHECK(close(s) == 0);
 }
 
 static void

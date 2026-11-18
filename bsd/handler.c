@@ -1810,6 +1810,11 @@ sys_getsockopt(int s, int level, int name, void *val, void *avalsize)
 		socklen_t len = *size;
 		int result = getsockopt(s, host_level, host_name, val, &len);
 		*size = len;
+		bool pending_error = host_level == SOL_SOCKET
+				&& host_name == SO_ERROR;
+		if (result == 0 && pending_error && *(int *)val != 0) {
+			*(int *)val = -err_map(*(int *)val);
+		}
 		return errno_map(result);
 	}
 	if (*size > 0) {
