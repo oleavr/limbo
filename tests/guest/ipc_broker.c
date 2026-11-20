@@ -56,6 +56,7 @@ static const mach_msg_id_t CHECK_IN = 402;
 static const mach_msg_id_t LOOK_UP = 404;
 static const mach_msg_id_t REQUEST_ID = 7777;
 static const mach_msg_id_t REPLY_ID = 7877;
+static const char REQUEST_DATA[] = "out of line";
 
 static mach_port_t
 bootstrap_call(mach_msg_id_t id)
@@ -97,6 +98,7 @@ receive_request(mach_port_t service)
 		mach_msg_header_t Head;
 		mach_msg_body_t body;
 		mach_msg_port_descriptor_t ports[PORT_COUNT];
+		mach_msg_ool_descriptor_t data;
 		mach_msg_trailer_t trailer;
 		char padding[64];
 	} request;
@@ -106,11 +108,14 @@ receive_request(mach_port_t service)
 			MACH_PORT_NULL);
 	CHECK(kr == MACH_MSG_SUCCESS);
 	CHECK(request.Head.msgh_id == REQUEST_ID);
-	CHECK(request.body.msgh_descriptor_count == PORT_COUNT);
+	CHECK(request.body.msgh_descriptor_count == PORT_COUNT + 1);
 	CHECK(MACH_PORT_VALID(request.ports[0].name));
 	for (int i = 1; i != PORT_COUNT; i++) {
 		CHECK(request.ports[i].name == request.ports[0].name);
 	}
+	CHECK(request.data.size == sizeof(REQUEST_DATA));
+	CHECK(memcmp(request.data.address, REQUEST_DATA, sizeof(REQUEST_DATA))
+			== 0);
 	mach_port_type_t type;
 	kr = mach_port_type(
 			mach_task_self(), request.Head.msgh_remote_port, &type);
@@ -225,6 +230,7 @@ call(void)
 			mach_msg_header_t Head;
 			mach_msg_body_t body;
 			mach_msg_port_descriptor_t ports[PORT_COUNT];
+			mach_msg_ool_descriptor_t data;
 		} request;
 		struct {
 			mach_msg_header_t Head;
@@ -240,7 +246,7 @@ call(void)
 	message.request.Head.msgh_local_port = abandoned;
 	message.request.Head.msgh_size = sizeof(message.request);
 	message.request.Head.msgh_id = REQUEST_ID;
-	message.request.body.msgh_descriptor_count = PORT_COUNT;
+	message.request.body.msgh_descriptor_count = PORT_COUNT + 1;
 	for (int i = 0; i != PORT_COUNT; i++) {
 		message.request.ports[i] = (mach_msg_port_descriptor_t){
 				.name = carried,
@@ -248,6 +254,12 @@ call(void)
 				.type = MACH_MSG_PORT_DESCRIPTOR,
 		};
 	}
+	message.request.data = (mach_msg_ool_descriptor_t){
+			.address = (void *)REQUEST_DATA,
+			.size = sizeof(REQUEST_DATA),
+			.copy = MACH_MSG_VIRTUAL_COPY,
+			.type = MACH_MSG_OOL_DESCRIPTOR,
+	};
 	send_request(&message.request.Head);
 	send_request(&message.request.Head);
 	kern_return_t kr = mach_port_mod_refs(mach_task_self(), abandoned,
@@ -276,6 +288,12 @@ call(void)
 	message.request.Head.msgh_local_port = unanswered;
 	send_request(&message.request.Head);
 	message.request.ports[0].disposition = MACH_MSG_TYPE_MOVE_SEND;
+	vm_address_t given = 0;
+	kr = vm_allocate(mach_task_self(), &given, vm_page_size,
+			VM_FLAGS_ANYWHERE);
+	CHECK(kr == KERN_SUCCESS);
+	message.request.data.address = (void *)given;
+	message.request.data.deallocate = TRUE;
 	kr = mach_msg(&message.request.Head, MACH_SEND_MSG | MACH_RCV_MSG,
 			sizeof(message.request), sizeof(message), reply_port,
 			8000, MACH_PORT_NULL);
@@ -291,6 +309,9 @@ call(void)
 			&carried_refs);
 	CHECK(kr == KERN_SUCCESS);
 	CHECK(carried_refs == 0);
+	kr = vm_allocate(
+			mach_task_self(), &given, vm_page_size, VM_FLAGS_FIXED);
+	CHECK(kr == KERN_SUCCESS);
 }
 
 int

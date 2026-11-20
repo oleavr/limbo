@@ -153,11 +153,12 @@ static mach_msg_return_t remote_send(mach_msg_header_t *header,
 static mach_msg_return_t remote_copyin(
 		mach_msg_header_t *header, ipc_side_t sender);
 static uint32_t export_body_ports(mach_msg_header_t *header,
-		uint64_t *global_ids, uint32_t dest_guest_id);
+		uint64_t *global_ids, uint8_t **data, uint32_t *data_length,
+		uint32_t dest_guest_id);
 static uint64_t export_body_port(mach_port_name_t name,
 		mach_msg_type_name_t disposition, uint32_t dest_guest_id);
 static void import_body_ports(mach_msg_header_t *header,
-		const uint64_t *global_ids);
+		const uint64_t *global_ids, const uint8_t *data);
 static mach_port_name_t import_body_port(uint64_t global_id,
 		mach_msg_type_name_t type);
 static uint64_t export_local_port(mach_port_name_t name);
@@ -492,8 +493,10 @@ remote_send(mach_msg_header_t *header, mach_msg_size_t size, ipc_side_t sender,
 			? body->msgh_descriptor_count
 			: 0;
 	uint64_t *global_ids = malloc(id_capacity * sizeof(*global_ids));
-	uint32_t descriptor_count = export_body_ports(header, global_ids,
-			broker_guest_of(dest_global_id));
+	uint8_t *data = NULL;
+	uint32_t data_length = 0;
+	uint32_t descriptor_count = export_body_ports(header, global_ids, &data,
+			&data_length, broker_guest_of(dest_global_id));
 
 	struct remote_header rh = {
 		.message_size = size,
@@ -507,12 +510,14 @@ remote_send(mach_msg_header_t *header, mach_msg_size_t size, ipc_side_t sender,
 	};
 
 	uint32_t ids_length = descriptor_count * sizeof(global_ids[0]);
-	uint32_t blob_length = sizeof(rh) + size + ids_length;
+	uint32_t blob_length = sizeof(rh) + size + ids_length + data_length;
 	char *blob = malloc(blob_length);
 	memcpy(blob, &rh, sizeof(rh));
 	memcpy(blob + sizeof(rh), header, size);
 	memcpy(blob + sizeof(rh) + size, global_ids, ids_length);
 	free(global_ids);
+	memcpy(blob + sizeof(rh) + size + ids_length, data, data_length);
+	free(data);
 
 	release_unused_entries(header);
 	pthread_mutex_unlock(&lock);
@@ -550,7 +555,7 @@ remote_copyin(mach_msg_header_t *header, ipc_side_t sender)
 
 static uint32_t
 export_body_ports(mach_msg_header_t *header, uint64_t *global_ids,
-		uint32_t dest_guest_id)
+		uint8_t **data, uint32_t *data_length, uint32_t dest_guest_id)
 {
 	if (!(header->msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
 		return 0;
@@ -567,6 +572,20 @@ export_body_ports(mach_msg_header_t *header, uint64_t *global_ids,
 					= (mach_msg_port_descriptor_t *)cursor;
 			global_ids[count++] = export_body_port(d->name,
 					d->disposition, dest_guest_id);
+			cursor += sizeof(*d);
+		} else if (descriptor->type == MACH_MSG_OOL_DESCRIPTOR
+				|| descriptor->type
+						== MACH_MSG_OOL_VOLATILE_DESCRIPTOR) {
+			mach_msg_ool_descriptor64_t *d
+					= (mach_msg_ool_descriptor64_t *)cursor;
+			*data = realloc(*data, *data_length + d->size);
+			memcpy(*data + *data_length, (void *)d->address,
+					d->size);
+			*data_length += d->size;
+			if (d->deallocate) {
+				_kernelrpc_mach_vm_deallocate(
+						0, d->address, d->size);
+			}
 			cursor += sizeof(*d);
 		} else {
 			mach_msg_guarded_port_descriptor64_t *d
@@ -694,14 +713,16 @@ ipc_remote_deliver(uint64_t dest_global_id, const void *blob, uint32_t length)
 	kmsg->header->msgh_voucher_port = MACH_PORT_NULL;
 	kmsg->header->msgh_size = rh->message_size;
 
-	import_body_ports(kmsg->header, global_ids);
+	import_body_ports(kmsg->header, global_ids,
+			(const uint8_t *)&global_ids[rh->descriptor_count]);
 
 	enqueue(dest, kmsg);
 	unlock_and_notify_arrival(dest);
 }
 
 static void
-import_body_ports(mach_msg_header_t *header, const uint64_t *global_ids)
+import_body_ports(mach_msg_header_t *header, const uint64_t *global_ids,
+		const uint8_t *data)
 {
 	if (!(header->msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
 		return;
@@ -719,6 +740,14 @@ import_body_ports(mach_msg_header_t *header, const uint64_t *global_ids)
 			mach_msg_type_name_t type = received_type(d->disposition);
 			d->name = import_body_port(global_ids[count++], type);
 			d->disposition = type;
+			cursor += sizeof(*d);
+		} else if (descriptor->type == MACH_MSG_OOL_DESCRIPTOR
+				|| descriptor->type
+						== MACH_MSG_OOL_VOLATILE_DESCRIPTOR) {
+			mach_msg_ool_descriptor64_t *d
+					= (mach_msg_ool_descriptor64_t *)cursor;
+			d->address = (uint64_t)copy_ool(data, d->size);
+			data += d->size;
 			cursor += sizeof(*d);
 		} else {
 			mach_msg_guarded_port_descriptor64_t *d
