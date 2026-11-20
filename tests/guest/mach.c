@@ -79,6 +79,9 @@ static void check_memory_entries(void);
 static void check_remaps(void);
 static void check_mincore(void);
 static void check_regions(void);
+static void check_region_recurse(void);
+static mach_msg_type_number_t submap_info_count(
+		mach_vm_address_t address, mach_msg_type_number_t room);
 static void check_shared_range_entries(void);
 static void check_exception_ports(void);
 static void check_vouchers(void);
@@ -102,6 +105,7 @@ main(void)
 	check_remaps();
 	check_mincore();
 	check_regions();
+	check_region_recurse();
 	check_exception_ports();
 	check_vouchers();
 	check_destroy();
@@ -199,6 +203,52 @@ check_regions(void)
 			      (vm_region_info_t)&basic_64, &count, &object)
 			== KERN_INVALID_ADDRESS);
 #endif
+}
+
+static void
+check_region_recurse(void)
+{
+	mach_vm_address_t image = (mach_vm_address_t)(uintptr_t)&main;
+	mach_vm_address_t address = image;
+	mach_vm_size_t size = 0;
+	natural_t depth = 0;
+	vm_region_submap_short_info_data_64_t info;
+	mach_msg_type_number_t count = VM_REGION_SUBMAP_SHORT_INFO_COUNT_64;
+	CHECK(mach_vm_region_recurse(mach_task_self(), &address, &size, &depth,
+			      (vm_region_recurse_info_t)&info, &count)
+			== KERN_SUCCESS);
+	CHECK(count == VM_REGION_SUBMAP_SHORT_INFO_COUNT_64);
+	CHECK(address <= image && image < address + size);
+	CHECK((info.protection & VM_PROT_EXECUTE) != 0);
+
+	count = VM_REGION_SUBMAP_SHORT_INFO_COUNT_64 - 1;
+	CHECK(mach_vm_region_recurse(mach_task_self(), &address, &size, &depth,
+			      (vm_region_recurse_info_t)&info, &count)
+			== KERN_INVALID_ARGUMENT);
+
+	CHECK(submap_info_count(image, VM_REGION_SUBMAP_INFO_V0_COUNT_64 - 1)
+			== VM_REGION_SUBMAP_SHORT_INFO_COUNT_64);
+	CHECK(submap_info_count(image, VM_REGION_SUBMAP_INFO_V0_COUNT_64)
+			== VM_REGION_SUBMAP_INFO_V0_COUNT_64);
+	CHECK(submap_info_count(image, VM_REGION_SUBMAP_INFO_V1_COUNT_64)
+			== VM_REGION_SUBMAP_INFO_V1_COUNT_64);
+	CHECK(submap_info_count(image, VM_REGION_SUBMAP_INFO_V2_COUNT_64 - 1)
+			== VM_REGION_SUBMAP_INFO_V1_COUNT_64);
+	CHECK(submap_info_count(image, VM_REGION_SUBMAP_INFO_V2_COUNT_64)
+			== VM_REGION_SUBMAP_INFO_V2_COUNT_64);
+}
+
+static mach_msg_type_number_t
+submap_info_count(mach_vm_address_t address, mach_msg_type_number_t room)
+{
+	mach_vm_size_t size = 0;
+	natural_t depth = 0;
+	vm_region_submap_info_data_64_t info;
+	CHECK(mach_vm_region_recurse(mach_task_self(), &address, &size, &depth,
+			      (vm_region_recurse_info_t)&info, &room)
+			== KERN_SUCCESS);
+	CHECK((info.protection & VM_PROT_EXECUTE) != 0);
+	return room;
 }
 
 static void
