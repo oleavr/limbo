@@ -159,6 +159,8 @@ static void
 check_directories(void)
 {
 	CHECK(mkdir("dir", 0755) == 0);
+	errno = 0;
+	CHECK(mkdirat(AT_FDCWD, NULL, 0755) == -1 && errno == EFAULT);
 	int dirfd = open("dir", O_RDONLY | O_DIRECTORY);
 	CHECK(dirfd != -1);
 	for (int i = 0; i < 100; i++) {
