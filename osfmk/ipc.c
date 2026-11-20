@@ -1947,8 +1947,13 @@ destroy_rights(mach_msg_header_t *header)
 			}
 			cursor += sizeof(*d);
 		} break;
-		default:
-			cursor += sizeof(mach_msg_ool_descriptor64_t);
+		case MACH_MSG_OOL_DESCRIPTOR:
+		case MACH_MSG_OOL_VOLATILE_DESCRIPTOR: {
+			mach_msg_ool_descriptor64_t *d
+					= (mach_msg_ool_descriptor64_t *)cursor;
+			_kernelrpc_mach_vm_deallocate(0, d->address, d->size);
+			cursor += sizeof(*d);
+		} break;
 		}
 	}
 }
