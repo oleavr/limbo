@@ -80,6 +80,7 @@ static void check_out_of_line_copies(void);
 static void check_port_sets(void);
 static void check_queued_rights_destroyed(void);
 static void check_refused_reply(void);
+static void check_refused_body(void);
 static void check_make_send_count(void);
 static mach_port_mscount_t make_send_count(mach_port_t port);
 static void check_reference_deltas(void);
@@ -123,6 +124,7 @@ main(void)
 	check_port_sets();
 	check_queued_rights_destroyed();
 	check_refused_reply();
+	check_refused_body();
 	check_make_send_count();
 	check_reference_deltas();
 	check_fork_during_port_calls();
@@ -619,6 +621,76 @@ check_refused_reply(void)
 			      MACH_PORT_NULL)
 			== MACH_SEND_INVALID_REPLY);
 	CHECK(send_refs(port) == 1);
+}
+
+static void
+check_refused_body(void)
+{
+	mach_port_t task = mach_task_self();
+	mach_port_t port = allocate_port();
+	mach_port_t reply = allocate_port();
+	mach_port_t copied = allocate_port();
+	mach_port_t moved = allocate_port();
+	mach_port_t listed = allocate_port();
+	CHECK(mach_port_insert_right(
+			      task, copied, copied, MACH_MSG_TYPE_MAKE_SEND)
+			== KERN_SUCCESS);
+	CHECK(mach_port_insert_right(
+			      task, moved, moved, MACH_MSG_TYPE_MAKE_SEND)
+			== KERN_SUCCESS);
+	CHECK(mach_port_insert_right(
+			      task, listed, listed, MACH_MSG_TYPE_MAKE_SEND)
+			== KERN_SUCCESS);
+
+	mach_port_t names[] = {listed, port};
+	struct {
+		mach_msg_header_t header;
+		mach_msg_body_t body;
+		mach_msg_port_descriptor_t ports[2];
+		mach_msg_ool_ports_descriptor_t list;
+	} message = {
+			.header = {
+					.msgh_bits = MACH_MSGH_BITS_SET(
+							MACH_MSG_TYPE_MAKE_SEND,
+							MACH_MSG_TYPE_MAKE_SEND_ONCE,
+							0,
+							MACH_MSGH_BITS_COMPLEX),
+					.msgh_size = sizeof(message),
+					.msgh_remote_port = port,
+					.msgh_local_port = reply,
+			},
+			.body = {.msgh_descriptor_count = 3},
+			.ports = {
+					{
+							.name = copied,
+							.disposition = MACH_MSG_TYPE_COPY_SEND,
+							.type = MACH_MSG_PORT_DESCRIPTOR,
+					},
+					{
+							.name = moved,
+							.disposition = MACH_MSG_TYPE_MOVE_SEND,
+							.type = MACH_MSG_PORT_DESCRIPTOR,
+					},
+			},
+			.list = {
+					.address = names,
+					.count = 2,
+					.disposition = MACH_MSG_TYPE_COPY_SEND,
+					.type = MACH_MSG_OOL_PORTS_DESCRIPTOR,
+			},
+	};
+	CHECK(mach_msg(&message.header, MACH_SEND_MSG, sizeof(message), 0,
+			      MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+			      MACH_PORT_NULL)
+			== MACH_SEND_INVALID_RIGHT);
+	CHECK(send_refs(copied) == 1);
+	CHECK(send_refs(moved) == 0);
+	CHECK(send_refs(listed) == 1);
+	mach_port_urefs_t reply_refs;
+	CHECK(mach_port_get_refs(task, reply, MACH_PORT_RIGHT_SEND_ONCE,
+			      &reply_refs)
+			== KERN_SUCCESS);
+	CHECK(reply_refs == 0);
 }
 
 static void
