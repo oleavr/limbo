@@ -1194,9 +1194,14 @@ sys_madvise(void *addr, size_t len, int behav)
 	case _MADV_WILLNEED:
 		madvise(addr, len, behav);
 		return 0;
-	case _MADV_ZERO:
+	case _MADV_ZERO: {
+		int refused = mach_vm_zero_check((uintptr_t)addr, len);
+		if (refused != 0) {
+			return err_map(refused);
+		}
 		memset(addr, 0, len);
 		return 0;
+	}
 	default:
 		return 0;
 	}

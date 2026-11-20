@@ -78,6 +78,7 @@ static void check_timers(void);
 static void check_memory_entries(void);
 static void check_remaps(void);
 static void check_mincore(void);
+static void check_madvise_zero(void);
 static void check_regions(void);
 static void check_region_recurse(void);
 static mach_msg_type_number_t submap_info_count(
@@ -108,6 +109,7 @@ main(void)
 	check_memory_entries();
 	check_remaps();
 	check_mincore();
+	check_madvise_zero();
 	check_regions();
 	check_region_recurse();
 	check_exception_ports();
@@ -160,6 +162,28 @@ check_mincore(void)
 	CHECK(vec[4] == 0x5a);
 	CHECK(mach_vm_deallocate(mach_task_self(), address, 4 * page)
 			== KERN_SUCCESS);
+}
+
+static void
+check_madvise_zero(void)
+{
+	size_t page = vm_page_size;
+	char *data = mmap(NULL, 2 * page, PROT_READ | PROT_WRITE,
+			MAP_PRIVATE | MAP_ANON, -1, 0);
+	CHECK(data != MAP_FAILED);
+	memset(data, 0x5a, 2 * page);
+	CHECK(madvise(data, page, MADV_ZERO) == 0);
+	CHECK(data[0] == 0 && data[page - 1] == 0 && data[page] == 0x5a);
+
+	char *none = mmap(NULL, page, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+	CHECK(none != MAP_FAILED);
+	CHECK(madvise(none, page, MADV_ZERO) == -1 && errno == EPERM);
+	CHECK(mprotect(data + page, page, PROT_READ) == 0);
+	CHECK(madvise(data, 2 * page, MADV_ZERO) == -1 && errno == EPERM);
+	CHECK(data[page] == 0x5a);
+	CHECK(munmap(none, page) == 0);
+	CHECK(madvise(none, page, MADV_ZERO) == -1 && errno == EINVAL);
+	CHECK(munmap(data, 2 * page) == 0);
 }
 
 static void
