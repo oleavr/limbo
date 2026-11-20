@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -41,6 +42,7 @@
 
 #include "bsd/xnu-errno.h"
 #include "bsd_flags.h"
+#include "purgeable.h"
 #include "sysroot.h"
 #include "trace.h"
 
@@ -178,7 +180,8 @@ list_result(ssize_t result, const char *names, char *namebuf, size_t bufsize)
 	for (const char *name = names; name < names + result;
 			name += strlen(name) + 1) {
 		if (strncmp(name, LINUX_NAMESPACE, prefix_length) != 0
-				|| strcmp(name, BSD_FLAGS_XATTR) == 0) {
+				|| strcmp(name, BSD_FLAGS_XATTR) == 0
+				|| strcmp(name, PURGEABLE_XATTR) == 0) {
 			continue;
 		}
 

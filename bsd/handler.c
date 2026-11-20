@@ -89,6 +89,7 @@
 #include "fs/at.h"
 #include "fs/bsd_flags.h"
 #include "fs/fileid.h"
+#include "fs/purgeable.h"
 #include "fsevents.h"
 #include "handler.h"
 #include "icmp.h"
@@ -2573,10 +2574,27 @@ poll_events_from_linux(short events)
 	return result;
 }
 
+#define APFS_MARK_PURGEABLE 0xc0084a44
+#define FSOPT_NOFOLLOW      0x1
+
+static int fsctl_command(int fd, uint64_t cmd, void *data);
+
 int
 sys_fsctl(const char *path, uint64_t cmd, void *data, uint32_t options)
 {
-	return _ENOTTY;
+	if (path == NULL) {
+		return _EFAULT;
+	}
+	int follow = (options & FSOPT_NOFOLLOW) ? AT_SYMLINK_NOFOLLOW : 0;
+	char buffer[PATH_MAX];
+	int fd = open(sysroot_host_path(path, follow, buffer),
+			O_PATH | O_CLOEXEC | (follow ? O_NOFOLLOW : 0));
+	if (fd == -1) {
+		return err_map(errno);
+	}
+	int r = fsctl_command(fd, cmd, data);
+	close(fd);
+	return r;
 }
 
 int
@@ -2588,6 +2606,17 @@ sys_initgroups(uint32_t gidsetsize, void *gidset, int gmuid)
 int
 sys_ffsctl(int fd, uint64_t cmd, void *data, uint32_t options)
 {
+	return fsctl_command(fd, cmd, data);
+}
+
+static int
+fsctl_command(int fd, uint64_t cmd, void *data)
+{
+	if (cmd == APFS_MARK_PURGEABLE) {
+		uint64_t flags;
+		memcpy(&flags, data, sizeof(flags));
+		return errno_map(purgeable_mark(fd, flags));
+	}
 	return _ENOTTY;
 }
 

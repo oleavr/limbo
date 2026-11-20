@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -49,6 +50,7 @@
 #include "bsd_flags.h"
 #include "device.h"
 #include "fileid.h"
+#include "purgeable.h"
 #include "sysroot.h"
 
 typedef uint32_t attrgroup_t;
@@ -191,6 +193,8 @@ struct reference {
 #define ATTR_CMNEXT_REALFSID       0x00000080
 #define ATTR_CMNEXT_CLONEID        0x00000100
 #define ATTR_CMNEXT_EXT_FLAGS      0x00000200
+
+#define EF_IS_PURGEABLE 0x00000008
 
 typedef uint32_t __darwin_dev_t;
 typedef uint32_t fsobj_type_t;
@@ -729,6 +733,7 @@ pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 						| ATTR_FILE_DATAALLOCSIZE
 						| ATTR_FILE_RSRCLENGTH
 						| ATTR_FILE_RSRCALLOCSIZE,
+				.forkattr = ATTR_CMNEXT_EXT_FLAGS,
 		};
 		memcpy(buffer + offset, &supported, sizeof(supported));
 		offset += sizeof(supported);
@@ -859,7 +864,8 @@ pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 	}
 
 	if (returned.forkattr & ATTR_CMNEXT_EXT_FLAGS) {
-		offset = pack_u64(buffer, offset, 0);
+		offset = pack_u64(buffer, offset,
+				purgeable_is(fd) ? EF_IS_PURGEABLE : 0);
 		cmnextattr &= ~ATTR_CMNEXT_EXT_FLAGS;
 	}
 
