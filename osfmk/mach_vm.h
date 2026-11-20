@@ -52,6 +52,8 @@ kern_return_t mach_vm_allocate_anywhere(
 kern_return_t mach_vm_map_fd(int fd, mach_vm_size_t size, vm_prot_t protection,
 		mach_vm_address_t *address);
 void mach_vm_unmapped(mach_vm_address_t address, mach_vm_size_t size);
+int mach_vm_shared_anonymous_fd(size_t length);
+void mach_vm_shared_anonymous_mapped(void *address, int fd);
 void mach_vm_set_guest_limit(uint64_t limit);
 kern_return_t _kernelrpc_mach_vm_purgable_control(vm_map_t target_task,
 		mach_vm_address_t address, vm_purgable_t control, int *state);
