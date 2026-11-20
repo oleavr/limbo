@@ -34,6 +34,7 @@
 #include <mach/mach_vm.h>
 #include <mach/mach_voucher.h>
 #include <mach/memory_entry.h>
+#include <mach_debug/ipc_info.h>
 #include <pthread.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -69,6 +70,7 @@ typedef struct {
 
 static semaphore_t semaphore;
 
+static void check_space_info(void);
 static void check_messages(void);
 static void check_port_sets(void);
 static void check_semaphores(void);
@@ -101,6 +103,7 @@ static mach_port_t allocate_port(void);
 int
 main(void)
 {
+	check_space_info();
 	check_messages();
 	check_port_sets();
 	check_semaphores();
@@ -118,6 +121,29 @@ main(void)
 	check_tasks();
 	check_thread_exception_ports();
 	return 0;
+}
+
+static void
+check_space_info(void)
+{
+	ipc_info_space_basic_t before, after;
+	CHECK(mach_port_space_basic_info(mach_task_self(), &before)
+			== KERN_SUCCESS);
+	CHECK(before.iisb_genno_mask
+			== MACH_PORT_MAKE(0, MACH_PORT_GEN(MACH_PORT_DEAD)));
+	CHECK(before.iisb_table_inuse > 0);
+	CHECK(before.iisb_table_size > before.iisb_table_inuse);
+
+	mach_port_t port = allocate_port();
+	CHECK(mach_port_space_basic_info(mach_task_self(), &after)
+			== KERN_SUCCESS);
+	CHECK(after.iisb_table_inuse == before.iisb_table_inuse + 1);
+	CHECK(mach_port_mod_refs(mach_task_self(), port,
+			      MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+	CHECK(mach_port_space_basic_info(mach_task_self(), &after)
+			== KERN_SUCCESS);
+	CHECK(after.iisb_table_inuse == before.iisb_table_inuse);
 }
 
 static void
