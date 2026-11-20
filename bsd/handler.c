@@ -4209,7 +4209,7 @@ int
 sys_task_inspect_for_pid(
 		mach_port_name_t target_tport, int pid, mach_port_name_t *t)
 {
-	unimplemented();
+	return sys_task_read_for_pid(target_tport, pid, t);
 }
 
 int
