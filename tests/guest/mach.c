@@ -79,6 +79,7 @@ static void check_messages(void);
 static void check_out_of_line_copies(void);
 static void check_port_sets(void);
 static void check_queued_rights_destroyed(void);
+static void check_refused_reply(void);
 static void check_make_send_count(void);
 static mach_port_mscount_t make_send_count(mach_port_t port);
 static void check_reference_deltas(void);
@@ -121,6 +122,7 @@ main(void)
 	check_out_of_line_copies();
 	check_port_sets();
 	check_queued_rights_destroyed();
+	check_refused_reply();
 	check_make_send_count();
 	check_reference_deltas();
 	check_fork_during_port_calls();
@@ -595,6 +597,28 @@ check_queued_rights_destroyed(void)
 			      &reply_refs)
 			== KERN_SUCCESS);
 	CHECK(reply_refs == 0);
+}
+
+static void
+check_refused_reply(void)
+{
+	mach_port_t port = allocate_port();
+	CHECK(mach_port_insert_right(mach_task_self(), port, port,
+			      MACH_MSG_TYPE_MAKE_SEND)
+			== KERN_SUCCESS);
+
+	mach_msg_header_t message = {
+			.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND,
+					MACH_MSG_TYPE_COPY_SEND),
+			.msgh_size = sizeof(message),
+			.msgh_remote_port = port,
+			.msgh_local_port = allocate_port(),
+	};
+	CHECK(mach_msg(&message, MACH_SEND_MSG, sizeof(message), 0,
+			      MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+			      MACH_PORT_NULL)
+			== MACH_SEND_INVALID_REPLY);
+	CHECK(send_refs(port) == 1);
 }
 
 static void

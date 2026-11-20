@@ -750,10 +750,22 @@ copyin(mach_msg_header_t *header, ipc_side_t sender, struct ipc_port **dest)
 			|| (dest_entry->type & MACH_PORT_TYPE_DEAD_NAME)) {
 		return MACH_SEND_INVALID_DEST;
 	}
+	if (sender == IPC_USER
+			&& !has_right(dest_entry,
+					MACH_MSGH_BITS_REMOTE(bits))) {
+		return MACH_SEND_INVALID_DEST;
+	}
 	*dest = dest_entry->port;
 	ipc_side_t receiver = ((*dest)->kotype == IPC_KOBJECT_NONE)
 			? IPC_USER
 			: IPC_KERNEL;
+
+	mach_msg_type_name_t reply_type;
+	if (transfer_right(header->msgh_local_port, MACH_MSGH_BITS_LOCAL(bits),
+			    sender, receiver, &reply_type)
+			!= MACH_MSG_SUCCESS) {
+		return MACH_SEND_INVALID_REPLY;
+	}
 
 	mach_msg_type_name_t dest_type;
 	if (transfer_right(header->msgh_remote_port,
@@ -761,13 +773,6 @@ copyin(mach_msg_header_t *header, ipc_side_t sender, struct ipc_port **dest)
 			    &dest_type)
 			!= MACH_MSG_SUCCESS) {
 		return MACH_SEND_INVALID_DEST;
-	}
-
-	mach_msg_type_name_t reply_type;
-	if (transfer_right(header->msgh_local_port, MACH_MSGH_BITS_LOCAL(bits),
-			    sender, receiver, &reply_type)
-			!= MACH_MSG_SUCCESS) {
-		return MACH_SEND_INVALID_REPLY;
 	}
 
 	header->msgh_bits = MACH_MSGH_BITS_SET(reply_type, dest_type, 0,
