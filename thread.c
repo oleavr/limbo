@@ -105,6 +105,31 @@ thread_new(thread_continuation_t continuation, void *context)
 	return thread;
 }
 
+size_t
+thread_guest_ports(mach_port_name_t *ports, size_t max)
+{
+	pthread_mutex_lock(&all_threads_lock);
+	size_t count = 0;
+	for (struct thread *thread = all_threads; thread != NULL;
+			thread = thread->all_next) {
+		if (thread->guest && !thread->terminating) {
+			count++;
+		}
+	}
+	size_t oldest_first = count;
+	for (struct thread *thread = all_threads; thread != NULL;
+			thread = thread->all_next) {
+		if (thread->guest && !thread->terminating) {
+			oldest_first--;
+			if (oldest_first < max) {
+				ports[oldest_first] = thread->port;
+			}
+		}
+	}
+	pthread_mutex_unlock(&all_threads_lock);
+	return count;
+}
+
 int
 thread_start(struct thread *thread, const struct thread_state *state)
 {
