@@ -26,6 +26,7 @@
  */
 
 #include <dispatch/dispatch.h>
+#include <errno.h>
 #include <mach/mach_time.h>
 #include <os/lock.h>
 #include <pthread.h>
@@ -375,6 +376,9 @@ check_sigwait(void)
 	CHECK(sigwait(&set, &sig) == 0 && sig == SIGHUP);
 	pthread_join(sender, NULL);
 	sigprocmask(SIG_SETMASK, &old, NULL);
+
+	sigset_t *no_set = NULL;
+	CHECK(sigwait(no_set, &sig) == EINVAL);
 }
 
 static void

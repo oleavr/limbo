@@ -3141,6 +3141,9 @@ sys___pthread_sigmask(int how, user_addr_t set, user_addr_t oset)
 int
 sys___sigwait(user_addr_t set, user_addr_t sig)
 {
+	if (set == NULL) {
+		return _EINVAL;
+	}
 	return signals_sigwait(*(const uint32_t *)set, (int *)sig);
 }
 
