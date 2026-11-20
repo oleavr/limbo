@@ -99,6 +99,7 @@
 #include "net.h"
 #include "osfmk/broker_client.h"
 #include "osfmk/ipc.h"
+#include "osfmk/mach_vm.h"
 #include "osfmk/semaphore.h"
 #include "persona.h"
 #include "route.h"
@@ -1163,7 +1164,11 @@ sys_vfork(void)
 int
 sys_munmap(void *addr, size_t len)
 {
-	return munmap(addr, len);
+	int result = munmap(addr, len);
+	if (result == 0) {
+		mach_vm_unmapped((mach_vm_address_t)(uintptr_t)addr, len);
+	}
+	return result;
 }
 
 int

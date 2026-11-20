@@ -85,7 +85,6 @@ static void shared_range_add(mach_vm_address_t start, int fd);
 static void shared_ranges_prune(void);
 static bool shared_range_mapped(const struct shared_range *range, bool mapped,
 		dev_t device, ino_t inode);
-static void shared_range_drop(struct shared_range **link);
 static int held_fd(mach_vm_address_t start);
 static bool region_inode(mach_vm_address_t start, dev_t *device, ino_t *inode);
 static int copy_range(mach_vm_address_t address, mach_vm_size_t size);
@@ -107,6 +106,7 @@ static kern_return_t map_entry(mach_vm_address_t *address, mach_vm_size_t size,
 static uint64_t *reclaim_index(size_t offset);
 static uint64_t absolute_per_second(void);
 static uint64_t reclaim_next_deadline(void);
+static void shared_range_drop(struct shared_range **link);
 
 kern_return_t
 _kernelrpc_mach_vm_allocate(vm_task_entry_t target, mach_vm_address_t *address,
@@ -189,6 +189,7 @@ _kernelrpc_mach_vm_deallocate(vm_task_entry_t target, mach_vm_address_t address,
 	if (start != end && munmap((void *)start, end - start) == -1) {
 		return KERN_INVALID_ADDRESS;
 	}
+	mach_vm_unmapped(start, end - start);
 	return KERN_SUCCESS;
 }
 
@@ -735,16 +736,6 @@ shared_range_mapped(const struct shared_range *range, bool mapped, dev_t device,
 	struct stat status;
 	return mapped && fstat(range->fd, &status) == 0
 			&& status.st_dev == device && status.st_ino == inode;
-}
-
-static void
-shared_range_drop(struct shared_range **link)
-{
-	struct shared_range *range = *link;
-	*link = range->next;
-	close(range->fd);
-	free(range);
-	shared_range_count--;
 }
 
 static int
@@ -1409,6 +1400,7 @@ reclaim(uint64_t count, uint64_t limit)
 					& ~PAGE_MASK;
 			if (entry.action == RECLAIM_DEALLOCATE) {
 				munmap((void *)start, end - start);
+				mach_vm_unmapped(start, end - start);
 			} else {
 				madvise((void *)start, end - start, MADV_FREE);
 			}
@@ -1586,5 +1578,32 @@ _kernelrpc_mach_vm_reallocate(vm_map_t target_task, mach_vm_address_t src,
 	mach_vm_address_t start = src & ~(mach_vm_address_t)PAGE_MASK;
 	mach_vm_address_t end = (src + src_size + PAGE_MASK) & ~PAGE_MASK;
 	munmap((void *)start, end - start);
+	mach_vm_unmapped(start, end - start);
 	return KERN_SUCCESS;
+}
+
+void
+mach_vm_unmapped(mach_vm_address_t address, mach_vm_size_t size)
+{
+	pthread_mutex_lock(&shared_ranges_lock);
+	struct shared_range **link = &shared_ranges;
+	while (*link != NULL) {
+		struct shared_range *range = *link;
+		if (range->start >= address && range->start - address < size) {
+			shared_range_drop(link);
+		} else {
+			link = &range->next;
+		}
+	}
+	pthread_mutex_unlock(&shared_ranges_lock);
+}
+
+static void
+shared_range_drop(struct shared_range **link)
+{
+	struct shared_range *range = *link;
+	*link = range->next;
+	close(range->fd);
+	free(range);
+	shared_range_count--;
 }
