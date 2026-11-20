@@ -266,6 +266,28 @@ check_children(void)
 }
 
 static void
+check_continued(void)
+{
+	pid_t pid = fork();
+	CHECK(pid >= 0);
+	if (pid == 0) {
+		for (;;) {
+			pause();
+		}
+	}
+	int status;
+	CHECK(kill(pid, SIGSTOP) == 0);
+	CHECK(waitpid(pid, &status, WUNTRACED) == pid);
+	CHECK(WIFSTOPPED(status) && WSTOPSIG(status) == SIGSTOP);
+	CHECK(kill(pid, SIGCONT) == 0);
+	CHECK(waitpid(pid, &status, WUNTRACED | WCONTINUED) == pid);
+	CHECK(WIFCONTINUED(status));
+	CHECK(kill(pid, SIGKILL) == 0);
+	CHECK(waitpid(pid, &status, 0) == pid);
+	CHECK(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+}
+
+static void
 on_alarm_pipe(int sig)
 {
 	char byte = 1;
@@ -483,6 +505,7 @@ main(void)
 	check_alarm();
 	check_child();
 	check_children();
+	check_continued();
 	check_restart();
 	check_self_pipe();
 	check_sigwait();
