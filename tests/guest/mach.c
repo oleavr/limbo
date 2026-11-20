@@ -73,6 +73,8 @@ static semaphore_t semaphore;
 static void check_space_info(void);
 static void check_messages(void);
 static void check_port_sets(void);
+static void check_make_send_count(void);
+static mach_port_mscount_t make_send_count(mach_port_t port);
 static void check_semaphores(void);
 static void *signal_semaphore(void *arg);
 static void check_time(void);
@@ -106,6 +108,7 @@ main(void)
 	check_space_info();
 	check_messages();
 	check_port_sets();
+	check_make_send_count();
 	check_semaphores();
 	check_time();
 	check_timers();
@@ -453,6 +456,82 @@ check_port_sets(void)
 			== MACH_MSG_SUCCESS);
 	CHECK(received.header.msgh_id == 42);
 	CHECK(received.header.msgh_local_port == member);
+}
+
+static void
+check_make_send_count(void)
+{
+	mach_port_t port = allocate_port();
+	CHECK(make_send_count(port) == 0);
+	CHECK(mach_port_insert_right(mach_task_self(), port, port,
+			      MACH_MSG_TYPE_MAKE_SEND)
+			== KERN_SUCCESS);
+	CHECK(make_send_count(port) == 1);
+	CHECK(mach_port_insert_right(mach_task_self(), port, port,
+			      MACH_MSG_TYPE_COPY_SEND)
+			== KERN_SUCCESS);
+	CHECK(make_send_count(port) == 1);
+	mach_port_t extracted;
+	mach_msg_type_name_t extracted_type;
+	CHECK(mach_port_extract_right(mach_task_self(), port,
+			      MACH_MSG_TYPE_MAKE_SEND, &extracted,
+			      &extracted_type)
+			== KERN_SUCCESS);
+	CHECK(make_send_count(port) == 2);
+
+	struct {
+		mach_msg_header_t header;
+		mach_msg_body_t body;
+		mach_msg_port_descriptor_t port;
+	} message = {
+			.header = {
+					.msgh_bits = MACH_MSGH_BITS_SET(
+							MACH_MSG_TYPE_MAKE_SEND,
+							0, 0,
+							MACH_MSGH_BITS_COMPLEX),
+					.msgh_size = sizeof(message),
+					.msgh_remote_port = port,
+			},
+			.body = {.msgh_descriptor_count = 1},
+			.port = {
+					.name = port,
+					.disposition = MACH_MSG_TYPE_MAKE_SEND,
+					.type = MACH_MSG_PORT_DESCRIPTOR,
+			},
+	};
+	CHECK(mach_msg(&message.header, MACH_SEND_MSG, sizeof(message), 0,
+			      MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+			      MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	CHECK(make_send_count(port) == 4);
+
+	mach_port_mscount_t set_count = 7;
+	CHECK(mach_port_set_mscount(mach_task_self(), port, set_count)
+			== KERN_SUCCESS);
+	CHECK(make_send_count(port) == set_count);
+	CHECK(mach_port_set_mscount(
+			      mach_task_self(), mach_task_self(), set_count)
+			== KERN_INVALID_RIGHT);
+	CHECK(mach_port_mod_refs(mach_task_self(), port,
+			      MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+
+	mach_port_options_t options = {.flags = MPO_INSERT_SEND_RIGHT};
+	CHECK(mach_port_construct(mach_task_self(), &options, 0, &port)
+			== KERN_SUCCESS);
+	CHECK(make_send_count(port) == 1);
+}
+
+static mach_port_mscount_t
+make_send_count(mach_port_t port)
+{
+	mach_port_status_t status;
+	mach_msg_type_number_t count = MACH_PORT_RECEIVE_STATUS_COUNT;
+	CHECK(mach_port_get_attributes(mach_task_self(), port,
+			      MACH_PORT_RECEIVE_STATUS,
+			      (mach_port_info_t)&status, &count)
+			== KERN_SUCCESS);
+	return status.mps_mscount;
 }
 
 static void

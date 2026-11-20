@@ -143,7 +143,7 @@ kern_return_t
 mach_port_set_mscount(ipc_space_t task, mach_port_name_t name,
 		mach_port_mscount_t mscount)
 {
-	unimplemented();
+	return ipc_port_set_mscount(name, mscount);
 }
 
 kern_return_t

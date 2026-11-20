@@ -123,6 +123,8 @@ kern_return_t ipc_port_get_context(
 		mach_port_name_t name, mach_port_context_t *context);
 kern_return_t ipc_port_set_context(
 		mach_port_name_t name, mach_port_context_t context);
+kern_return_t ipc_port_set_mscount(
+		mach_port_name_t name, mach_port_mscount_t mscount);
 kern_return_t ipc_port_insert_member(
 		mach_port_name_t member, mach_port_name_t pset);
 kern_return_t ipc_port_extract_member(
