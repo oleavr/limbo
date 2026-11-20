@@ -582,7 +582,9 @@ port_for_global_id(uint64_t global_id)
 	for (uint32_t i = 1; i < entry_count; i++) {
 		struct ipc_port *port = entries[i].port;
 		if (port != NULL && !port->remote
-				&& port->global_id == global_id) {
+				&& port->global_id == global_id
+				&& !(entries[i].type
+						& MACH_PORT_TYPE_DEAD_NAME)) {
 			return port;
 		}
 	}

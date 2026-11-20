@@ -138,8 +138,11 @@ serve(void)
 
 	mach_port_t abandoned = receive_request(service);
 	mach_port_t gone = receive_request(service);
+	mach_port_t dead_name = receive_request(service);
+	mach_port_t returned = receive_request(service);
 	mach_port_t awaited = receive_request(service);
 	send_reply(abandoned, MACH_PORT_NULL);
+	send_reply(dead_name, returned);
 	send_reply(awaited, gone);
 }
 
@@ -167,6 +170,11 @@ call(void)
 	mach_port_t abandoned;
 	mach_port_allocate(
 			mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &abandoned);
+	mach_port_t dead_name;
+	mach_port_allocate(
+			mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &dead_name);
+	mach_port_insert_right(mach_task_self(), dead_name, dead_name,
+			MACH_MSG_TYPE_MAKE_SEND);
 	mach_port_t reply_port;
 	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &reply_port);
 	union {
@@ -203,6 +211,13 @@ call(void)
 			MACH_PORT_RIGHT_RECEIVE, -1);
 	CHECK(kr == KERN_SUCCESS);
 
+	message.request.Head.msgh_local_port = dead_name;
+	send_request(&message.request.Head);
+	send_request(&message.request.Head);
+	kr = mach_port_mod_refs(mach_task_self(), dead_name,
+			MACH_PORT_RIGHT_RECEIVE, -1);
+	CHECK(kr == KERN_SUCCESS);
+
 	message.request.Head.msgh_local_port = reply_port;
 	kr = mach_msg(&message.request.Head, MACH_SEND_MSG | MACH_RCV_MSG,
 			sizeof(message.request), sizeof(message), reply_port,
@@ -210,6 +225,10 @@ call(void)
 	CHECK(kr == MACH_MSG_SUCCESS);
 	CHECK(message.reply.Head.msgh_id == REPLY_ID);
 	CHECK(message.reply.Head.msgh_remote_port == MACH_PORT_DEAD);
+	mach_port_type_t type;
+	kr = mach_port_type(mach_task_self(), dead_name, &type);
+	CHECK(kr == KERN_SUCCESS);
+	CHECK(type == MACH_PORT_TYPE_DEAD_NAME);
 }
 
 int
