@@ -397,6 +397,7 @@ sys_wait4(int pid, user_addr_t status, int options, user_addr_t rusage)
 
 #define _WCONTINUED 0x10
 #define _WNOWAIT    0x20
+#define _WSTOPPED   0x7f
 
 static int
 wait_status(int status)
@@ -407,6 +408,9 @@ wait_status(int status)
 	if (WIFSTOPPED(status)) {
 		return (status & ~0xff00)
 				| (signo_from_linux(WSTOPSIG(status)) << 8);
+	}
+	if (WIFCONTINUED(status)) {
+		return (signo_from_linux(SIGCONT) << 8) | _WSTOPPED;
 	}
 	return status;
 }
