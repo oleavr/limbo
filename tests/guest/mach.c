@@ -82,6 +82,7 @@ static void check_regions(void);
 static void check_region_recurse(void);
 static mach_msg_type_number_t submap_info_count(
 		mach_vm_address_t address, mach_msg_type_number_t room);
+static unsigned char share_mode(mach_vm_address_t address);
 static void check_shared_range_entries(void);
 static void check_exception_ports(void);
 static void check_vouchers(void);
@@ -236,6 +237,17 @@ check_region_recurse(void)
 			== VM_REGION_SUBMAP_INFO_V1_COUNT_64);
 	CHECK(submap_info_count(image, VM_REGION_SUBMAP_INFO_V2_COUNT_64)
 			== VM_REGION_SUBMAP_INFO_V2_COUNT_64);
+
+	mach_vm_address_t fresh = 0;
+	int own_tag = VM_MAKE_TAG(VM_MEMORY_APPLICATION_SPECIFIC_1);
+	CHECK(mach_vm_allocate(mach_task_self(), &fresh, vm_page_size,
+			      VM_FLAGS_ANYWHERE | own_tag)
+			== KERN_SUCCESS);
+	CHECK(share_mode(fresh) == SM_EMPTY);
+	*(volatile char *)fresh = 1;
+	CHECK(share_mode(fresh) == SM_PRIVATE);
+	CHECK(mach_vm_deallocate(mach_task_self(), fresh, vm_page_size)
+			== KERN_SUCCESS);
 }
 
 static mach_msg_type_number_t
@@ -249,6 +261,19 @@ submap_info_count(mach_vm_address_t address, mach_msg_type_number_t room)
 			== KERN_SUCCESS);
 	CHECK((info.protection & VM_PROT_EXECUTE) != 0);
 	return room;
+}
+
+static unsigned char
+share_mode(mach_vm_address_t address)
+{
+	mach_vm_size_t size = 0;
+	natural_t depth = 0;
+	vm_region_submap_short_info_data_64_t info;
+	mach_msg_type_number_t count = VM_REGION_SUBMAP_SHORT_INFO_COUNT_64;
+	CHECK(mach_vm_region_recurse(mach_task_self(), &address, &size, &depth,
+			      (vm_region_recurse_info_t)&info, &count)
+			== KERN_SUCCESS);
+	return info.share_mode;
 }
 
 static void

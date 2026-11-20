@@ -40,6 +40,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
@@ -86,6 +87,8 @@ static kern_return_t remap_copy(mach_vm_address_t *target_address,
 		mach_vm_size_t size, mach_vm_offset_t mask, int flags,
 		mach_vm_address_t src_address, vm_prot_t *protection);
 static vm_prot_t region_protection(mach_vm_address_t address);
+static bool region_untouched(mach_vm_address_t start, mach_vm_size_t size);
+static int range_touched(mach_vm_address_t start, mach_vm_size_t size);
 static void region_top_info(mach_vm_address_t address, mach_vm_size_t size,
 		bool shared, vm_region_top_info_t info);
 static bool region_find(mach_vm_address_t address, mach_vm_address_t *start,
@@ -816,7 +819,9 @@ mach_vm_region_recurse(vm_map_read_t target_task, mach_vm_address_t *address,
 			    &offset)) {
 		return KERN_INVALID_ADDRESS;
 	}
-	unsigned char share_mode = shared ? SM_SHARED : SM_PRIVATE;
+	unsigned char share_mode = shared                   ? SM_SHARED
+			: region_untouched(*address, *size) ? SM_EMPTY
+							    : SM_PRIVATE;
 	*nesting_depth = 0;
 	if (*infoCnt < VM_REGION_SUBMAP_INFO_V0_COUNT_64) {
 		vm_region_submap_short_info_data_64_t *short_info
@@ -847,6 +852,83 @@ mach_vm_region_recurse(vm_map_read_t target_task, mach_vm_address_t *address,
 			: VM_REGION_SUBMAP_INFO_V0_COUNT_64;
 	memcpy(info, &submap, *infoCnt * sizeof(natural_t));
 	return KERN_SUCCESS;
+}
+
+static bool
+region_untouched(mach_vm_address_t start, mach_vm_size_t size)
+{
+	dev_t device;
+	ino_t inode;
+	if (!region_inode(start, &device, &inode) || inode != 0) {
+		return false;
+	}
+	int touched = range_touched(start, size);
+	if (touched >= 0) {
+		return touched == 0;
+	}
+	long page = sysconf(_SC_PAGESIZE);
+	unsigned char vector[4096];
+	if (size > sizeof(vector) * (mach_vm_size_t)page) {
+		return false;
+	}
+	if (mincore((void *)(uintptr_t)start, size, vector) != 0) {
+		return false;
+	}
+	for (mach_vm_size_t i = 0; i < (size + page - 1) / page; i++) {
+		if (vector[i] & 1) {
+			return false;
+		}
+	}
+	return true;
+}
+
+struct pagemap_scan_arg {
+	uint64_t size;
+	uint64_t flags;
+	uint64_t start;
+	uint64_t end;
+	uint64_t walk_end;
+	uint64_t vec;
+	uint64_t vec_len;
+	uint64_t max_pages;
+	uint64_t category_inverted;
+	uint64_t category_mask;
+	uint64_t category_anyof_mask;
+	uint64_t return_mask;
+};
+
+struct pagemap_page_region {
+	uint64_t start;
+	uint64_t end;
+	uint64_t categories;
+};
+
+#define PAGEMAP_SCAN_IOCTL      _IOWR('f', 16, struct pagemap_scan_arg)
+#define PAGEMAP_PAGE_IS_PRESENT (1 << 3)
+#define PAGEMAP_PAGE_IS_SWAPPED (1 << 4)
+
+static int
+range_touched(mach_vm_address_t start, mach_vm_size_t size)
+{
+	int fd = open("/proc/thread-self/pagemap", O_RDONLY | O_CLOEXEC);
+	if (fd == -1) {
+		return -1;
+	}
+	uint64_t touched = PAGEMAP_PAGE_IS_PRESENT | PAGEMAP_PAGE_IS_SWAPPED;
+	struct pagemap_page_region region;
+	struct pagemap_scan_arg arg = {
+			.size = sizeof(arg),
+			.start = start,
+			.end = start + size,
+			.vec = (uint64_t)(uintptr_t)&region,
+			.vec_len = 1,
+			.max_pages = 1,
+			.category_anyof_mask = touched,
+			.return_mask = touched,
+	};
+	int found = ioctl(fd, PAGEMAP_SCAN_IOCTL, &arg);
+	close(fd);
+	return found < 0 ? -1 : found > 0;
 }
 
 kern_return_t
