@@ -85,6 +85,13 @@ amfi_handle_cdhash_in_trustcache_syscall(
 	return 0;
 }
 
+static int
+amfi_handle_query_bootarg_state_syscall(uint64_t *state)
+{
+	*state = 0;
+	return 0;
+}
+
 struct amfi_launch_constraint_args {
 	uint32_t audit_token[8];
 	uint64_t constraint;
@@ -110,6 +117,8 @@ amfi_handle_syscall(int call, void *arg)
 		return amfi_handle_check_dyld_policy_self_syscall((long)arg);
 	case 95:
 		return amfi_handle_cdhash_in_trustcache_syscall(arg);
+	case 96:
+		return amfi_handle_query_bootarg_state_syscall(arg);
 	case 102:
 		return amfi_handle_launch_constraint_syscall(arg);
 	default:
