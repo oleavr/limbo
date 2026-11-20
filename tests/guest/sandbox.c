@@ -1,5 +1,6 @@
 /*
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -58,6 +59,13 @@ main(void)
 			"com.apple.app-sandbox.mach", "com.apple.lsd.mapdb", 0);
 	CHECK(token != NULL);
 	CHECK(strstr(token, ";com.apple.lsd.mapdb") != NULL);
+	free(token);
+
+	unlink("/tmp/limbo-unmade");
+	token = sandbox_extension_issue_file(
+			APP_SANDBOX_READ_WRITE, "/tmp/limbo-unmade", 0);
+	CHECK(token != NULL);
+	CHECK(strstr(token, ";com.apple.app-sandbox.read-write;00;") != NULL);
 	free(token);
 
 	CHECK(sandbox_extension_issue_file(APP_SANDBOX_READ_WRITE,

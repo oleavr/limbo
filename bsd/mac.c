@@ -1,5 +1,6 @@
 /*
  * Copyright © 2021 Keegan Saunders
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -27,6 +28,7 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -158,11 +160,26 @@ sandbox_extension_issue(struct sandbox_extension_issue_args *args)
 	if (args->type == SANDBOX_EXTENSION_FILE) {
 		char buffer[PATH_MAX];
 		struct stat s;
+		bool exists = true;
 		if (stat(sysroot_host_path(args->data, 0, buffer), &s) == -1) {
-			return err_map(errno);
+			const char *slash = strrchr(args->data, '/');
+			if (errno != ENOENT || slash == NULL) {
+				return err_map(errno);
+			}
+			int folder_length = slash == args->data
+					? 1
+					: (int)(slash - args->data);
+			char folder[PATH_MAX];
+			snprintf(folder, sizeof(folder), "%.*s", folder_length,
+					args->data);
+			if (stat(sysroot_host_path(folder, 0, buffer), &s)
+					== -1) {
+				return err_map(errno);
+			}
+			exists = false;
 		}
 		length += snprintf(rest + length, sizeof(rest) - length,
-				";01;%08x;%016llx;01;%s",
+				";%s;%08x;%016llx;01;%s", exists ? "01" : "00",
 				(unsigned)darwin_device(s.st_dev),
 				(unsigned long long)s.st_ino, args->data);
 	} else if (args->data != NULL) {
