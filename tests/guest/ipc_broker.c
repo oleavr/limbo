@@ -168,7 +168,18 @@ serve(void)
 	CHECK(unanswered_refs == 1);
 	send_reply(abandoned, MACH_PORT_NULL);
 	send_reply(dead_name, returned);
+	mach_msg_header_t copied = {
+			.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0),
+			.msgh_size = sizeof(copied),
+			.msgh_remote_port = awaited,
+	};
+	kr = mach_msg(&copied, MACH_SEND_MSG, sizeof(copied), 0, MACH_PORT_NULL,
+			MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	CHECK(kr == MACH_SEND_INVALID_DEST);
 	send_reply(awaited, gone);
+	mach_port_type_t type;
+	kr = mach_port_type(mach_task_self(), awaited, &type);
+	CHECK(kr == KERN_INVALID_NAME);
 }
 
 static void
@@ -240,6 +251,10 @@ call(void)
 	kern_return_t kr = mach_port_mod_refs(mach_task_self(), abandoned,
 			MACH_PORT_RIGHT_RECEIVE, -1);
 	CHECK(kr == KERN_SUCCESS);
+	kr = mach_msg(&message.request.Head, MACH_SEND_MSG,
+			sizeof(message.request), 0, MACH_PORT_NULL,
+			MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	CHECK(kr == MACH_SEND_INVALID_REPLY);
 
 	message.request.Head.msgh_local_port = dead_name;
 	send_request(&message.request.Head);

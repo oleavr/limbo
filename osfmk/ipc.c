@@ -149,7 +149,9 @@ static void ipc_fork_prepare(void);
 static void ipc_fork_parent(void);
 static void ipc_fork_child(void);
 static mach_msg_return_t remote_send(mach_msg_header_t *header,
-		mach_msg_size_t size, pid_t sender_pid);
+		mach_msg_size_t size, ipc_side_t sender, pid_t sender_pid);
+static mach_msg_return_t remote_copyin(
+		mach_msg_header_t *header, ipc_side_t sender);
 static uint32_t export_body_ports(mach_msg_header_t *header,
 		uint64_t *global_ids, uint32_t dest_guest_id);
 static uint64_t export_body_port(mach_port_name_t name,
@@ -429,8 +431,8 @@ send(mach_msg_header_t *msg, mach_msg_size_t size, ipc_side_t sender,
 	pthread_mutex_lock(&lock);
 	struct ipc_entry *remote_entry = lookup(kmsg->header->msgh_remote_port);
 	if (remote_entry != NULL && remote_entry->port->remote) {
-		mach_msg_return_t rr = remote_send(kmsg->header, size,
-				sender_pid);
+		mach_msg_return_t rr = remote_send(
+				kmsg->header, size, sender, sender_pid);
 		free(kmsg);
 		return rr;
 	}
@@ -472,10 +474,17 @@ send(mach_msg_header_t *msg, mach_msg_size_t size, ipc_side_t sender,
 }
 
 static mach_msg_return_t
-remote_send(mach_msg_header_t *header, mach_msg_size_t size, pid_t sender_pid)
+remote_send(mach_msg_header_t *header, mach_msg_size_t size, ipc_side_t sender,
+		pid_t sender_pid)
 {
 	uint64_t dest_global_id = lookup(header->msgh_remote_port)->port->global_id;
 	mach_msg_bits_t bits = header->msgh_bits;
+
+	mach_msg_return_t mr = remote_copyin(header, sender);
+	if (mr != MACH_MSG_SUCCESS) {
+		pthread_mutex_unlock(&lock);
+		return mr;
+	}
 
 	mach_msg_body_t *body = (mach_msg_body_t *)(header + 1);
 	uint32_t id_capacity = (bits & MACH_MSGH_BITS_COMPLEX)
@@ -504,9 +513,33 @@ remote_send(mach_msg_header_t *header, mach_msg_size_t size, pid_t sender_pid)
 	memcpy(blob + sizeof(rh) + size, global_ids, ids_length);
 	free(global_ids);
 
+	release_unused_entries(header);
 	pthread_mutex_unlock(&lock);
 	broker_client_send(dest_global_id, blob, blob_length);
 	free(blob);
+	return MACH_MSG_SUCCESS;
+}
+
+static mach_msg_return_t
+remote_copyin(mach_msg_header_t *header, ipc_side_t sender)
+{
+	mach_msg_bits_t bits = header->msgh_bits;
+
+	struct ipc_entry *dest_entry = lookup(header->msgh_remote_port);
+	if (sender == IPC_USER
+			&& !has_right(dest_entry,
+					MACH_MSGH_BITS_REMOTE(bits))) {
+		return MACH_SEND_INVALID_DEST;
+	}
+
+	mach_msg_type_name_t type;
+	if (transfer_right(header->msgh_local_port, MACH_MSGH_BITS_LOCAL(bits),
+			    sender, IPC_KERNEL, &type)
+			!= MACH_MSG_SUCCESS) {
+		return MACH_SEND_INVALID_REPLY;
+	}
+	transfer_right(header->msgh_remote_port, MACH_MSGH_BITS_REMOTE(bits),
+			sender, IPC_KERNEL, &type);
 	return MACH_MSG_SUCCESS;
 }
 
