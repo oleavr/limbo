@@ -72,6 +72,8 @@
 
 int proc_get_cpumon_params(pid_t pid, int *percentage, int *interval);
 int proc_pidoriginatorinfo(int flavor, void *buffer, int buffersize);
+kern_return_t task_inspect_for_pid(
+		mach_port_name_t target, int pid, mach_port_name_t *task);
 
 static void check_main_thread_gone(void);
 static void check_sysctl_walk(void);
@@ -151,6 +153,11 @@ main(void)
 			      NULL, 0)
 			== 0);
 	CHECK(info_flags == 0);
+
+	mach_port_name_t inspected = MACH_PORT_NULL;
+	CHECK(task_inspect_for_pid(mach_task_self(), getpid(), &inspected)
+			== KERN_SUCCESS);
+	CHECK(MACH_PORT_VALID(inspected));
 
 	struct proc_vnodepathinfo vnodes;
 	CHECK(proc_pidinfo(getpid(), PROC_PIDVNODEPATHINFO, 0, &vnodes,
