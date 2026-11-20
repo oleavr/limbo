@@ -132,6 +132,12 @@ main(void)
 			== 0);
 	CHECK(exclaves == EXCLAVES_STATUS_NOT_SUPPORTED);
 
+	int check_openevt = -1;
+	size = sizeof(check_openevt);
+	CHECK(sysctlbyname("kern.check_openevt", &check_openevt, &size, NULL, 0)
+			== 0);
+	CHECK(check_openevt == 0);
+
 	struct proc_vnodepathinfo vnodes;
 	CHECK(proc_pidinfo(getpid(), PROC_PIDVNODEPATHINFO, 0, &vnodes,
 			      sizeof(vnodes))
