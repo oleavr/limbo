@@ -58,6 +58,8 @@ struct memory_entry {
 	mach_vm_offset_t data_offset;
 };
 
+struct shared_range;
+
 #define VM_FLAGS_ANYWHERE  0x0001
 #define VM_FLAGS_OVERWRITE 0x4000
 #define LOW_ANYWHERE_BASE  0x100000000
@@ -80,6 +82,10 @@ static int share_in_place(mach_vm_address_t address, mach_vm_size_t size,
 		vm_prot_t protection);
 static int shared_range_fd(mach_vm_address_t start);
 static void shared_range_add(mach_vm_address_t start, int fd);
+static void shared_ranges_prune(void);
+static bool shared_range_mapped(const struct shared_range *range, bool mapped,
+		dev_t device, ino_t inode);
+static void shared_range_drop(struct shared_range **link);
 static int held_fd(mach_vm_address_t start);
 static bool region_inode(mach_vm_address_t start, dev_t *device, ino_t *inode);
 static int copy_range(mach_vm_address_t address, mach_vm_size_t size);
@@ -650,7 +656,11 @@ struct shared_range {
 	int fd;
 };
 
+#define SHARED_RANGES_UNPRUNED 64
+
 static struct shared_range *shared_ranges;
+static size_t shared_range_count;
+static size_t shared_range_prune_at = SHARED_RANGES_UNPRUNED;
 static pthread_mutex_t shared_ranges_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* A descriptor of the memfd the range at START is mapped from, or -1 */
@@ -665,21 +675,16 @@ shared_range_fd(mach_vm_address_t start)
 	struct shared_range **link = &shared_ranges;
 	while (*link != NULL) {
 		struct shared_range *range = *link;
-		struct stat status;
 		if (range->start != start) {
 			link = &range->next;
 			continue;
 		}
-		if (mapped && fstat(range->fd, &status) == 0
-				&& status.st_dev == device
-				&& status.st_ino == inode) {
+		if (shared_range_mapped(range, mapped, device, inode)) {
 			fd = fcntl(range->fd, F_DUPFD_CLOEXEC, 0);
 			break;
 		}
 		/* The range was unmapped or mapped anew since */
-		*link = range->next;
-		close(range->fd);
-		free(range);
+		shared_range_drop(link);
 	}
 	pthread_mutex_unlock(&shared_ranges_lock);
 	return fd;
@@ -698,7 +703,48 @@ shared_range_add(mach_vm_address_t start, int fd)
 	pthread_mutex_lock(&shared_ranges_lock);
 	range->next = shared_ranges;
 	shared_ranges = range;
+	if (++shared_range_count >= shared_range_prune_at) {
+		shared_ranges_prune();
+	}
 	pthread_mutex_unlock(&shared_ranges_lock);
+}
+
+static void
+shared_ranges_prune(void)
+{
+	struct shared_range **link = &shared_ranges;
+	while (*link != NULL) {
+		dev_t device;
+		ino_t inode;
+		bool mapped = region_inode((*link)->start, &device, &inode);
+		if (shared_range_mapped(*link, mapped, device, inode)) {
+			link = &(*link)->next;
+		} else {
+			shared_range_drop(link);
+		}
+	}
+	shared_range_prune_at = shared_range_count * 2 > SHARED_RANGES_UNPRUNED
+			? shared_range_count * 2
+			: SHARED_RANGES_UNPRUNED;
+}
+
+static bool
+shared_range_mapped(const struct shared_range *range, bool mapped, dev_t device,
+		ino_t inode)
+{
+	struct stat status;
+	return mapped && fstat(range->fd, &status) == 0
+			&& status.st_dev == device && status.st_ino == inode;
+}
+
+static void
+shared_range_drop(struct shared_range **link)
+{
+	struct shared_range *range = *link;
+	*link = range->next;
+	close(range->fd);
+	free(range);
+	shared_range_count--;
 }
 
 static int
