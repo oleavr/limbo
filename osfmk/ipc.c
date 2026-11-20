@@ -38,7 +38,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -945,10 +944,10 @@ copy_ool(const void *address, mach_msg_size_t size)
 	if (size == 0) {
 		return NULL;
 	}
-	void *copy = mmap(NULL, size, PROT_READ | PROT_WRITE,
-			MAP_PRIVATE | MAP_ANON, -1, 0);
-	memcpy(copy, address, size);
-	return copy;
+	mach_vm_address_t copy = 0;
+	_kernelrpc_mach_vm_allocate(0, &copy, size, VM_FLAGS_ANYWHERE);
+	memcpy((void *)copy, address, size);
+	return (void *)copy;
 }
 
 static void

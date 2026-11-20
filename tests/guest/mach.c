@@ -72,6 +72,7 @@ static semaphore_t semaphore;
 
 static void check_space_info(void);
 static void check_messages(void);
+static void check_out_of_line_copies(void);
 static void check_port_sets(void);
 static void check_make_send_count(void);
 static mach_port_mscount_t make_send_count(mach_port_t port);
@@ -107,6 +108,7 @@ main(void)
 {
 	check_space_info();
 	check_messages();
+	check_out_of_line_copies();
 	check_port_sets();
 	check_make_send_count();
 	check_semaphores();
@@ -422,6 +424,62 @@ check_messages(void)
 			      MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
 			      sizeof(received), port, 10, MACH_PORT_NULL)
 			== MACH_RCV_TIMED_OUT);
+}
+
+static void
+check_out_of_line_copies(void)
+{
+	mach_port_t port = allocate_port();
+	const char payload[] = "out-of-line payload";
+	struct {
+		mach_msg_header_t header;
+		mach_msg_body_t body;
+		mach_msg_ool_descriptor_t data;
+	} sent = {
+			.header = {
+					.msgh_bits = MACH_MSGH_BITS_SET(
+							MACH_MSG_TYPE_MAKE_SEND,
+							0, 0,
+							MACH_MSGH_BITS_COMPLEX),
+					.msgh_size = sizeof(sent),
+					.msgh_remote_port = port,
+			},
+			.body = {.msgh_descriptor_count = 1},
+			.data = {
+					.address = (void *)payload,
+					.size = sizeof(payload),
+					.copy = MACH_MSG_VIRTUAL_COPY,
+					.type = MACH_MSG_OOL_DESCRIPTOR,
+			},
+	};
+	for (int i = 0; i < 2; i++) {
+		CHECK(mach_msg(&sent.header, MACH_SEND_MSG, sizeof(sent), 0,
+				      MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+				      MACH_PORT_NULL)
+				== MACH_MSG_SUCCESS);
+	}
+	struct {
+		mach_msg_header_t header;
+		mach_msg_body_t body;
+		mach_msg_ool_descriptor_t data;
+		mach_msg_trailer_t trailer;
+	} received;
+	void *copies[2];
+	for (int i = 0; i < 2; i++) {
+		CHECK(mach_msg(&received.header, MACH_RCV_MSG, 0,
+				      sizeof(received), port,
+				      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL)
+				== MACH_MSG_SUCCESS);
+		copies[i] = received.data.address;
+		CHECK((uintptr_t)copies[i] % vm_page_size == 0);
+	}
+	CHECK(vm_deallocate(mach_task_self(), (vm_address_t)copies[0],
+			      sizeof(payload))
+			== KERN_SUCCESS);
+	CHECK(memcmp(copies[1], payload, sizeof(payload)) == 0);
+	CHECK(vm_deallocate(mach_task_self(), (vm_address_t)copies[1],
+			      sizeof(payload))
+			== KERN_SUCCESS);
 }
 
 static void
