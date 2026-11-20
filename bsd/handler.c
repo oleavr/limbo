@@ -3823,6 +3823,9 @@ sys_symlinkat(user_addr_t *path1, int fd, user_addr_t path2)
 int
 sys_mkdirat(int fd, user_addr_t path, int mode)
 {
+	if (path == NULL) {
+		return _EFAULT;
+	}
 	char buffer[PATH_MAX];
 	return errno_map(mkdirat(at_fd(fd),
 			sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer),
