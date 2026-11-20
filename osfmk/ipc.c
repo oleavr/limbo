@@ -476,7 +476,11 @@ remote_send(mach_msg_header_t *header, mach_msg_size_t size, pid_t sender_pid)
 	uint64_t dest_global_id = lookup(header->msgh_remote_port)->port->global_id;
 	mach_msg_bits_t bits = header->msgh_bits;
 
-	uint64_t global_ids[16];
+	mach_msg_body_t *body = (mach_msg_body_t *)(header + 1);
+	uint32_t id_capacity = (bits & MACH_MSGH_BITS_COMPLEX)
+			? body->msgh_descriptor_count
+			: 0;
+	uint64_t *global_ids = malloc(id_capacity * sizeof(*global_ids));
 	uint32_t descriptor_count = export_body_ports(header, global_ids,
 			broker_guest_of(dest_global_id));
 
@@ -497,6 +501,7 @@ remote_send(mach_msg_header_t *header, mach_msg_size_t size, pid_t sender_pid)
 	memcpy(blob, &rh, sizeof(rh));
 	memcpy(blob + sizeof(rh), header, size);
 	memcpy(blob + sizeof(rh) + size, global_ids, ids_length);
+	free(global_ids);
 
 	pthread_mutex_unlock(&lock);
 	broker_client_send(dest_global_id, blob, blob_length);
