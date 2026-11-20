@@ -183,6 +183,8 @@ static mach_msg_return_t transfer_right(mach_port_name_t name,
 static bool has_right(
 		struct ipc_entry *entry, mach_msg_type_name_t disposition);
 static mach_msg_type_name_t received_type(mach_msg_type_name_t disposition);
+static void mark_circular(mach_msg_header_t *header, mach_port_name_t name,
+		mach_msg_type_name_t type, ipc_side_t receiver);
 static void *copy_ool(const void *address, mach_msg_size_t size);
 static void enqueue(struct ipc_port *port, struct ipc_kmsg *kmsg);
 static void release_unused_entries(mach_msg_header_t *header);
@@ -447,7 +449,9 @@ send(mach_msg_header_t *msg, mach_msg_size_t size, ipc_side_t sender,
 
 	struct ipc_port *dest;
 	mach_msg_return_t mr = copyin(kmsg->header, sender, &dest);
-	if (mr != MACH_MSG_SUCCESS) {
+	if (mr != MACH_MSG_SUCCESS
+			|| (kmsg->header->msgh_bits
+					& MACH_MSGH_BITS_CIRCULAR)) {
 		release_unused_entries(kmsg->header);
 		pthread_mutex_unlock(&lock);
 		free(kmsg);
@@ -907,7 +911,8 @@ copyin(mach_msg_header_t *header, ipc_side_t sender, struct ipc_port **dest)
 	}
 
 	mach_msg_return_t mr = copyin_body(header, sender, receiver);
-	if (mr == MACH_SEND_INVALID_RIGHT && receiver == IPC_USER) {
+	if ((mr == MACH_SEND_INVALID_RIGHT && receiver == IPC_USER)
+			|| (header->msgh_bits & MACH_MSGH_BITS_CIRCULAR)) {
 		destroy_rights(header);
 	}
 	return mr;
@@ -951,6 +956,7 @@ copyin_body(mach_msg_header_t *header, ipc_side_t sender, ipc_side_t receiver)
 				body->msgh_descriptor_count = i;
 				return MACH_SEND_INVALID_RIGHT;
 			}
+			mark_circular(header, d->name, type, receiver);
 			d->disposition = type;
 			cursor += sizeof(*d);
 		} break;
@@ -966,6 +972,7 @@ copyin_body(mach_msg_header_t *header, ipc_side_t sender, ipc_side_t receiver)
 				body->msgh_descriptor_count = i;
 				return MACH_SEND_INVALID_RIGHT;
 			}
+			mark_circular(header, d->name, type, receiver);
 			d->disposition = type;
 			cursor += sizeof(*d);
 		} break;
@@ -997,6 +1004,7 @@ copyin_body(mach_msg_header_t *header, ipc_side_t sender, ipc_side_t receiver)
 					body->msgh_descriptor_count = i + 1;
 					return MACH_SEND_INVALID_RIGHT;
 				}
+				mark_circular(header, names[j], type, receiver);
 			}
 			if (sender == IPC_USER && receiver == IPC_USER
 					&& !d->deallocate) {
@@ -1116,6 +1124,16 @@ received_type(mach_msg_type_name_t disposition)
 		return MACH_MSG_TYPE_PORT_SEND_ONCE;
 	default:
 		return MACH_MSG_TYPE_PORT_NONE;
+	}
+}
+
+static void
+mark_circular(mach_msg_header_t *header, mach_port_name_t name,
+		mach_msg_type_name_t type, ipc_side_t receiver)
+{
+	if (receiver == IPC_USER && type == MACH_MSG_TYPE_PORT_RECEIVE
+			&& name == header->msgh_local_port) {
+		header->msgh_bits |= MACH_MSGH_BITS_CIRCULAR;
 	}
 }
 
