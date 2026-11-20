@@ -91,6 +91,23 @@ bootstrap_call(mach_msg_id_t id)
 	return message.reply.port.name;
 }
 
+static void
+receive_dead_names(mach_port_t service)
+{
+	struct {
+		mach_msg_header_t Head;
+		mach_msg_body_t body;
+		mach_msg_port_descriptor_t port;
+		mach_msg_trailer_t trailer;
+	} request;
+	kern_return_t kr = mach_msg(&request.Head,
+			MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(request),
+			service, 8000, MACH_PORT_NULL);
+	CHECK(kr == MACH_MSG_SUCCESS);
+	CHECK(request.Head.msgh_remote_port == MACH_PORT_DEAD);
+	CHECK(request.port.name == MACH_PORT_DEAD);
+}
+
 static mach_port_t
 receive_request(mach_port_t service)
 {
@@ -159,6 +176,7 @@ serve(void)
 	mach_port_t service = bootstrap_call(CHECK_IN);
 	CHECK(service != MACH_PORT_NULL);
 
+	receive_dead_names(service);
 	mach_port_t abandoned = receive_request(service);
 	mach_port_t gone = receive_request(service);
 	mach_port_t dead_name = receive_request(service);
@@ -197,6 +215,34 @@ send_request(mach_msg_header_t *request)
 }
 
 static void
+send_dead_names(mach_port_t service)
+{
+	struct {
+		mach_msg_header_t Head;
+		mach_msg_body_t body;
+		mach_msg_port_descriptor_t port;
+	} request = {
+			.Head = {
+					.msgh_bits = MACH_MSGH_BITS_SET(
+							MACH_MSG_TYPE_COPY_SEND,
+							MACH_MSG_TYPE_MAKE_SEND_ONCE,
+							0,
+							MACH_MSGH_BITS_COMPLEX),
+					.msgh_size = sizeof(request),
+					.msgh_remote_port = service,
+					.msgh_local_port = MACH_PORT_DEAD,
+			},
+			.body = {.msgh_descriptor_count = 1},
+			.port = {
+					.name = MACH_PORT_DEAD,
+					.disposition = MACH_MSG_TYPE_COPY_SEND,
+					.type = MACH_MSG_PORT_DESCRIPTOR,
+			},
+	};
+	send_request(&request.Head);
+}
+
+static void
 call(void)
 {
 	mach_port_t service = MACH_PORT_NULL;
@@ -208,6 +254,7 @@ call(void)
 	}
 	CHECK(service != MACH_PORT_NULL);
 
+	send_dead_names(service);
 	mach_port_t abandoned;
 	mach_port_allocate(
 			mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &abandoned);
