@@ -82,6 +82,7 @@ static void check_queued_rights_destroyed(void);
 static void check_refused_reply(void);
 static void check_refused_body(void);
 static void check_refused_type(void);
+static void check_destroyed_memory(void);
 static void check_dead_send_once_rights(void);
 static void check_make_send_count(void);
 static mach_port_mscount_t make_send_count(mach_port_t port);
@@ -128,6 +129,7 @@ main(void)
 	check_refused_reply();
 	check_refused_body();
 	check_refused_type();
+	check_destroyed_memory();
 	check_dead_send_once_rights();
 	check_make_send_count();
 	check_reference_deltas();
@@ -749,6 +751,61 @@ check_refused_type(void)
 			      &reply_refs)
 			== KERN_SUCCESS);
 	CHECK(reply_refs == 0);
+}
+
+static void
+check_destroyed_memory(void)
+{
+	mach_port_t task = mach_task_self();
+	mach_port_t port = allocate_port();
+	vm_address_t given = 0;
+	CHECK(vm_allocate(task, &given, vm_page_size, VM_FLAGS_ANYWHERE)
+			== KERN_SUCCESS);
+
+	struct {
+		mach_msg_header_t header;
+		mach_msg_body_t body;
+		mach_msg_ool_descriptor_t data;
+		mach_msg_port_descriptor_t port;
+	} message = {
+			.header = {
+					.msgh_bits = MACH_MSGH_BITS_SET(
+							MACH_MSG_TYPE_MAKE_SEND,
+							0, 0,
+							MACH_MSGH_BITS_COMPLEX),
+					.msgh_size = sizeof(message),
+					.msgh_remote_port = port,
+			},
+			.body = {.msgh_descriptor_count = 2},
+			.data = {
+					.address = (void *)given,
+					.size = vm_page_size,
+					.deallocate = TRUE,
+					.copy = MACH_MSG_VIRTUAL_COPY,
+					.type = MACH_MSG_OOL_DESCRIPTOR,
+			},
+			.port = {
+					.name = port,
+					.disposition = MACH_MSG_TYPE_COPY_SEND,
+					.type = MACH_MSG_PORT_DESCRIPTOR,
+			},
+	};
+	CHECK(mach_msg(&message.header, MACH_SEND_MSG, sizeof(message), 0,
+			      MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+			      MACH_PORT_NULL)
+			== MACH_SEND_INVALID_RIGHT);
+	CHECK(vm_allocate(task, &given, vm_page_size, VM_FLAGS_FIXED)
+			== KERN_SUCCESS);
+
+	message.port.disposition = MACH_MSG_TYPE_MAKE_SEND;
+	CHECK(mach_msg(&message.header, MACH_SEND_MSG, sizeof(message), 0,
+			      MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+			      MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	CHECK(mach_port_mod_refs(task, port, MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+	CHECK(vm_allocate(task, &given, vm_page_size, VM_FLAGS_FIXED)
+			== KERN_SUCCESS);
 }
 
 static void
