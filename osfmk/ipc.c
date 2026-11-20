@@ -173,6 +173,8 @@ static mach_msg_return_t send(mach_msg_header_t *msg, mach_msg_size_t size,
 static bool has_valid_descriptors(const mach_msg_header_t *header);
 static mach_msg_return_t copyin(mach_msg_header_t *header, ipc_side_t sender,
 		struct ipc_port **dest);
+static bool moves_one_right_twice(
+		const struct ipc_entry *entry, mach_msg_bits_t bits);
 static mach_msg_return_t copyin_body(mach_msg_header_t *header,
 		ipc_side_t sender, ipc_side_t receiver);
 static mach_msg_return_t transfer_right(mach_port_name_t name,
@@ -870,6 +872,10 @@ copyin(mach_msg_header_t *header, ipc_side_t sender, struct ipc_port **dest)
 					MACH_MSGH_BITS_REMOTE(bits))) {
 		return MACH_SEND_INVALID_DEST;
 	}
+	if (header->msgh_local_port == header->msgh_remote_port
+			&& moves_one_right_twice(dest_entry, bits)) {
+		return MACH_SEND_INVALID_DEST;
+	}
 	*dest = dest_entry->port;
 	ipc_side_t receiver = ((*dest)->kotype == IPC_KOBJECT_NONE)
 			? IPC_USER
@@ -905,6 +911,24 @@ copyin(mach_msg_header_t *header, ipc_side_t sender, struct ipc_port **dest)
 		destroy_rights(header);
 	}
 	return mr;
+}
+
+static bool
+moves_one_right_twice(const struct ipc_entry *entry, mach_msg_bits_t bits)
+{
+	mach_msg_type_name_t disposition = MACH_MSGH_BITS_REMOTE(bits);
+	if (MACH_MSGH_BITS_LOCAL(bits) != disposition) {
+		return false;
+	}
+
+	switch (disposition) {
+	case MACH_MSG_TYPE_MOVE_SEND:
+		return entry->urefs < 2;
+	case MACH_MSG_TYPE_MOVE_SEND_ONCE:
+		return entry->sorights < 2;
+	default:
+		return false;
+	}
 }
 
 static mach_msg_return_t

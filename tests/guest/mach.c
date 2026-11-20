@@ -80,6 +80,7 @@ static void check_out_of_line_copies(void);
 static void check_port_sets(void);
 static void check_queued_rights_destroyed(void);
 static void check_refused_reply(void);
+static void check_right_moved_twice(void);
 static void check_refused_body(void);
 static void check_refused_type(void);
 static void check_destroyed_memory(void);
@@ -127,6 +128,7 @@ main(void)
 	check_port_sets();
 	check_queued_rights_destroyed();
 	check_refused_reply();
+	check_right_moved_twice();
 	check_refused_body();
 	check_refused_type();
 	check_destroyed_memory();
@@ -627,6 +629,47 @@ check_refused_reply(void)
 			      MACH_PORT_NULL)
 			== MACH_SEND_INVALID_REPLY);
 	CHECK(send_refs(port) == 1);
+}
+
+static void
+check_right_moved_twice(void)
+{
+	mach_port_t task = mach_task_self();
+	mach_port_t port = allocate_port();
+	CHECK(mach_port_insert_right(task, port, port, MACH_MSG_TYPE_MAKE_SEND)
+			== KERN_SUCCESS);
+
+	mach_msg_header_t message = {
+			.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND,
+					MACH_MSG_TYPE_MOVE_SEND),
+			.msgh_size = sizeof(message),
+			.msgh_remote_port = port,
+			.msgh_local_port = port,
+	};
+	CHECK(mach_msg(&message, MACH_SEND_MSG, sizeof(message), 0,
+			      MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+			      MACH_PORT_NULL)
+			== MACH_SEND_INVALID_DEST);
+	CHECK(send_refs(port) == 1);
+
+	mach_port_t once;
+	mach_msg_type_name_t once_type;
+	CHECK(mach_port_extract_right(task, port, MACH_MSG_TYPE_MAKE_SEND_ONCE,
+			      &once, &once_type)
+			== KERN_SUCCESS);
+	message.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE,
+			MACH_MSG_TYPE_MOVE_SEND_ONCE);
+	message.msgh_remote_port = once;
+	message.msgh_local_port = once;
+	CHECK(mach_msg(&message, MACH_SEND_MSG, sizeof(message), 0,
+			      MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+			      MACH_PORT_NULL)
+			== MACH_SEND_INVALID_DEST);
+	mach_port_urefs_t once_refs;
+	CHECK(mach_port_get_refs(
+			      task, once, MACH_PORT_RIGHT_SEND_ONCE, &once_refs)
+			== KERN_SUCCESS);
+	CHECK(once_refs == 1);
 }
 
 static void
