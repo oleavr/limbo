@@ -145,6 +145,13 @@ main(void)
 			== 0);
 	CHECK(footprint == 0);
 
+	int info_flags = -1;
+	size = sizeof(info_flags);
+	CHECK(sysctlbyname("vm.self_region_info_flags", &info_flags, &size,
+			      NULL, 0)
+			== 0);
+	CHECK(info_flags == 0);
+
 	struct proc_vnodepathinfo vnodes;
 	CHECK(proc_pidinfo(getpid(), PROC_PIDVNODEPATHINFO, 0, &vnodes,
 			      sizeof(vnodes))
