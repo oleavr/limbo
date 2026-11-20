@@ -508,7 +508,12 @@ sys_task_name_for_pid(
 kern_return_t
 sys_pid_for_task(mach_port_name_t t, int *x)
 {
-	unimplemented();
+	if (t != ipc_kobject_name(IPC_KOBJECT_TASK)) {
+		*x = -1;
+		return KERN_FAILURE;
+	}
+	*x = getpid();
+	return KERN_SUCCESS;
 }
 
 kern_return_t
