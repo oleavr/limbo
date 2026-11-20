@@ -84,6 +84,7 @@ static void check_right_moved_twice(void);
 static void check_refused_body(void);
 static void check_refused_type(void);
 static void check_destroyed_memory(void);
+static void check_circular_message(void);
 static void check_dead_send_once_rights(void);
 static void check_make_send_count(void);
 static mach_port_mscount_t make_send_count(mach_port_t port);
@@ -132,6 +133,7 @@ main(void)
 	check_refused_body();
 	check_refused_type();
 	check_destroyed_memory();
+	check_circular_message();
 	check_dead_send_once_rights();
 	check_make_send_count();
 	check_reference_deltas();
@@ -849,6 +851,64 @@ check_destroyed_memory(void)
 			== KERN_SUCCESS);
 	CHECK(vm_allocate(task, &given, vm_page_size, VM_FLAGS_FIXED)
 			== KERN_SUCCESS);
+}
+
+static void
+check_circular_message(void)
+{
+	mach_port_t task = mach_task_self();
+	mach_port_t port = allocate_port();
+	mach_port_t reply = allocate_port();
+	mach_port_t moved = allocate_port();
+	CHECK(mach_port_insert_right(task, port, port, MACH_MSG_TYPE_MAKE_SEND)
+			== KERN_SUCCESS);
+	CHECK(mach_port_insert_right(
+			      task, moved, moved, MACH_MSG_TYPE_MAKE_SEND)
+			== KERN_SUCCESS);
+
+	struct {
+		mach_msg_header_t header;
+		mach_msg_body_t body;
+		mach_msg_port_descriptor_t ports[2];
+	} message = {
+			.header = {
+					.msgh_bits = MACH_MSGH_BITS_SET(
+							MACH_MSG_TYPE_COPY_SEND,
+							MACH_MSG_TYPE_MAKE_SEND_ONCE,
+							0,
+							MACH_MSGH_BITS_COMPLEX),
+					.msgh_size = sizeof(message),
+					.msgh_remote_port = port,
+					.msgh_local_port = reply,
+			},
+			.body = {.msgh_descriptor_count = 2},
+			.ports = {
+					{
+							.name = moved,
+							.disposition = MACH_MSG_TYPE_MOVE_SEND,
+							.type = MACH_MSG_PORT_DESCRIPTOR,
+					},
+					{
+							.name = port,
+							.disposition = MACH_MSG_TYPE_MOVE_RECEIVE,
+							.type = MACH_MSG_PORT_DESCRIPTOR,
+					},
+			},
+	};
+	CHECK(mach_msg(&message.header, MACH_SEND_MSG, sizeof(message), 0,
+			      MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+			      MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+
+	mach_port_type_t type;
+	CHECK(mach_port_type(task, port, &type) == KERN_SUCCESS);
+	CHECK(type == MACH_PORT_TYPE_DEAD_NAME);
+	CHECK(send_refs(moved) == 0);
+	mach_port_urefs_t reply_refs;
+	CHECK(mach_port_get_refs(task, reply, MACH_PORT_RIGHT_SEND_ONCE,
+			      &reply_refs)
+			== KERN_SUCCESS);
+	CHECK(reply_refs == 0);
 }
 
 static void
