@@ -144,6 +144,7 @@ static uint32_t entry_count;
 static struct ipc_port *kobjects[IPC_KOBJECT_VOUCHER + 1];
 static uint32_t export_counter;
 static uint32_t transfer_counter;
+static const uint64_t dead_global_id = UINT64_MAX;
 
 static void ipc_fork_prepare(void);
 static void ipc_fork_parent(void);
@@ -643,11 +644,12 @@ static uint64_t
 export_body_port(mach_port_name_t name, mach_msg_type_name_t disposition,
 		uint32_t dest_guest_id)
 {
-	if (!MACH_PORT_VALID(name)) {
+	if (name == MACH_PORT_NULL) {
 		return 0;
 	}
 
-	if (disposition != MACH_MSG_TYPE_MOVE_RECEIVE) {
+	if (name == MACH_PORT_DEAD
+			|| disposition != MACH_MSG_TYPE_MOVE_RECEIVE) {
 		return export_local_port(name);
 	}
 
@@ -666,6 +668,10 @@ export_body_port(mach_port_name_t name, mach_msg_type_name_t disposition,
 static uint64_t
 export_local_port(mach_port_name_t name)
 {
+	if (name == MACH_PORT_DEAD) {
+		return dead_global_id;
+	}
+
 	struct ipc_port *port = lookup(name)->port;
 	if (port->global_id == 0) {
 		port->global_id = broker_global_id(
@@ -692,6 +698,10 @@ port_for_global_id(uint64_t global_id)
 static mach_port_name_t
 import_remote_send(uint64_t global_id, mach_msg_type_name_t type)
 {
+	if (global_id == dead_global_id) {
+		return MACH_PORT_DEAD;
+	}
+
 	if (broker_guest_of(global_id) == broker_client_guest_id()) {
 		struct ipc_port *port = port_for_global_id(global_id);
 		if (port == NULL) {
@@ -808,7 +818,7 @@ import_body_port(uint64_t global_id, mach_msg_type_name_t type)
 		return MACH_PORT_NULL;
 	}
 
-	if (type == MACH_MSG_TYPE_PORT_RECEIVE) {
+	if (type == MACH_MSG_TYPE_PORT_RECEIVE && global_id != dead_global_id) {
 		struct ipc_entry *entry = entry_alloc(port_alloc(IPC_KOBJECT_NONE));
 		entry->type = MACH_PORT_TYPE_RECEIVE;
 		entry->port->global_id = global_id;
