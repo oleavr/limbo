@@ -84,6 +84,8 @@ static mach_msg_type_number_t submap_info_count(
 		mach_vm_address_t address, mach_msg_type_number_t room);
 static unsigned char share_mode(mach_vm_address_t address);
 static void check_shared_range_entries(void);
+static void check_shared_range_kept(void);
+static mach_port_t range_entry(mach_vm_address_t range);
 static void check_exception_ports(void);
 static void check_vouchers(void);
 static void check_destroy(void);
@@ -559,6 +561,7 @@ check_memory_entries(void)
 	CHECK(mach_port_deallocate(mach_task_self(), entry) == KERN_SUCCESS);
 
 	check_shared_range_entries();
+	check_shared_range_kept();
 }
 
 /*
@@ -600,6 +603,57 @@ check_shared_range_entries(void)
 	}
 	CHECK(mach_vm_deallocate(mach_task_self(), range, size)
 			== KERN_SUCCESS);
+}
+
+#define OTHER_RANGES 200
+
+static void
+check_shared_range_kept(void)
+{
+	mach_vm_address_t kept = 0;
+	CHECK(mach_vm_allocate(mach_task_self(), &kept, vm_page_size,
+			      VM_FLAGS_ANYWHERE)
+			== KERN_SUCCESS);
+	CHECK(mach_port_deallocate(mach_task_self(), range_entry(kept))
+			== KERN_SUCCESS);
+
+	for (int i = 0; i < OTHER_RANGES; i++) {
+		mach_vm_address_t other = 0;
+		CHECK(mach_vm_allocate(mach_task_self(), &other, vm_page_size,
+				      VM_FLAGS_ANYWHERE)
+				== KERN_SUCCESS);
+		CHECK(mach_port_deallocate(mach_task_self(), range_entry(other))
+				== KERN_SUCCESS);
+		CHECK(mach_vm_deallocate(mach_task_self(), other, vm_page_size)
+				== KERN_SUCCESS);
+	}
+
+	mach_port_t entry = range_entry(kept);
+	mach_vm_address_t map = 0;
+	CHECK(mach_vm_map(mach_task_self(), &map, vm_page_size, 0,
+			      VM_FLAGS_ANYWHERE, entry, 0, false, VM_PROT_READ,
+			      VM_PROT_READ, VM_INHERIT_NONE)
+			== KERN_SUCCESS);
+	*(volatile char *)kept = 42;
+	CHECK(*(volatile char *)map == 42);
+
+	CHECK(mach_vm_deallocate(mach_task_self(), map, vm_page_size)
+			== KERN_SUCCESS);
+	CHECK(mach_port_deallocate(mach_task_self(), entry) == KERN_SUCCESS);
+	CHECK(mach_vm_deallocate(mach_task_self(), kept, vm_page_size)
+			== KERN_SUCCESS);
+}
+
+static mach_port_t
+range_entry(mach_vm_address_t range)
+{
+	memory_object_size_t size = vm_page_size;
+	mach_port_t entry;
+	CHECK(mach_make_memory_entry_64(mach_task_self(), &size, range,
+			      VM_PROT_READ | VM_PROT_WRITE, &entry,
+			      MACH_PORT_NULL)
+			== KERN_SUCCESS);
+	return entry;
 }
 
 static mach_port_t
