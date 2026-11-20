@@ -138,6 +138,13 @@ main(void)
 			== 0);
 	CHECK(check_openevt == 0);
 
+	int footprint = -1;
+	size = sizeof(footprint);
+	CHECK(sysctlbyname("vm.self_region_footprint", &footprint, &size, NULL,
+			      0)
+			== 0);
+	CHECK(footprint == 0);
+
 	struct proc_vnodepathinfo vnodes;
 	CHECK(proc_pidinfo(getpid(), PROC_PIDVNODEPATHINFO, 0, &vnodes,
 			      sizeof(vnodes))

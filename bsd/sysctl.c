@@ -281,6 +281,7 @@ static const struct sysctl_node nodes[] = {
 				.reader = read_loadavg},
 		{"vm.swapusage", {CTL_VM, VM_SWAPUSAGE}, SYSCTL_READER,
 				.reader = read_swapusage},
+		{"vm.self_region_footprint", {0, 0}, SYSCTL_INT, .number = 0},
 		{"net.inet.ip.ttl", {0, 0}, SYSCTL_READER,
 				.reader = read_ip_ttl},
 
