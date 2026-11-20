@@ -170,6 +170,7 @@ static mach_port_name_t kobject_send_right(ipc_kobject_type_t type);
 static struct ipc_port *kobject_port(ipc_kobject_type_t type);
 static mach_msg_return_t send(mach_msg_header_t *msg, mach_msg_size_t size,
 		ipc_side_t sender, pid_t sender_pid);
+static bool has_valid_descriptors(const mach_msg_header_t *header);
 static mach_msg_return_t copyin(mach_msg_header_t *header, ipc_side_t sender,
 		struct ipc_port **dest);
 static mach_msg_return_t copyin_body(mach_msg_header_t *header,
@@ -428,6 +429,10 @@ send(mach_msg_header_t *msg, mach_msg_size_t size, ipc_side_t sender,
 	kmsg->sender_pid = sender_pid;
 	memcpy(kmsg->header, msg, size);
 	kmsg->header->msgh_size = size;
+	if (!has_valid_descriptors(kmsg->header)) {
+		free(kmsg);
+		return MACH_SEND_INVALID_TYPE;
+	}
 
 	pthread_mutex_lock(&lock);
 	struct ipc_entry *remote_entry = lookup(kmsg->header->msgh_remote_port);
@@ -472,6 +477,35 @@ send(mach_msg_header_t *msg, mach_msg_size_t size, ipc_side_t sender,
 
 	free(kmsg);
 	return MACH_MSG_SUCCESS;
+}
+
+static bool
+has_valid_descriptors(const mach_msg_header_t *header)
+{
+	if (!(header->msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
+		return true;
+	}
+
+	const mach_msg_body_t *body = (const mach_msg_body_t *)(header + 1);
+	const uint8_t *cursor = (const uint8_t *)(body + 1);
+	for (mach_msg_size_t i = 0; i < body->msgh_descriptor_count; i++) {
+		const mach_msg_type_descriptor_t *descriptor
+				= (const mach_msg_type_descriptor_t *)cursor;
+		switch (descriptor->type) {
+		case MACH_MSG_PORT_DESCRIPTOR:
+			cursor += sizeof(mach_msg_port_descriptor_t);
+			break;
+		case MACH_MSG_OOL_DESCRIPTOR:
+		case MACH_MSG_OOL_PORTS_DESCRIPTOR:
+		case MACH_MSG_OOL_VOLATILE_DESCRIPTOR:
+		case MACH_MSG_GUARDED_PORT_DESCRIPTOR:
+			cursor += sizeof(mach_msg_ool_descriptor64_t);
+			break;
+		default:
+			return false;
+		}
+	}
+	return true;
 }
 
 static mach_msg_return_t
@@ -948,8 +982,6 @@ copyin_body(mach_msg_header_t *header, ipc_side_t sender, ipc_side_t receiver)
 			d->disposition = type;
 			cursor += sizeof(*d);
 		} break;
-		default:
-			return MACH_SEND_INVALID_TYPE;
 		}
 	}
 
