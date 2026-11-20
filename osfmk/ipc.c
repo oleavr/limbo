@@ -594,6 +594,9 @@ import_remote_send(uint64_t global_id)
 {
 	if (broker_guest_of(global_id) == broker_client_guest_id()) {
 		struct ipc_port *port = port_for_global_id(global_id);
+		if (port == NULL) {
+			return MACH_PORT_DEAD;
+		}
 		struct ipc_entry *entry = &entries[MACH_PORT_INDEX(port->name)];
 		entry->type |= MACH_PORT_TYPE_SEND;
 		entry->urefs++;
