@@ -39,8 +39,10 @@
 #include "bsd/process.h"
 #include "commpage.h"
 #include "ipc.h"
+#include "mach_vm.h"
 #include "semaphore.h"
 #include "task.h"
+#include "thread.h"
 
 static mach_port_t special_ports[TASK_MAX_SPECIAL_PORT + 1];
 static mach_port_t registered_ports[3];
@@ -79,7 +81,28 @@ kern_return_t
 task_threads(task_inspect_t target_task, thread_act_array_t *act_list,
 		mach_msg_type_number_t *act_listCnt)
 {
-	unimplemented();
+	if (target_task != ipc_kobject_name(IPC_KOBJECT_TASK)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	size_t capacity = thread_guest_ports(NULL, 0);
+	for (;;) {
+		mach_vm_address_t address = 0;
+		size_t size = capacity * sizeof(mach_port_t);
+		if (_kernelrpc_mach_vm_allocate(
+				    0, &address, size, VM_FLAGS_ANYWHERE)
+				!= KERN_SUCCESS) {
+			return KERN_RESOURCE_SHORTAGE;
+		}
+		size_t count = thread_guest_ports(
+				(mach_port_t *)address, capacity);
+		if (count <= capacity) {
+			*act_list = (thread_act_array_t)address;
+			*act_listCnt = (mach_msg_type_number_t)count;
+			return KERN_SUCCESS;
+		}
+		_kernelrpc_mach_vm_deallocate(0, address, size);
+		capacity = count;
+	}
 }
 
 kern_return_t

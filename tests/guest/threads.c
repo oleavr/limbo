@@ -64,6 +64,8 @@ static bool by_name;
 
 static atomic_bool spun;
 static atomic_bool times_read;
+static atomic_bool waiting;
+static atomic_bool listed;
 
 static void *increment(void *arg);
 static void initialize(void);
@@ -80,6 +82,8 @@ static void check_thread_times(void);
 static void *spin_then_wait(void *arg);
 static uint64_t cpu_microseconds(pthread_t thread);
 static uint64_t microseconds(time_value_t time);
+static void check_task_threads(void);
+static void *wait_until_listed(void *arg);
 
 extern int __pthread_fchdir(int fd);
 
@@ -165,6 +169,7 @@ main(void)
 
 	check_identifiers();
 	check_thread_times();
+	check_task_threads();
 	return 0;
 }
 
@@ -413,4 +418,56 @@ static uint64_t
 microseconds(time_value_t time)
 {
 	return (uint64_t)time.seconds * 1000000 + time.microseconds;
+}
+
+static void
+check_task_threads(void)
+{
+	pthread_t waiter;
+	CHECK(pthread_create(&waiter, NULL, wait_until_listed, NULL) == 0);
+	while (!waiting) {
+		usleep(1000);
+	}
+	mach_port_t waiter_port = pthread_mach_thread_np(waiter);
+	mach_port_urefs_t held, holds;
+	CHECK(mach_port_get_refs(mach_task_self(), waiter_port,
+			      MACH_PORT_RIGHT_SEND, &held)
+			== KERN_SUCCESS);
+
+	thread_act_array_t threads;
+	mach_msg_type_number_t count;
+	CHECK(task_threads(mach_task_self(), &threads, &count) == KERN_SUCCESS);
+	CHECK(count >= 2);
+	CHECK(threads[0] == pthread_mach_thread_np(pthread_self()));
+	bool found = false;
+	for (mach_msg_type_number_t i = 0; i < count; i++) {
+		found |= threads[i] == waiter_port;
+	}
+	CHECK(found);
+	CHECK(mach_port_get_refs(mach_task_self(), waiter_port,
+			      MACH_PORT_RIGHT_SEND, &holds)
+			== KERN_SUCCESS);
+	CHECK(holds == held + 1);
+	for (mach_msg_type_number_t i = 0; i < count; i++) {
+		CHECK(mach_port_deallocate(mach_task_self(), threads[i])
+				== KERN_SUCCESS);
+	}
+	CHECK(vm_deallocate(mach_task_self(), (vm_address_t)threads,
+			      count * sizeof(*threads))
+			== KERN_SUCCESS);
+
+	listed = true;
+	CHECK(pthread_join(waiter, NULL) == 0);
+	CHECK(task_threads(mach_host_self(), &threads, &count)
+			== KERN_INVALID_ARGUMENT);
+}
+
+static void *
+wait_until_listed(void *arg)
+{
+	waiting = true;
+	while (!listed) {
+		usleep(1000);
+	}
+	return NULL;
 }
