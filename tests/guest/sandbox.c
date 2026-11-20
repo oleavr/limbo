@@ -40,6 +40,9 @@ extern char *sandbox_extension_issue_mach(
 		const char *extension_class, const char *name, uint32_t flags);
 extern int64_t sandbox_extension_consume(const char *token);
 extern int sandbox_extension_release(int64_t handle);
+extern int __mac_syscall(const char *policy, int call, void *arg);
+
+#define AMFI_QUERY_BOOTARG_STATE 96
 
 int
 main(void)
@@ -71,5 +74,10 @@ main(void)
 	CHECK(sandbox_extension_issue_file(APP_SANDBOX_READ_WRITE,
 			      "/nonexistent/limbo", 0)
 			== NULL);
+
+	uint64_t bootarg_state = UINT64_MAX;
+	CHECK(__mac_syscall("AMFI", AMFI_QUERY_BOOTARG_STATE, &bootarg_state)
+			== 0);
+	CHECK(bootarg_state == 0);
 	return 0;
 }
