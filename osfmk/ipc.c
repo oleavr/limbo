@@ -145,6 +145,9 @@ static struct ipc_port *kobjects[IPC_KOBJECT_VOUCHER + 1];
 static uint32_t export_counter;
 static uint32_t transfer_counter;
 
+static void ipc_fork_prepare(void);
+static void ipc_fork_parent(void);
+static void ipc_fork_child(void);
 static mach_msg_return_t remote_send(mach_msg_header_t *header,
 		mach_msg_size_t size, pid_t sender_pid);
 static uint32_t export_body_ports(mach_msg_header_t *header,
@@ -203,6 +206,30 @@ static void port_join_set(struct ipc_port *port, struct ipc_port *pset);
 static void port_leave_all_sets(struct ipc_port *port);
 static void pset_release_members(const struct ipc_port *pset);
 static bool port_leave_set(struct ipc_port *port, const struct ipc_port *pset);
+
+__attribute__((constructor)) static void
+ipc_init(void)
+{
+	pthread_atfork(ipc_fork_prepare, ipc_fork_parent, ipc_fork_child);
+}
+
+static void
+ipc_fork_prepare(void)
+{
+	pthread_mutex_lock(&lock);
+}
+
+static void
+ipc_fork_parent(void)
+{
+	pthread_mutex_unlock(&lock);
+}
+
+static void
+ipc_fork_child(void)
+{
+	pthread_mutex_unlock(&lock);
+}
 
 mach_port_name_t
 ipc_task_self(void)

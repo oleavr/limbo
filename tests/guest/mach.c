@@ -36,8 +36,11 @@
 #include <mach/memory_entry.h>
 #include <mach_debug/ipc_info.h>
 #include <pthread.h>
+#include <stdatomic.h>
+#include <stdbool.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "check.h"
@@ -69,6 +72,7 @@ typedef struct {
 } handlers_t;
 
 static semaphore_t semaphore;
+static atomic_bool forked;
 
 static void check_space_info(void);
 static void check_messages(void);
@@ -76,6 +80,8 @@ static void check_out_of_line_copies(void);
 static void check_port_sets(void);
 static void check_make_send_count(void);
 static mach_port_mscount_t make_send_count(mach_port_t port);
+static void check_fork_during_port_calls(void);
+static void *allocate_ports(void *arg);
 static void check_semaphores(void);
 static void *signal_semaphore(void *arg);
 static void check_time(void);
@@ -111,6 +117,7 @@ main(void)
 	check_out_of_line_copies();
 	check_port_sets();
 	check_make_send_count();
+	check_fork_during_port_calls();
 	check_semaphores();
 	check_time();
 	check_timers();
@@ -590,6 +597,39 @@ make_send_count(mach_port_t port)
 			      (mach_port_info_t)&status, &count)
 			== KERN_SUCCESS);
 	return status.mps_mscount;
+}
+
+#define FORKS 200
+
+static void
+check_fork_during_port_calls(void)
+{
+	pthread_t allocator;
+	CHECK(pthread_create(&allocator, NULL, allocate_ports, NULL) == 0);
+	for (int i = 0; i < FORKS; i++) {
+		pid_t child = fork();
+		CHECK(child != -1);
+		if (child == 0) {
+			allocate_port();
+			_exit(0);
+		}
+		int status;
+		CHECK(waitpid(child, &status, 0) == child);
+		CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	}
+	forked = true;
+	CHECK(pthread_join(allocator, NULL) == 0);
+}
+
+static void *
+allocate_ports(void *arg)
+{
+	while (!forked) {
+		CHECK(mach_port_mod_refs(mach_task_self(), allocate_port(),
+				      MACH_PORT_RIGHT_RECEIVE, -1)
+				== KERN_SUCCESS);
+	}
+	return NULL;
 }
 
 static void
