@@ -1,5 +1,6 @@
 /*
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -30,6 +31,7 @@
 #include <mach/host_special_ports.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "ipc.h"
 #include "mach_vm.h"
@@ -191,7 +193,13 @@ kern_return_t
 host_processor_set_priv(host_priv_t host_priv,
 		processor_set_name_t set_name, processor_set_t *set)
 {
-	unimplemented();
+	mach_port_name_t default_set
+			= ipc_kobject_name(IPC_KOBJECT_PROCESSOR_SET);
+	if (geteuid() != 0 || set_name != default_set) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	*set = default_set;
+	return KERN_SUCCESS;
 }
 
 kern_return_t
