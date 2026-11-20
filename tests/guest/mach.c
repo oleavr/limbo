@@ -82,6 +82,7 @@ static void check_make_send_count(void);
 static mach_port_mscount_t make_send_count(mach_port_t port);
 static void check_fork_during_port_calls(void);
 static void *allocate_ports(void *arg);
+static void check_task_for_pid(void);
 static void check_semaphores(void);
 static void *signal_semaphore(void *arg);
 static void check_time(void);
@@ -118,6 +119,7 @@ main(void)
 	check_port_sets();
 	check_make_send_count();
 	check_fork_during_port_calls();
+	check_task_for_pid();
 	check_semaphores();
 	check_time();
 	check_timers();
@@ -630,6 +632,18 @@ allocate_ports(void *arg)
 				== KERN_SUCCESS);
 	}
 	return NULL;
+}
+
+static void
+check_task_for_pid(void)
+{
+	mach_port_t task = mach_task_self();
+	mach_port_urefs_t refs = send_refs(task);
+	mach_port_t found;
+	CHECK(task_for_pid(task, getpid(), &found) == KERN_SUCCESS);
+	CHECK(found == task);
+	CHECK(send_refs(task) == refs + 1);
+	CHECK(mach_port_deallocate(task, found) == KERN_SUCCESS);
 }
 
 static void
