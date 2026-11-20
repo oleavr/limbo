@@ -1859,8 +1859,10 @@ destroy_receive_right(struct ipc_entry *entry)
 	port_leave_all_sets(port);
 
 	entry->type &= ~MACH_PORT_TYPE_RECEIVE;
-	if (entry->type & MACH_PORT_TYPE_SEND) {
+	if (entry->type & (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE)) {
 		entry->type = MACH_PORT_TYPE_DEAD_NAME;
+		entry->urefs += entry->sorights;
+		entry->sorights = 0;
 	}
 	pthread_cond_broadcast(&arrival);
 	entry_release_if_unused(entry);
@@ -1935,7 +1937,11 @@ destroy_right(mach_port_name_t name, mach_msg_type_name_t type)
 		}
 		break;
 	case MACH_MSG_TYPE_PORT_SEND_ONCE:
-		if (--entry->sorights == 0) {
+		if (entry->type & MACH_PORT_TYPE_DEAD_NAME) {
+			if (--entry->urefs == 0) {
+				entry->type &= ~MACH_PORT_TYPE_DEAD_NAME;
+			}
+		} else if (--entry->sorights == 0) {
 			entry->type &= ~MACH_PORT_TYPE_SEND_ONCE;
 		}
 		break;
