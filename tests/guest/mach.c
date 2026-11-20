@@ -190,8 +190,9 @@ static void
 check_regions(void)
 {
 	mach_vm_address_t address = 0;
+	int own_tag = VM_MAKE_TAG(VM_MEMORY_APPLICATION_SPECIFIC_1);
 	CHECK(mach_vm_allocate(mach_task_self(), &address, 4096,
-			      VM_FLAGS_ANYWHERE)
+			      VM_FLAGS_ANYWHERE | own_tag)
 			== KERN_SUCCESS);
 	CHECK(mach_vm_protect(mach_task_self(), address, 4096, FALSE,
 			      VM_PROT_READ)
@@ -199,16 +200,21 @@ check_regions(void)
 
 	mach_vm_address_t found = address;
 	mach_vm_size_t size = 0;
-	vm_region_basic_info_data_t basic;
+	vm_region_basic_info_data_64_t basic;
 	mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT;
 	mach_port_t object;
+	CHECK(mach_vm_region(mach_task_self(), &found, &size,
+			      VM_REGION_BASIC_INFO, (vm_region_info_t)&basic,
+			      &count, &object)
+			== KERN_INVALID_ARGUMENT);
+	count = VM_REGION_BASIC_INFO_COUNT_64;
 	CHECK(mach_vm_region(mach_task_self(), &found, &size,
 			      VM_REGION_BASIC_INFO, (vm_region_info_t)&basic,
 			      &count, &object)
 			== KERN_SUCCESS);
 	CHECK(found == address && size >= 4096);
 	CHECK(basic.protection == VM_PROT_READ);
-	CHECK(count == VM_REGION_BASIC_INFO_COUNT);
+	CHECK(count == VM_REGION_BASIC_INFO_COUNT_64);
 
 	found = address;
 	vm_region_top_info_data_t top;
