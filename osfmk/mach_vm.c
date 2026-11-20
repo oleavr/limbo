@@ -806,7 +806,7 @@ mach_vm_region_recurse(vm_map_read_t target_task, mach_vm_address_t *address,
 		mach_vm_size_t *size, natural_t *nesting_depth,
 		vm_region_recurse_info_t info, mach_msg_type_number_t *infoCnt)
 {
-	if (*infoCnt < VM_REGION_SUBMAP_INFO_COUNT_64) {
+	if (*infoCnt < VM_REGION_SUBMAP_SHORT_INFO_COUNT_64) {
 		return KERN_INVALID_ARGUMENT;
 	}
 	vm_prot_t protection;
@@ -816,17 +816,36 @@ mach_vm_region_recurse(vm_map_read_t target_task, mach_vm_address_t *address,
 			    &offset)) {
 		return KERN_INVALID_ADDRESS;
 	}
-	vm_region_submap_info_data_64_t *submap = (void *)info;
-	*submap = (vm_region_submap_info_data_64_t){
+	unsigned char share_mode = shared ? SM_SHARED : SM_PRIVATE;
+	*nesting_depth = 0;
+	if (*infoCnt < VM_REGION_SUBMAP_INFO_V0_COUNT_64) {
+		vm_region_submap_short_info_data_64_t *short_info
+				= (void *)info;
+		*short_info = (vm_region_submap_short_info_data_64_t){
+				.protection = protection,
+				.max_protection = VM_PROT_ALL,
+				.inheritance = VM_INHERIT_COPY,
+				.offset = offset,
+				.share_mode = share_mode,
+				.user_tag = 0,
+		};
+		*infoCnt = VM_REGION_SUBMAP_SHORT_INFO_COUNT_64;
+		return KERN_SUCCESS;
+	}
+	vm_region_submap_info_data_64_t submap = {
 			.protection = protection,
 			.max_protection = VM_PROT_ALL,
 			.inheritance = VM_INHERIT_COPY,
 			.offset = offset,
-			.share_mode = shared ? SM_SHARED : SM_PRIVATE,
+			.share_mode = share_mode,
 			.user_tag = 0,
 	};
-	*nesting_depth = 0;
-	*infoCnt = VM_REGION_SUBMAP_INFO_COUNT_64;
+	*infoCnt = *infoCnt >= VM_REGION_SUBMAP_INFO_V2_COUNT_64
+			? VM_REGION_SUBMAP_INFO_V2_COUNT_64
+			: *infoCnt >= VM_REGION_SUBMAP_INFO_V1_COUNT_64
+			? VM_REGION_SUBMAP_INFO_V1_COUNT_64
+			: VM_REGION_SUBMAP_INFO_V0_COUNT_64;
+	memcpy(info, &submap, *infoCnt * sizeof(natural_t));
 	return KERN_SUCCESS;
 }
 
