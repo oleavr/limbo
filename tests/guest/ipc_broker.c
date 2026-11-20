@@ -294,7 +294,8 @@ call(void)
 	CHECK(kr == KERN_SUCCESS);
 	message.request.data.address = (void *)given;
 	message.request.data.deallocate = TRUE;
-	kr = mach_msg(&message.request.Head, MACH_SEND_MSG | MACH_RCV_MSG,
+	kr = mach_msg(&message.request.Head,
+			MACH_SEND_MSG | MACH_RCV_MSG | MACH_RCV_TIMEOUT,
 			sizeof(message.request), sizeof(message), reply_port,
 			8000, MACH_PORT_NULL);
 	CHECK(kr == MACH_MSG_SUCCESS);
