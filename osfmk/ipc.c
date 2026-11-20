@@ -72,6 +72,7 @@ struct ipc_port {
 	struct ipc_kmsg *messages;
 	struct ipc_kmsg **messages_tail;
 	mach_port_seqno_t seqno;
+	mach_port_mscount_t mscount;
 	mach_port_context_t context;
 	uint64_t global_id;
 	bool remote;
@@ -846,6 +847,11 @@ transfer_right(mach_port_name_t name, mach_msg_type_name_t disposition,
 		return MACH_SEND_INVALID_RIGHT;
 	}
 
+	if (disposition == MACH_MSG_TYPE_MAKE_SEND
+			&& (entry->type & MACH_PORT_TYPE_RECEIVE)) {
+		entry->port->mscount++;
+	}
+
 	if (sender == IPC_USER) {
 		if (!has_right(entry, disposition)) {
 			return MACH_SEND_INVALID_RIGHT;
@@ -1268,6 +1274,7 @@ ipc_port_construct(mach_port_options_t *options, mach_port_context_t context,
 	if (options->flags & MPO_INSERT_SEND_RIGHT) {
 		entry->type |= MACH_PORT_TYPE_SEND;
 		entry->urefs = 1;
+		entry->port->mscount = 1;
 	}
 	*name = entry->port->name;
 	pthread_mutex_unlock(&lock);
@@ -1431,6 +1438,9 @@ ipc_port_extract_right(mach_port_name_t name, mach_msg_type_name_t msgt_name,
 		kr = KERN_INVALID_RIGHT;
 	} else {
 		switch (msgt_name) {
+		case MACH_MSG_TYPE_MAKE_SEND:
+			entry->port->mscount++;
+			break;
 		case MACH_MSG_TYPE_MOVE_SEND:
 			if (--entry->urefs == 0) {
 				entry->type &= ~MACH_PORT_TYPE_SEND;
@@ -1585,6 +1595,23 @@ ipc_port_set_context(mach_port_name_t name, mach_port_context_t context)
 }
 
 kern_return_t
+ipc_port_set_mscount(mach_port_name_t name, mach_port_mscount_t mscount)
+{
+	pthread_mutex_lock(&lock);
+	kern_return_t kr = KERN_SUCCESS;
+	struct ipc_entry *entry = lookup(name);
+	if (entry == NULL) {
+		kr = KERN_INVALID_NAME;
+	} else if (!(entry->type & MACH_PORT_TYPE_RECEIVE)) {
+		kr = KERN_INVALID_RIGHT;
+	} else {
+		entry->port->mscount = mscount;
+	}
+	pthread_mutex_unlock(&lock);
+	return kr;
+}
+
+kern_return_t
 ipc_port_insert_member(mach_port_name_t member, mach_port_name_t pset)
 {
 	pthread_mutex_lock(&lock);
@@ -1678,6 +1705,7 @@ ipc_port_get_status(mach_port_name_t name, mach_port_status_t *status)
 				? port->psets[0]->name
 				: MACH_PORT_NULL;
 		status->mps_seqno = port->seqno;
+		status->mps_mscount = port->mscount;
 		status->mps_qlimit = MACH_PORT_QLIMIT_DEFAULT;
 		for (struct ipc_kmsg *kmsg = port->messages; kmsg != NULL;
 				kmsg = kmsg->next) {
