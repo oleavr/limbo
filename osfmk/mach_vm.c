@@ -1071,6 +1071,31 @@ region_top_info(mach_vm_address_t address, mach_vm_size_t size, bool shared,
 	};
 }
 
+int
+mach_vm_zero_check(mach_vm_address_t address, mach_vm_size_t size)
+{
+	mach_vm_address_t end = address + size;
+	mach_vm_address_t at = address;
+	while (at < end) {
+		mach_vm_address_t start;
+		mach_vm_size_t region_size;
+		vm_prot_t protection;
+		bool shared;
+		uint64_t offset;
+		if (!region_find(at, &start, &region_size, &protection, &shared,
+				    &offset)
+				|| start > at) {
+			return EINVAL;
+		}
+		if (!(protection & VM_PROT_WRITE)
+				|| (protection & VM_PROT_EXECUTE)) {
+			return EPERM;
+		}
+		at = start + region_size;
+	}
+	return 0;
+}
+
 static uint64_t guest_limit = UINT64_MAX;
 
 static bool
