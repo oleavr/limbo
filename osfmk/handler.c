@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -486,6 +487,10 @@ sys__kernelrpc_mach_port_request_notification_trap(ipc_space_t task,
 kern_return_t
 sys_task_for_pid(mach_port_name_t target_tport, int pid, mach_port_name_t *t)
 {
+	if (pid == getpid()) {
+		*t = ipc_task_self();
+		return KERN_SUCCESS;
+	}
 	unimplemented();
 }
 
