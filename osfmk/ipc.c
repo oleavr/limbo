@@ -1389,6 +1389,10 @@ ipc_port_mod_refs(mach_port_name_t name, mach_port_right_t right,
 			kr = KERN_INVALID_RIGHT;
 			break;
 		}
+		if (delta < 0 && (mach_port_urefs_t)-delta > entry->urefs) {
+			kr = KERN_INVALID_VALUE;
+			break;
+		}
 		entry->urefs += delta;
 		if (entry->urefs == 0) {
 			entry->type &= ~type;
@@ -1397,6 +1401,10 @@ ipc_port_mod_refs(mach_port_name_t name, mach_port_right_t right,
 	case MACH_PORT_RIGHT_SEND_ONCE:
 		if (!(entry->type & MACH_PORT_TYPE_SEND_ONCE)) {
 			kr = KERN_INVALID_RIGHT;
+			break;
+		}
+		if (delta < 0 && (mach_port_urefs_t)-delta > entry->sorights) {
+			kr = KERN_INVALID_VALUE;
 			break;
 		}
 		entry->sorights += delta;
