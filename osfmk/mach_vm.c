@@ -43,6 +43,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #include "bsd/codesign.h"
@@ -67,6 +68,7 @@ static int move_to_memfd(mach_vm_address_t address, mach_vm_size_t size,
 		vm_prot_t protection);
 static void *map_aligned(mach_vm_size_t size, mach_vm_offset_t mask,
 		vm_prot_t protection);
+static kern_return_t copy_checked(void *to, void *from, mach_vm_size_t size);
 static kern_return_t remap_share(mach_vm_address_t *target_address,
 		mach_vm_size_t size, mach_vm_offset_t mask, int flags,
 		mach_vm_address_t src_address);
@@ -231,7 +233,11 @@ _kernelrpc_mach_vm_read(vm_map_read_t target_task, mach_vm_address_t address,
 	if (kr != KERN_SUCCESS) {
 		return kr;
 	}
-	memcpy((void *)buf, (const void *)address, size);
+	kr = copy_checked((void *)buf, (void *)address, size);
+	if (kr != KERN_SUCCESS) {
+		_kernelrpc_mach_vm_deallocate(MACH_PORT_NULL, buf, size);
+		return kr;
+	}
 	*data = (vm_offset_t)buf;
 	*dataCnt = size;
 	return KERN_SUCCESS;
@@ -248,16 +254,19 @@ kern_return_t
 mach_vm_write(vm_map_t target_task, mach_vm_address_t address, vm_offset_t data,
 		mach_msg_type_number_t dataCnt)
 {
-	memmove((void *)address, (void *)data, dataCnt);
-	return KERN_SUCCESS;
+	return copy_checked((void *)address, (void *)data, dataCnt);
 }
 
 kern_return_t
 mach_vm_copy(vm_map_t target_task, mach_vm_address_t source_address,
 		mach_vm_size_t size, mach_vm_address_t dest_address)
 {
-	memmove((void *)dest_address, (void *)source_address, size);
-	return KERN_SUCCESS;
+	if (dest_address < source_address + size
+			&& source_address < dest_address + size) {
+		memmove((void *)dest_address, (void *)source_address, size);
+		return KERN_SUCCESS;
+	}
+	return copy_checked((void *)dest_address, (void *)source_address, size);
 }
 
 kern_return_t
@@ -265,8 +274,25 @@ mach_vm_read_overwrite(vm_map_read_t target_task, mach_vm_address_t address,
 		mach_vm_size_t size, mach_vm_address_t data,
 		mach_vm_size_t *outsize)
 {
-	memmove((void *)data, (void *)address, size);
 	*outsize = size;
+	return copy_checked((void *)data, (void *)address, size);
+}
+
+static kern_return_t
+copy_checked(void *to, void *from, mach_vm_size_t size)
+{
+	pid_t self = gettid();
+	while (size != 0) {
+		struct iovec local = {.iov_base = to, .iov_len = size};
+		struct iovec remote = {.iov_base = from, .iov_len = size};
+		ssize_t done = process_vm_readv(self, &local, 1, &remote, 1, 0);
+		if (done == -1) {
+			return KERN_INVALID_ADDRESS;
+		}
+		to = (char *)to + done;
+		from = (char *)from + done;
+		size -= done;
+	}
 	return KERN_SUCCESS;
 }
 

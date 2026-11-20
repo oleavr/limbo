@@ -49,6 +49,7 @@ guest_tests = [
   'suspend.c',
   'sysinfo.c',
   'threads.c',
+  'vm_copy_after_main.c',
   'xpc.c',
 ]
 
