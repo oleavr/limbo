@@ -630,6 +630,10 @@ ipc_remote_deliver(uint64_t dest_global_id, const void *blob, uint32_t length)
 
 	pthread_mutex_lock(&lock);
 	struct ipc_port *dest = port_for_global_id(dest_global_id);
+	if (dest == NULL) {
+		pthread_mutex_unlock(&lock);
+		return;
+	}
 
 	struct ipc_kmsg *kmsg = malloc(sizeof(*kmsg) + rh->message_size
 			+ sizeof(mach_msg_max_trailer_t));
