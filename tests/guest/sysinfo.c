@@ -347,6 +347,18 @@ main(void)
 	CHECK(pages * (uint64_t)getpagesize() <= (uint64_t)memsize);
 	CHECK(vm.wire_count > 0);
 	CHECK(vm.internal_page_count + vm.external_page_count > 0);
+
+	processor_set_t set;
+	CHECK(host_processor_set_priv(mach_host_self(), MACH_PORT_NULL, &set)
+			== KERN_INVALID_ARGUMENT);
+	processor_set_name_array_t sets;
+	mach_msg_type_number_t set_count;
+	if (host_processor_sets(mach_host_self(), &sets, &set_count)
+			== KERN_SUCCESS) {
+		CHECK(host_processor_set_priv(mach_host_self(), sets[0], &set)
+				== (geteuid() == 0 ? KERN_SUCCESS
+						   : KERN_INVALID_ARGUMENT));
+	}
 	return 0;
 }
 
