@@ -193,6 +193,8 @@ static int wait_for_arrival(mach_msg_option64_t options,
 static void write_trailer(mach_msg_header_t *msg, struct ipc_port *port,
 		pid_t sender_pid);
 static void destroy_receive_right(struct ipc_entry *entry);
+static void destroy_rights(mach_msg_header_t *header);
+static void destroy_right(mach_port_name_t name, mach_msg_type_name_t type);
 static struct ipc_entry *lookup(mach_port_name_t name);
 static struct ipc_port *port_alloc(ipc_kobject_type_t kotype);
 static struct ipc_entry *entry_alloc(struct ipc_port *port);
@@ -1324,7 +1326,6 @@ ipc_port_destruct(mach_port_name_t name, mach_port_delta_t srdelta,
 			entry->type &= ~MACH_PORT_TYPE_SEND;
 		}
 		destroy_receive_right(entry);
-		entry_release_if_unused(entry);
 	}
 	pthread_mutex_unlock(&lock);
 	return kr;
@@ -1417,6 +1418,7 @@ ipc_port_mod_refs(mach_port_name_t name, mach_port_right_t right,
 			kr = KERN_INVALID_RIGHT;
 		} else if (delta < 0) {
 			destroy_receive_right(entry);
+			goto out;
 		}
 		break;
 	case MACH_PORT_RIGHT_PORT_SET:
@@ -1756,11 +1758,8 @@ static void
 destroy_receive_right(struct ipc_entry *entry)
 {
 	struct ipc_port *port = entry->port;
-	while (port->messages != NULL) {
-		struct ipc_kmsg *kmsg = port->messages;
-		port->messages = kmsg->next;
-		free(kmsg);
-	}
+	struct ipc_kmsg *queued = port->messages;
+	port->messages = NULL;
 	port_leave_all_sets(port);
 
 	entry->type &= ~MACH_PORT_TYPE_RECEIVE;
@@ -1768,6 +1767,87 @@ destroy_receive_right(struct ipc_entry *entry)
 		entry->type = MACH_PORT_TYPE_DEAD_NAME;
 	}
 	pthread_cond_broadcast(&arrival);
+	entry_release_if_unused(entry);
+
+	while (queued != NULL) {
+		struct ipc_kmsg *kmsg = queued;
+		queued = kmsg->next;
+		destroy_rights(kmsg->header);
+		free(kmsg);
+	}
+}
+
+static void
+destroy_rights(mach_msg_header_t *header)
+{
+	destroy_right(header->msgh_remote_port,
+			MACH_MSGH_BITS_REMOTE(header->msgh_bits));
+	if (!(header->msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
+		return;
+	}
+
+	mach_msg_body_t *body = (mach_msg_body_t *)(header + 1);
+	uint8_t *cursor = (uint8_t *)(body + 1);
+	for (mach_msg_size_t i = 0; i < body->msgh_descriptor_count; i++) {
+		mach_msg_type_descriptor_t *descriptor
+				= (mach_msg_type_descriptor_t *)cursor;
+		switch (descriptor->type) {
+		case MACH_MSG_PORT_DESCRIPTOR: {
+			mach_msg_port_descriptor_t *d
+					= (mach_msg_port_descriptor_t *)cursor;
+			destroy_right(d->name, d->disposition);
+			cursor += sizeof(*d);
+		} break;
+		case MACH_MSG_GUARDED_PORT_DESCRIPTOR: {
+			mach_msg_guarded_port_descriptor64_t *d
+					= (mach_msg_guarded_port_descriptor64_t
+									*)
+							cursor;
+			destroy_right(d->name, d->disposition);
+			cursor += sizeof(*d);
+		} break;
+		case MACH_MSG_OOL_PORTS_DESCRIPTOR: {
+			mach_msg_ool_ports_descriptor64_t *d
+					= (mach_msg_ool_ports_descriptor64_t *)
+							cursor;
+			mach_port_name_t *names
+					= (mach_port_name_t *)d->address;
+			for (mach_msg_size_t j = 0; j < d->count; j++) {
+				destroy_right(names[j], d->disposition);
+			}
+			cursor += sizeof(*d);
+		} break;
+		default:
+			cursor += sizeof(mach_msg_ool_descriptor64_t);
+		}
+	}
+}
+
+static void
+destroy_right(mach_port_name_t name, mach_msg_type_name_t type)
+{
+	struct ipc_entry *entry = lookup(name);
+	if (entry == NULL) {
+		return;
+	}
+
+	switch (type) {
+	case MACH_MSG_TYPE_PORT_SEND:
+		if (--entry->urefs == 0) {
+			entry->type &= ~(MACH_PORT_TYPE_SEND
+					| MACH_PORT_TYPE_DEAD_NAME);
+		}
+		break;
+	case MACH_MSG_TYPE_PORT_SEND_ONCE:
+		if (--entry->sorights == 0) {
+			entry->type &= ~MACH_PORT_TYPE_SEND_ONCE;
+		}
+		break;
+	case MACH_MSG_TYPE_PORT_RECEIVE:
+		destroy_receive_right(entry);
+		return;
+	}
+	entry_release_if_unused(entry);
 }
 
 static struct ipc_entry *
