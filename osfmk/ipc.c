@@ -781,10 +781,15 @@ copyin(mach_msg_header_t *header, ipc_side_t sender, struct ipc_port **dest)
 	header->msgh_local_port = (*dest)->name;
 	header->msgh_voucher_port = MACH_PORT_NULL;
 
-	if (bits & MACH_MSGH_BITS_COMPLEX) {
-		return copyin_body(header, sender, receiver);
+	if (!(bits & MACH_MSGH_BITS_COMPLEX)) {
+		return MACH_MSG_SUCCESS;
 	}
-	return MACH_MSG_SUCCESS;
+
+	mach_msg_return_t mr = copyin_body(header, sender, receiver);
+	if (mr == MACH_SEND_INVALID_RIGHT && receiver == IPC_USER) {
+		destroy_rights(header);
+	}
+	return mr;
 }
 
 static mach_msg_return_t
@@ -804,6 +809,7 @@ copyin_body(mach_msg_header_t *header, ipc_side_t sender, ipc_side_t receiver)
 			if (transfer_right(d->name, d->disposition, sender,
 					    receiver, &type)
 					!= MACH_MSG_SUCCESS) {
+				body->msgh_descriptor_count = i;
 				return MACH_SEND_INVALID_RIGHT;
 			}
 			d->disposition = type;
@@ -818,6 +824,7 @@ copyin_body(mach_msg_header_t *header, ipc_side_t sender, ipc_side_t receiver)
 			if (transfer_right(d->name, d->disposition, sender,
 					    receiver, &type)
 					!= MACH_MSG_SUCCESS) {
+				body->msgh_descriptor_count = i;
 				return MACH_SEND_INVALID_RIGHT;
 			}
 			d->disposition = type;
@@ -846,6 +853,9 @@ copyin_body(mach_msg_header_t *header, ipc_side_t sender, ipc_side_t receiver)
 				if (transfer_right(names[j], d->disposition,
 						    sender, receiver, &type)
 						!= MACH_MSG_SUCCESS) {
+					d->count = j;
+					d->disposition = type;
+					body->msgh_descriptor_count = i + 1;
 					return MACH_SEND_INVALID_RIGHT;
 				}
 			}
