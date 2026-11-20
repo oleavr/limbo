@@ -459,6 +459,27 @@ map_entry(mach_vm_address_t *address, mach_vm_size_t size,
 	return KERN_SUCCESS;
 }
 
+int
+mach_vm_shared_anonymous_fd(size_t length)
+{
+	off_t size = (off_t)((length + PAGE_MASK) & ~(size_t)PAGE_MASK);
+	int fd = memfd_create("shared anonymous", MFD_CLOEXEC);
+	if (fd != -1 && ftruncate(fd, size) == -1) {
+		close(fd);
+		return -1;
+	}
+	return fd;
+}
+
+void
+mach_vm_shared_anonymous_mapped(void *address, int fd)
+{
+	if (address != MAP_FAILED) {
+		shared_range_add((mach_vm_address_t)(uintptr_t)address, fd);
+	}
+	close(fd);
+}
+
 kern_return_t
 mach_vm_machine_attribute(vm_map_t target_task, mach_vm_address_t address,
 		mach_vm_size_t size, vm_machine_attribute_t attribute,

@@ -2373,6 +2373,17 @@ sys_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t pos)
 	if ((tflags & MAP_ANON) && (tflags & MAP_PRIVATE))
 		tflags |= MAP_NORESERVE;
 
+	int anonymous = -1;
+	if ((tflags & MAP_ANON) && (tflags & MAP_SHARED)) {
+		anonymous = mach_vm_shared_anonymous_fd(len);
+		if (anonymous == -1) {
+			return (void *)err_map(ENOMEM);
+		}
+		tflags &= ~MAP_ANON;
+		fd = anonymous;
+		pos = 0;
+	}
+
 	/* TODO: Be responsible and convert the protection properly */
 	void *r;
 #ifdef __x86_64__
@@ -2384,6 +2395,11 @@ sys_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t pos)
 		r = map_page_aligned(len, prot, tflags, fd, pos);
 	}
 #endif
+	if (anonymous != -1) {
+		int saved = errno;
+		mach_vm_shared_anonymous_mapped(r, anonymous);
+		errno = saved;
+	}
 	if (r == MAP_FAILED) {
 		return (void *)err_map(errno);
 	}

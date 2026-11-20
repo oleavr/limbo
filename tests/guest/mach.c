@@ -86,6 +86,7 @@ static unsigned char share_mode(mach_vm_address_t address);
 static void check_shared_range_entries(void);
 static void check_shared_range_kept(void);
 static mach_port_t range_entry(mach_vm_address_t range);
+static void check_shared_anonymous_entry(void);
 static void check_exception_ports(void);
 static void check_vouchers(void);
 static void check_destroy(void);
@@ -562,6 +563,7 @@ check_memory_entries(void)
 
 	check_shared_range_entries();
 	check_shared_range_kept();
+	check_shared_anonymous_entry();
 }
 
 /*
@@ -654,6 +656,37 @@ range_entry(mach_vm_address_t range)
 			      MACH_PORT_NULL)
 			== KERN_SUCCESS);
 	return entry;
+}
+
+static void
+check_shared_anonymous_entry(void)
+{
+	size_t size = 2 * vm_page_size;
+	volatile char *memory = mmap(NULL, size, PROT_READ | PROT_WRITE,
+			MAP_ANON | MAP_SHARED, -1, 0);
+	CHECK(memory != MAP_FAILED);
+	memory[0] = 1;
+	memory_object_size_t entry_size = size;
+	mach_port_t entry;
+	CHECK(mach_make_memory_entry_64(mach_task_self(), &entry_size,
+			      (memory_object_offset_t)(uintptr_t)memory,
+			      MAP_MEM_VM_SHARE | VM_PROT_READ | VM_PROT_WRITE,
+			      &entry, MACH_PORT_NULL)
+			== KERN_SUCCESS);
+	mach_vm_address_t map = 0;
+	CHECK(mach_vm_map(mach_task_self(), &map, size, 0, VM_FLAGS_ANYWHERE,
+			      entry, 0, false, VM_PROT_READ | VM_PROT_WRITE,
+			      VM_PROT_READ | VM_PROT_WRITE, VM_INHERIT_NONE)
+			== KERN_SUCCESS);
+	volatile char *other = (volatile char *)map;
+	memory[vm_page_size + 3] = 2;
+	CHECK(other[0] == 1 && other[vm_page_size + 3] == 2);
+	other[5] = 3;
+	CHECK(memory[5] == 3);
+
+	CHECK(mach_vm_deallocate(mach_task_self(), map, size) == KERN_SUCCESS);
+	CHECK(mach_port_deallocate(mach_task_self(), entry) == KERN_SUCCESS);
+	CHECK(munmap((void *)memory, size) == 0);
 }
 
 static mach_port_t
