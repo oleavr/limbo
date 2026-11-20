@@ -482,6 +482,7 @@ remote_send(mach_msg_header_t *header, mach_msg_size_t size, ipc_side_t sender,
 
 	mach_msg_return_t mr = remote_copyin(header, sender);
 	if (mr != MACH_MSG_SUCCESS) {
+		release_unused_entries(header);
 		pthread_mutex_unlock(&lock);
 		return mr;
 	}
@@ -540,7 +541,11 @@ remote_copyin(mach_msg_header_t *header, ipc_side_t sender)
 	}
 	transfer_right(header->msgh_remote_port, MACH_MSGH_BITS_REMOTE(bits),
 			sender, IPC_KERNEL, &type);
-	return MACH_MSG_SUCCESS;
+
+	if (!(bits & MACH_MSGH_BITS_COMPLEX)) {
+		return MACH_MSG_SUCCESS;
+	}
+	return copyin_body(header, sender, IPC_KERNEL);
 }
 
 static uint32_t

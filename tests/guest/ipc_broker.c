@@ -213,6 +213,8 @@ call(void)
 			MACH_MSG_TYPE_MAKE_SEND);
 	mach_port_t carried;
 	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &carried);
+	mach_port_insert_right(mach_task_self(), carried, carried,
+			MACH_MSG_TYPE_MAKE_SEND);
 	mach_port_t unanswered;
 	mach_port_allocate(
 			mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &unanswered);
@@ -257,6 +259,12 @@ call(void)
 	CHECK(kr == MACH_SEND_INVALID_REPLY);
 
 	message.request.Head.msgh_local_port = dead_name;
+	message.request.ports[0].name = abandoned;
+	kr = mach_msg(&message.request.Head, MACH_SEND_MSG,
+			sizeof(message.request), 0, MACH_PORT_NULL,
+			MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	CHECK(kr == MACH_SEND_INVALID_RIGHT);
+	message.request.ports[0].name = carried;
 	send_request(&message.request.Head);
 	send_request(&message.request.Head);
 	kr = mach_port_mod_refs(mach_task_self(), dead_name,
@@ -267,6 +275,7 @@ call(void)
 	send_request(&message.request.Head);
 	message.request.Head.msgh_local_port = unanswered;
 	send_request(&message.request.Head);
+	message.request.ports[0].disposition = MACH_MSG_TYPE_MOVE_SEND;
 	kr = mach_msg(&message.request.Head, MACH_SEND_MSG | MACH_RCV_MSG,
 			sizeof(message.request), sizeof(message), reply_port,
 			8000, MACH_PORT_NULL);
@@ -277,6 +286,11 @@ call(void)
 	kr = mach_port_type(mach_task_self(), dead_name, &type);
 	CHECK(kr == KERN_SUCCESS);
 	CHECK(type == MACH_PORT_TYPE_DEAD_NAME);
+	mach_port_urefs_t carried_refs;
+	kr = mach_port_get_refs(mach_task_self(), carried, MACH_PORT_RIGHT_SEND,
+			&carried_refs);
+	CHECK(kr == KERN_SUCCESS);
+	CHECK(carried_refs == 0);
 }
 
 int
