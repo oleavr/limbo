@@ -160,7 +160,8 @@ static mach_port_name_t import_body_port(uint64_t global_id,
 		mach_msg_type_name_t type);
 static uint64_t export_local_port(mach_port_name_t name);
 static struct ipc_port *port_for_global_id(uint64_t global_id);
-static mach_port_name_t import_remote_send(uint64_t global_id);
+static mach_port_name_t import_remote_send(
+		uint64_t global_id, mach_msg_type_name_t type);
 
 static mach_port_name_t kobject_send_right(ipc_kobject_type_t type);
 static struct ipc_port *kobject_port(ipc_kobject_type_t type);
@@ -592,16 +593,14 @@ port_for_global_id(uint64_t global_id)
 }
 
 static mach_port_name_t
-import_remote_send(uint64_t global_id)
+import_remote_send(uint64_t global_id, mach_msg_type_name_t type)
 {
 	if (broker_guest_of(global_id) == broker_client_guest_id()) {
 		struct ipc_port *port = port_for_global_id(global_id);
 		if (port == NULL) {
 			return MACH_PORT_DEAD;
 		}
-		struct ipc_entry *entry = &entries[MACH_PORT_INDEX(port->name)];
-		entry->type |= MACH_PORT_TYPE_SEND;
-		entry->urefs++;
+		transfer_right(port->name, type, IPC_KERNEL, IPC_USER, &type);
 		return port->name;
 	}
 
@@ -609,16 +608,16 @@ import_remote_send(uint64_t global_id)
 		struct ipc_port *port = entries[i].port;
 		if (port != NULL && port->remote
 				&& port->global_id == global_id) {
-			entries[i].urefs++;
+			transfer_right(port->name, type, IPC_KERNEL, IPC_USER,
+					&type);
 			return port->name;
 		}
 	}
 
 	struct ipc_entry *entry = entry_alloc(port_alloc(IPC_KOBJECT_NONE));
-	entry->type = MACH_PORT_TYPE_SEND;
-	entry->urefs = 1;
 	entry->port->remote = true;
 	entry->port->global_id = global_id;
+	transfer_right(entry->port->name, type, IPC_KERNEL, IPC_USER, &type);
 	return entry->port->name;
 }
 
@@ -645,11 +644,11 @@ ipc_remote_deliver(uint64_t dest_global_id, const void *blob, uint32_t length)
 	kmsg->sender_pid = rh->sender_pid;
 	memcpy(kmsg->header, message, rh->message_size);
 
+	mach_msg_type_name_t reply_type = received_type(rh->reply_disposition);
 	mach_port_name_t reply_name = (rh->reply_global_id != 0)
-			? import_remote_send(rh->reply_global_id)
+			? import_remote_send(rh->reply_global_id, reply_type)
 			: MACH_PORT_NULL;
-	kmsg->header->msgh_bits = MACH_MSGH_BITS_SET(
-			received_type(rh->reply_disposition),
+	kmsg->header->msgh_bits = MACH_MSGH_BITS_SET(reply_type,
 			received_type(rh->dest_disposition), 0,
 			message->msgh_bits & MACH_MSGH_BITS_COMPLEX);
 	kmsg->header->msgh_remote_port = reply_name;
@@ -708,7 +707,7 @@ import_body_port(uint64_t global_id, mach_msg_type_name_t type)
 		entry->port->global_id = global_id;
 		return entry->port->name;
 	}
-	return import_remote_send(global_id);
+	return import_remote_send(global_id, type);
 }
 
 mach_port_name_t
@@ -739,7 +738,8 @@ ipc_service_look_up(const char *name)
 		return MACH_PORT_NULL;
 	}
 	pthread_mutex_lock(&lock);
-	mach_port_name_t name_out = import_remote_send(global_id);
+	mach_port_name_t name_out = import_remote_send(
+			global_id, MACH_MSG_TYPE_PORT_SEND);
 	pthread_mutex_unlock(&lock);
 	return name_out;
 }

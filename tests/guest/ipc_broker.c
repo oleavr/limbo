@@ -111,6 +111,11 @@ receive_request(mach_port_t service)
 	for (int i = 1; i != PORT_COUNT; i++) {
 		CHECK(request.ports[i].name == request.ports[0].name);
 	}
+	mach_port_type_t type;
+	kr = mach_port_type(
+			mach_task_self(), request.Head.msgh_remote_port, &type);
+	CHECK(kr == KERN_SUCCESS);
+	CHECK(type == MACH_PORT_TYPE_SEND_ONCE);
 	return request.Head.msgh_remote_port;
 }
 
@@ -131,6 +136,19 @@ send_reply(mach_port_t port, mach_port_t reply_port)
 }
 
 static void
+destroy_with_queued_request(mach_port_t service)
+{
+	mach_msg_header_t queued;
+	kern_return_t kr = mach_msg(&queued, MACH_RCV_MSG | MACH_RCV_LARGE, 0,
+			sizeof(queued), service, MACH_MSG_TIMEOUT_NONE,
+			MACH_PORT_NULL);
+	CHECK(kr == MACH_RCV_TOO_LARGE);
+	kr = mach_port_mod_refs(
+			mach_task_self(), service, MACH_PORT_RIGHT_RECEIVE, -1);
+	CHECK(kr == KERN_SUCCESS);
+}
+
+static void
 serve(void)
 {
 	mach_port_t service = bootstrap_call(CHECK_IN);
@@ -141,6 +159,13 @@ serve(void)
 	mach_port_t dead_name = receive_request(service);
 	mach_port_t returned = receive_request(service);
 	mach_port_t awaited = receive_request(service);
+	mach_port_t unanswered = receive_request(service);
+	destroy_with_queued_request(service);
+	mach_port_urefs_t unanswered_refs;
+	kern_return_t kr = mach_port_get_refs(mach_task_self(), unanswered,
+			MACH_PORT_RIGHT_SEND_ONCE, &unanswered_refs);
+	CHECK(kr == KERN_SUCCESS);
+	CHECK(unanswered_refs == 1);
 	send_reply(abandoned, MACH_PORT_NULL);
 	send_reply(dead_name, returned);
 	send_reply(awaited, gone);
@@ -175,6 +200,11 @@ call(void)
 			mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &dead_name);
 	mach_port_insert_right(mach_task_self(), dead_name, dead_name,
 			MACH_MSG_TYPE_MAKE_SEND);
+	mach_port_t carried;
+	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &carried);
+	mach_port_t unanswered;
+	mach_port_allocate(
+			mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &unanswered);
 	mach_port_t reply_port;
 	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &reply_port);
 	union {
@@ -200,7 +230,7 @@ call(void)
 	message.request.body.msgh_descriptor_count = PORT_COUNT;
 	for (int i = 0; i != PORT_COUNT; i++) {
 		message.request.ports[i] = (mach_msg_port_descriptor_t){
-				.name = reply_port,
+				.name = carried,
 				.disposition = MACH_MSG_TYPE_MAKE_SEND,
 				.type = MACH_MSG_PORT_DESCRIPTOR,
 		};
@@ -219,6 +249,9 @@ call(void)
 	CHECK(kr == KERN_SUCCESS);
 
 	message.request.Head.msgh_local_port = reply_port;
+	send_request(&message.request.Head);
+	message.request.Head.msgh_local_port = unanswered;
+	send_request(&message.request.Head);
 	kr = mach_msg(&message.request.Head, MACH_SEND_MSG | MACH_RCV_MSG,
 			sizeof(message.request), sizeof(message), reply_port,
 			8000, MACH_PORT_NULL);
