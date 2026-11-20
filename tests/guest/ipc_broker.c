@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -33,6 +34,8 @@
 #include <unistd.h>
 
 #include "check.h"
+
+#define PORT_COUNT 32
 
 typedef struct {
 	mach_msg_header_t Head;
@@ -95,6 +98,8 @@ serve(void)
 
 	struct {
 		mach_msg_header_t Head;
+		mach_msg_body_t body;
+		mach_msg_port_descriptor_t ports[PORT_COUNT];
 		mach_msg_trailer_t trailer;
 		char padding[64];
 	} request;
@@ -104,6 +109,11 @@ serve(void)
 			MACH_PORT_NULL);
 	CHECK(kr == MACH_MSG_SUCCESS);
 	CHECK(request.Head.msgh_id == REQUEST_ID);
+	CHECK(request.body.msgh_descriptor_count == PORT_COUNT);
+	CHECK(MACH_PORT_VALID(request.ports[0].name));
+	for (int i = 1; i != PORT_COUNT; i++) {
+		CHECK(request.ports[i].name == request.ports[0].name);
+	}
 
 	mach_msg_header_t reply;
 	memset(&reply, 0, sizeof(reply));
@@ -134,6 +144,8 @@ call(void)
 	union {
 		struct {
 			mach_msg_header_t Head;
+			mach_msg_body_t body;
+			mach_msg_port_descriptor_t ports[PORT_COUNT];
 		} request;
 		struct {
 			mach_msg_header_t Head;
@@ -142,12 +154,21 @@ call(void)
 		} reply;
 	} message;
 	memset(&message, 0, sizeof(message));
-	message.request.Head.msgh_bits = MACH_MSGH_BITS(
-			MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+	message.request.Head.msgh_bits = MACH_MSGH_BITS_SET(
+			MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE,
+			0, MACH_MSGH_BITS_COMPLEX);
 	message.request.Head.msgh_remote_port = service;
 	message.request.Head.msgh_local_port = reply_port;
 	message.request.Head.msgh_size = sizeof(message.request);
 	message.request.Head.msgh_id = REQUEST_ID;
+	message.request.body.msgh_descriptor_count = PORT_COUNT;
+	for (int i = 0; i != PORT_COUNT; i++) {
+		message.request.ports[i] = (mach_msg_port_descriptor_t){
+				.name = reply_port,
+				.disposition = MACH_MSG_TYPE_MAKE_SEND,
+				.type = MACH_MSG_PORT_DESCRIPTOR,
+		};
+	}
 	kern_return_t kr = mach_msg(&message.request.Head,
 			MACH_SEND_MSG | MACH_RCV_MSG, sizeof(message.request),
 			sizeof(message), reply_port, 8000, MACH_PORT_NULL);
