@@ -416,6 +416,10 @@ check_main_thread_gone(void)
 	memset(&paths, 0, sizeof(paths));
 	int paths_size = proc_pidinfo(
 			pid, PROC_PIDVNODEPATHINFO, 0, &paths, sizeof(paths));
+	struct proc_taskinfo task;
+	memset(&task, 0, sizeof(task));
+	int task_size = proc_pidinfo(
+			pid, PROC_PIDTASKINFO, 0, &task, sizeof(task));
 	CHECK(kill(pid, SIGKILL) == 0);
 
 	CHECK(fds_size > 0);
@@ -426,6 +430,8 @@ check_main_thread_gone(void)
 	CHECK(found);
 	CHECK(paths_size == sizeof(paths));
 	CHECK(paths.pvi_cdir.vip_path[0] == '/');
+	CHECK(task_size == sizeof(task));
+	CHECK(task.pti_virtual_size > 0 && task.pti_resident_size > 0);
 
 	int status;
 	CHECK(waitpid(pid, &status, 0) == pid);

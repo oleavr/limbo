@@ -38,6 +38,7 @@
 #include "process.h"
 
 static void executable_name(int32_t pid, struct process *process);
+static void live_thread_memory(int32_t pid, struct process *process);
 static void read_ids(FILE *status, const char *key, uint32_t ids[3]);
 static uint64_t boot_time(void);
 static ssize_t read_process_file(
@@ -70,16 +71,21 @@ process_lookup(int32_t pid, struct process *process)
 			(int)(fields - comm), comm);
 	snprintf(process->name, sizeof(process->name), "%s", process->comm);
 	executable_name(pid, process);
+	char state = 0;
 	long resident = 0;
 	sscanf(fields + 2,
-			"%*c %d %d %d %u %d %*u %*u %*u %*u %*u %lu %lu %*d "
+			"%c %d %d %d %u %d %*u %*u %*u %*u %*u %lu %lu %*d "
 			"%*d %*d %d %d %*d %lu %lu %ld",
-			&process->ppid, &process->pgid, &process->session,
-			&process->tty, &process->tpgid, &process->user_ticks,
-			&process->system_ticks, &process->nice,
-			&process->threads, &process->start_ticks,
-			&process->virtual_size, &resident);
+			&state, &process->ppid, &process->pgid,
+			&process->session, &process->tty, &process->tpgid,
+			&process->user_ticks, &process->system_ticks,
+			&process->nice, &process->threads,
+			&process->start_ticks, &process->virtual_size,
+			&resident);
 	process->resident_pages = resident > 0 ? (uint64_t)resident : 0;
+	if (state == 'Z') {
+		live_thread_memory(pid, process);
+	}
 
 	snprintf(path, sizeof(path), "/proc/%d/status", pid);
 	FILE *status = fopen(path, "r");
@@ -113,6 +119,24 @@ executable_name(int32_t pid, struct process *process)
 	name = name != NULL ? name + 1 : path;
 	snprintf(process->comm, sizeof(process->comm), "%s", name);
 	snprintf(process->name, sizeof(process->name), "%s", name);
+}
+
+static void
+live_thread_memory(int32_t pid, struct process *process)
+{
+	char dir[64 + NAME_MAX], path[80 + NAME_MAX];
+	process_proc_dir(pid, dir, sizeof(dir));
+	snprintf(path, sizeof(path), "%s/statm", dir);
+	FILE *statm = fopen(path, "r");
+	if (statm == NULL) {
+		return;
+	}
+	unsigned long pages, resident;
+	if (fscanf(statm, "%lu %lu", &pages, &resident) == 2) {
+		process->virtual_size = (uint64_t)pages * getpagesize();
+		process->resident_pages = resident;
+	}
+	fclose(statm);
 }
 
 int
