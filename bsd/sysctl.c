@@ -269,6 +269,7 @@ static const struct sysctl_node nodes[] = {
 
 		{"kern.exclaves_status", {0, 0}, SYSCTL_INT,
 				.number = EXCLAVES_STATUS_NOT_SUPPORTED},
+		{"kern.check_openevt", {0, 0}, SYSCTL_INT, .number = 0},
 
 		{"kern.wq_max_threads", {0, 0}, SYSCTL_INT, .number = 512},
 		{"kern.wq_max_constrained_threads", {0, 0}, SYSCTL_INT,
