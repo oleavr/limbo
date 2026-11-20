@@ -31,6 +31,7 @@ guest_tests = [
   'filesystem.c',
   'fsevents.c',
   'hello.c',
+  'iopolicy.c',
   'kqueue.c',
   'kqueue_dispatch2.c',
   'mach.c',

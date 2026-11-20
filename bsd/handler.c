@@ -3015,16 +3015,40 @@ sys_lio_listio(int mode, user_addr_t aiocblist, int nent, user_addr_t sigp)
 	unimplemented();
 }
 
+#define IOPOL_CMD_GET                             1
+#define IOPOL_SCOPE_THREAD                        1
+#define IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES 3
+#define IOPOL_MATERIALIZE_DATALESS_FILES_OFF      1
+#define IOPOL_MATERIALIZE_DATALESS_FILES_ON       2
+
 int
 sys_iopolicysys(int cmd, void *arg)
 {
+	static _Atomic bool process_materializes = true;
+	static __thread int32_t thread_materializes;
 	struct {
 		int32_t scope;
 		int32_t type;
 		int32_t policy;
 	} *param = arg;
-	if (cmd == 1) {
-		param->policy = 0;
+	if (param->type != IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES) {
+		if (cmd == IOPOL_CMD_GET) {
+			param->policy = 0;
+		}
+		return 0;
+	}
+	bool thread = param->scope == IOPOL_SCOPE_THREAD;
+	if (cmd == IOPOL_CMD_GET && thread) {
+		param->policy = thread_materializes;
+	} else if (cmd == IOPOL_CMD_GET) {
+		param->policy = process_materializes
+				? IOPOL_MATERIALIZE_DATALESS_FILES_ON
+				: IOPOL_MATERIALIZE_DATALESS_FILES_OFF;
+	} else if (thread) {
+		thread_materializes = param->policy;
+	} else {
+		process_materializes = param->policy
+				== IOPOL_MATERIALIZE_DATALESS_FILES_ON;
 	}
 	return 0;
 }
