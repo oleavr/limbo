@@ -1,5 +1,6 @@
 /*
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -1466,6 +1467,21 @@ ipc_port_type(mach_port_name_t name, mach_port_type_t *type)
 	}
 	pthread_mutex_unlock(&lock);
 	return kr;
+}
+
+void
+ipc_space_counts(uint32_t *size, uint32_t *in_use)
+{
+	pthread_mutex_lock(&lock);
+	uint32_t used = 0;
+	for (uint32_t index = 1; index < entry_count; index++) {
+		if (entries[index].port != NULL) {
+			used++;
+		}
+	}
+	*size = entry_count;
+	*in_use = used;
+	pthread_mutex_unlock(&lock);
 }
 
 kern_return_t

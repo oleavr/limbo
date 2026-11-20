@@ -1,5 +1,6 @@
 /*
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -31,6 +32,8 @@
 #include <string.h>
 
 #include "ipc.h"
+
+#define MACH_PORT_NGEN(name) MACH_PORT_MAKE(0, MACH_PORT_GEN(name))
 
 kern_return_t
 mach_port_names(ipc_space_t task, mach_port_name_array_t *names,
@@ -356,7 +359,14 @@ kern_return_t
 mach_port_space_basic_info(
 		ipc_space_inspect_t task, ipc_info_space_basic_t *basic_info)
 {
-	unimplemented();
+	uint32_t size, in_use;
+	ipc_space_counts(&size, &in_use);
+	*basic_info = (ipc_info_space_basic_t){
+			.iisb_genno_mask = MACH_PORT_NGEN(MACH_PORT_DEAD),
+			.iisb_table_size = size,
+			.iisb_table_inuse = in_use,
+	};
+	return KERN_SUCCESS;
 }
 
 kern_return_t
