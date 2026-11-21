@@ -1350,10 +1350,15 @@ receive(mach_msg_header_t *msg, mach_msg_option64_t options,
 			break;
 		}
 
-		if (wait_for_arrival(entry->port, options, timeout, &deadline)
-				== ETIMEDOUT) {
+		int error = wait_for_arrival(
+				entry->port, options, timeout, &deadline);
+		if (error == ETIMEDOUT) {
 			pthread_mutex_unlock(&lock);
 			return MACH_RCV_TIMED_OUT;
+		}
+		if (error == EINTR) {
+			pthread_mutex_unlock(&lock);
+			return MACH_RCV_INTERRUPTED;
 		}
 		waited = true;
 	}

@@ -27,6 +27,7 @@
 
 #include <dispatch/dispatch.h>
 #include <errno.h>
+#include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <os/lock.h>
 #include <pthread.h>
@@ -401,6 +402,63 @@ check_source(void)
 	dispatch_source_cancel(source);
 }
 
+static mach_port_t waited_port;
+static volatile sig_atomic_t handled_in_receive;
+
+static void
+send_nothing(int sig)
+{
+}
+
+static void
+send_from_handler(int sig)
+{
+	(void)sig;
+	handled_in_receive = 1;
+	mach_msg_header_t message = {
+			.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MAKE_SEND, 0),
+			.msgh_size = sizeof(message),
+			.msgh_remote_port = waited_port,
+			.msgh_id = 0x4e7,
+	};
+	mach_msg(&message, MACH_SEND_MSG, sizeof(message), 0, MACH_PORT_NULL, 0,
+			MACH_PORT_NULL);
+}
+
+static void
+check_receive_interrupted(void)
+{
+	CHECK(mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+			      &waited_port)
+			== KERN_SUCCESS);
+	signal(SIGALRM, send_nothing);
+	struct {
+		mach_msg_header_t header;
+		mach_msg_trailer_t trailer;
+	} received;
+	mach_msg_return_t result = MACH_RCV_TIMED_OUT;
+	for (int tries = 0; tries < 5 && result == MACH_RCV_TIMED_OUT;
+			tries++) {
+		ualarm(100000, 0);
+		result = mach_msg(&received.header,
+				MACH_RCV_MSG | MACH_RCV_INTERRUPT
+						| MACH_RCV_TIMEOUT,
+				0, sizeof(received), waited_port, 1000,
+				MACH_PORT_NULL);
+	}
+	CHECK(result == MACH_RCV_INTERRUPTED);
+
+	signal(SIGALRM, send_from_handler);
+	ualarm(100000, 0);
+	CHECK(mach_msg(&received.header, MACH_RCV_MSG, 0, sizeof(received),
+			      waited_port, 0, MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	CHECK(handled_in_receive && received.header.msgh_id == 0x4e7);
+	signal(SIGALRM, SIG_DFL);
+	mach_port_mod_refs(mach_task_self(), waited_port,
+			MACH_PORT_RIGHT_RECEIVE, -1);
+}
+
 enum wait_kind {
 	WAIT_CONDITION,
 	WAIT_MUTEX,
@@ -514,6 +572,7 @@ main(void)
 	check_self_pipe();
 	check_sigwait();
 	check_source();
+	check_receive_interrupted();
 	check_waits_interrupted();
 	return 0;
 }
