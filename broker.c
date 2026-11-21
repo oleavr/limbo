@@ -214,15 +214,17 @@ handle_guest(int fd)
 		welcome_guest(conn);
 		break;
 	case BROKER_REGISTER:
-		if (broker_wire_read(frame, 0, &request.reg,
-				    sizeof(request.reg))) {
+		if (frame->inline_length >= sizeof(request.reg)
+				&& broker_wire_read(frame, 0, &request.reg,
+						sizeof(request.reg))) {
 			request.reg.name[sizeof(request.reg.name) - 1] = '\0';
 			register_service(&request.reg);
 		}
 		break;
 	case BROKER_LOOKUP:
-		if (broker_wire_read(frame, 0, &request.lookup,
-				    sizeof(request.lookup))) {
+		if (frame->inline_length >= sizeof(request.lookup)
+				&& broker_wire_read(frame, 0, &request.lookup,
+						sizeof(request.lookup))) {
 			request.lookup.name[sizeof(request.lookup.name) - 1]
 					= '\0';
 			look_up_service(conn, &request.lookup);
