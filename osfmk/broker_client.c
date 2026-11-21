@@ -44,14 +44,13 @@
 #include "broker_client.h"
 #include "ipc.h"
 
-#define BROKER_FRAME_MAX (1 << 20)
-
 static void connect_to_broker(const char *path);
 static void *read_frames(void *user);
 static void dispatch_frame(const struct broker_frame *header, const void *payload);
 static void expect_reply(void);
 static struct broker_lookup_reply await_reply(void);
 static int send_frame(uint32_t type, const void *payload, uint32_t length);
+static int send_parts(uint32_t type, const struct iovec *parts, int part_count);
 static mach_msg_return_t send_result(int error);
 
 static int broker_fd = -1;
@@ -133,16 +132,17 @@ broker_client_send(uint64_t dest_global_id, const void *blob, uint32_t length)
 		return MACH_SEND_TOO_LARGE;
 	}
 
-	size_t size = sizeof(struct broker_send) + length;
-	char *frame = malloc(size);
-	struct broker_send *send = (struct broker_send *)frame;
-	send->dest_global_id = dest_global_id;
-	send->blob_length = length;
-	memcpy(frame + sizeof(*send), blob, length);
+	struct broker_send send = {
+			.dest_global_id = dest_global_id,
+			.blob_length = length,
+	};
+	struct iovec parts[2] = {
+			{.iov_base = &send, .iov_len = sizeof(send)},
+			{.iov_base = (void *)blob, .iov_len = length},
+	};
 	pthread_mutex_lock(&call_lock);
-	int error = send_frame(BROKER_SEND, frame, size);
+	int error = send_parts(BROKER_SEND, parts, 2);
 	pthread_mutex_unlock(&call_lock);
-	free(frame);
 	return send_result(error);
 }
 
@@ -158,7 +158,7 @@ connect_to_broker(const char *path)
 	pthread_create(&thread, NULL, read_frames, NULL);
 
 	expect_reply();
-	send_frame(BROKER_HELLO, NULL, 0);
+	send_parts(BROKER_HELLO, NULL, 0);
 	await_reply();
 	guest_id = pending_welcome.guest_id;
 }
@@ -167,18 +167,26 @@ static void *
 read_frames(void *user)
 {
 	for (;;) {
-		struct broker_frame header;
-		char payload[BROKER_FRAME_MAX];
-		struct iovec iov[2] = {
-			{ .iov_base = &header, .iov_len = sizeof(header) },
-			{ .iov_base = payload, .iov_len = sizeof(payload) },
-		};
-		struct msghdr msg = { .msg_iov = iov, .msg_iovlen = 2 };
-		ssize_t n = recvmsg(broker_fd, &msg, 0);
-		if (n <= 0) {
+		struct broker_wire_frame *frame;
+		int received = broker_wire_receive(broker_fd, &frame);
+		if (received == -1) {
 			return NULL;
 		}
-		dispatch_frame(&header, payload);
+		if (received == 0) {
+			continue;
+		}
+
+		struct broker_frame header = {
+				.type = frame->type & ~BROKER_FRAME_OOL,
+				.length = frame->length,
+		};
+		char loaded[BROKER_FRAME_MAX];
+		if (!(frame->type & BROKER_FRAME_OOL)) {
+			dispatch_frame(&header, frame->payload);
+		} else if (broker_wire_read(frame, 0, loaded, frame->length)) {
+			dispatch_frame(&header, loaded);
+		}
+		broker_wire_free(frame);
 	}
 }
 
@@ -232,17 +240,21 @@ await_reply(void)
 static int
 send_frame(uint32_t type, const void *payload, uint32_t length)
 {
-	struct broker_frame header = { .type = type, .length = length };
-	struct iovec iov[2] = {
-		{ .iov_base = &header, .iov_len = sizeof(header) },
-		{ .iov_base = (void *)payload, .iov_len = length },
-	};
-	struct msghdr msg = { .msg_iov = iov, .msg_iovlen = 2 };
-	ssize_t n;
-	do {
-		n = sendmsg(broker_fd, &msg, 0);
-	} while (n == -1 && errno == EINTR);
-	return n == -1 ? errno : 0;
+	struct iovec part = {.iov_base = (void *)payload, .iov_len = length};
+	return send_parts(type, &part, 1);
+}
+
+static int
+send_parts(uint32_t type, const struct iovec *parts, int part_count)
+{
+	struct broker_wire_frame *frame
+			= broker_wire_new(type, parts, part_count);
+	if (frame == NULL) {
+		return errno;
+	}
+	int error = broker_wire_send(broker_fd, frame, 0);
+	broker_wire_free(frame);
+	return error;
 }
 
 static mach_msg_return_t
@@ -255,6 +267,8 @@ send_result(int error)
 		return MACH_SEND_TOO_LARGE;
 	case ENOBUFS:
 	case ENOMEM:
+	case EMFILE:
+	case ENFILE:
 		return MACH_SEND_NO_BUFFER;
 	default:
 		return MACH_SEND_INVALID_DEST;

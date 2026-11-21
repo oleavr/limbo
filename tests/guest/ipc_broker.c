@@ -45,7 +45,10 @@
 #define ANSWER_MS    20000
 #define BULK_SIZE    4096
 #define BULK_COUNT   1000
-#define PEER_ROOM    (2 * BULK_SIZE)
+#define LARGE_SIZE   (300 * 1024)
+#define LARGEST_SIZE ((1 << 20) - 4096)
+#define INLINE_EDGE  (64 * 1024)
+#define PEER_ROOM    (1 << 20)
 
 typedef struct {
 	mach_msg_header_t Head;
@@ -76,6 +79,7 @@ static const mach_msg_id_t QUIT_ID = 7900;
 static const mach_msg_id_t ANSWER_ID = 7901;
 static const mach_msg_id_t COUNT_ID = 7902;
 static const mach_msg_id_t REPORT_ID = 7903;
+static const mach_msg_id_t LARGE_ID = 7904;
 static const char REQUEST_DATA[] = "out of line";
 
 static mach_port_t
@@ -469,6 +473,23 @@ answer(const mach_msg_header_t *request, int32_t value)
 	send_request(&reply.Head);
 }
 
+static char
+pattern(mach_msg_size_t offset, mach_msg_size_t size)
+{
+	return (char)(offset * 7 + size);
+}
+
+static int32_t
+patterned(const char *bytes, mach_msg_size_t size)
+{
+	for (mach_msg_size_t i = sizeof(mach_msg_header_t); i < size; i++) {
+		if (bytes[i] != pattern(i, size)) {
+			return -1;
+		}
+	}
+	return (int32_t)size;
+}
+
 static void
 serve_peer(void)
 {
@@ -497,6 +518,10 @@ serve_peer(void)
 		} else if (message.Head.msgh_id == REPORT_ID) {
 			answer(&message.Head, counted);
 			counted = 0;
+		} else if (message.Head.msgh_id == LARGE_ID) {
+			answer(&message.Head,
+					patterned(message.bytes,
+							message.Head.msgh_size));
 		}
 	}
 }
@@ -632,6 +657,36 @@ check_oversized(mach_port_t port)
 }
 
 static void
+check_large(mach_port_t port, mach_msg_size_t size)
+{
+	static union {
+		mach_msg_header_t Head;
+		char bytes[LARGEST_SIZE];
+	} message;
+	message.Head = (mach_msg_header_t){
+			.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0),
+			.msgh_size = size,
+			.msgh_remote_port = port,
+			.msgh_id = LARGE_ID,
+	};
+	for (mach_msg_size_t i = sizeof(message.Head); i < size; i++) {
+		message.bytes[i] = pattern(i, size);
+	}
+	CHECK(ask(&message.Head) == (int32_t)size);
+}
+
+static void
+check_large_frames(mach_port_t port)
+{
+	check_large(port, LARGE_SIZE);
+	check_large(port, LARGEST_SIZE);
+	for (mach_msg_size_t size = INLINE_EDGE - 128; size <= INLINE_EDGE;
+			size += 4) {
+		check_large(port, size);
+	}
+}
+
+static void
 check_stopped_receiver(pid_t peer, mach_port_t port)
 {
 	stop(peer);
@@ -668,6 +723,7 @@ check_transport(void)
 
 	check_oversized(port);
 	check_stopped_receiver(peer, port);
+	check_large_frames(port);
 
 	send_quit(port);
 	int status = reap(peer);

@@ -44,19 +44,11 @@
 
 #include "broker.h"
 
-#define BROKER_FRAME_MAX (1 << 20)
-
-struct pending_frame {
-	struct pending_frame *next;
-	size_t length;
-	char data[];
-};
-
 struct connection {
 	int fd;
 	uint32_t guest_id;
-	struct pending_frame *pending;
-	struct pending_frame *last_pending;
+	struct broker_wire_frame *pending;
+	struct broker_wire_frame *last_pending;
 };
 
 struct service {
@@ -71,7 +63,7 @@ static void welcome_guest(struct connection *conn);
 static void register_service(const struct broker_register *reg);
 static void look_up_service(struct connection *conn,
 		const struct broker_lookup *req);
-static void route_send(const struct broker_send *send, const void *blob);
+static void route_send(struct broker_wire_frame *frame);
 static struct connection *connection_for_fd(int fd);
 static struct connection *connection_for_guest(uint32_t guest_id);
 static struct service *service_named(const char *name);
@@ -79,9 +71,10 @@ static void add_connection(int fd);
 static void remove_connection(size_t index);
 static void send_frame(struct connection *conn, uint32_t type,
 		const void *payload, uint32_t length);
+static void queue_frame(
+		struct connection *conn, struct broker_wire_frame *frame);
 static void send_pending(struct connection *conn);
-static bool send_data(int fd, const struct pending_frame *frame);
-static ssize_t receive_frame(int fd, struct broker_frame *header, void *payload);
+static bool send_data(int fd, const struct broker_wire_frame *frame);
 
 static struct connection *connections;
 static size_t connection_count;
@@ -163,30 +156,33 @@ handle_guest(int fd)
 	}
 	struct connection *conn = &connections[index];
 
-	struct broker_frame header;
-	char payload[BROKER_FRAME_MAX];
-	ssize_t n = receive_frame(fd, &header, payload);
-	if (n <= 0) {
+	struct broker_wire_frame *frame;
+	int received = broker_wire_receive(fd, &frame);
+	if (received == -1) {
 		remove_connection(index);
 		return;
 	}
+	if (received == 0) {
+		return;
+	}
 
-	switch (header.type) {
+	switch (frame->type & ~BROKER_FRAME_OOL) {
 	case BROKER_HELLO:
 		welcome_guest(conn);
 		break;
 	case BROKER_REGISTER:
-		register_service((const struct broker_register *)payload);
+		register_service(
+				(const struct broker_register *)frame->payload);
 		break;
 	case BROKER_LOOKUP:
-		look_up_service(conn, (const struct broker_lookup *)payload);
+		look_up_service(conn,
+				(const struct broker_lookup *)frame->payload);
 		break;
-	case BROKER_SEND: {
-		const struct broker_send *send = (const struct broker_send *)payload;
-		route_send(send, send + 1);
-		break;
+	case BROKER_SEND:
+		route_send(frame);
+		return;
 	}
-	}
+	broker_wire_free(frame);
 }
 
 static void
@@ -222,20 +218,21 @@ look_up_service(struct connection *conn, const struct broker_lookup *req)
 }
 
 static void
-route_send(const struct broker_send *send, const void *blob)
+route_send(struct broker_wire_frame *frame)
 {
-	struct connection *owner = connection_for_guest(
-			broker_guest_of(send->dest_global_id));
+	struct broker_send send;
+	struct connection *owner
+			= broker_wire_read(frame, 0, &send, sizeof(send))
+			? connection_for_guest(
+					  broker_guest_of(send.dest_global_id))
+			: NULL;
 	if (owner == NULL) {
+		broker_wire_free(frame);
 		return;
 	}
 
-	size_t length = sizeof(*send) + send->blob_length;
-	char *frame = malloc(length);
-	memcpy(frame, send, sizeof(*send));
-	memcpy(frame + sizeof(*send), blob, send->blob_length);
-	send_frame(owner, BROKER_DELIVER, frame, length);
-	free(frame);
+	frame->type = BROKER_DELIVER | (frame->type & BROKER_FRAME_OOL);
+	queue_frame(owner, frame);
 }
 
 static struct connection *
@@ -283,9 +280,9 @@ static void
 remove_connection(size_t index)
 {
 	while (connections[index].pending != NULL) {
-		struct pending_frame *frame = connections[index].pending;
+		struct broker_wire_frame *frame = connections[index].pending;
 		connections[index].pending = frame->next;
-		free(frame);
+		broker_wire_free(frame);
 	}
 	close(connections[index].fd);
 	connections[index] = connections[--connection_count];
@@ -295,18 +292,18 @@ static void
 send_frame(struct connection *conn, uint32_t type, const void *payload,
 		uint32_t length)
 {
-	struct broker_frame header = { .type = type, .length = length };
-	struct pending_frame *frame
-			= malloc(sizeof(*frame) + sizeof(header) + length);
-	frame->next = NULL;
-	frame->length = sizeof(header) + length;
-	memcpy(frame->data, &header, sizeof(header));
-	memcpy(frame->data + sizeof(header), payload, length);
+	struct iovec part = {.iov_base = (void *)payload, .iov_len = length};
+	queue_frame(conn, broker_wire_new(type, &part, 1));
+}
 
+static void
+queue_frame(struct connection *conn, struct broker_wire_frame *frame)
+{
 	if (conn->pending == NULL && send_data(conn->fd, frame)) {
-		free(frame);
+		broker_wire_free(frame);
 		return;
 	}
+	frame->next = NULL;
 	if (conn->pending == NULL) {
 		conn->pending = frame;
 	} else {
@@ -319,29 +316,18 @@ static void
 send_pending(struct connection *conn)
 {
 	while (conn->pending != NULL) {
-		struct pending_frame *frame = conn->pending;
+		struct broker_wire_frame *frame = conn->pending;
 		if (!send_data(conn->fd, frame)) {
 			return;
 		}
 		conn->pending = frame->next;
-		free(frame);
+		broker_wire_free(frame);
 	}
 }
 
 static bool
-send_data(int fd, const struct pending_frame *frame)
+send_data(int fd, const struct broker_wire_frame *frame)
 {
-	ssize_t n = send(fd, frame->data, frame->length, MSG_DONTWAIT);
-	return n != -1 || (errno != EAGAIN && errno != EWOULDBLOCK);
-}
-
-static ssize_t
-receive_frame(int fd, struct broker_frame *header, void *payload)
-{
-	struct iovec iov[2] = {
-		{ .iov_base = header, .iov_len = sizeof(*header) },
-		{ .iov_base = payload, .iov_len = BROKER_FRAME_MAX },
-	};
-	struct msghdr msg = { .msg_iov = iov, .msg_iovlen = 2 };
-	return recvmsg(fd, &msg, 0);
+	int error = broker_wire_send(fd, frame, MSG_DONTWAIT);
+	return error != EAGAIN && error != EWOULDBLOCK;
 }
