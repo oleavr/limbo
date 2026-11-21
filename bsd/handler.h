@@ -29,6 +29,7 @@
 #pragma once
 
 #include <mach/mach.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -42,6 +43,7 @@ uint64_t sys_bsd(unsigned long syscall, uint64_t arg1, uint64_t arg2,
 		uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t arg6,
 		uint64_t *sp);
 int open_flags(int flags);
+bool sandbox_denies_open(int dirfd, const char *path, int flags);
 const char *open_path(int dirfd, const char *path, int flags, char *buffer);
 const char *exec_path(const char *path, char **argv, char *buffer,
 		char ***script_argv, const char **executable);

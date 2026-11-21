@@ -28,7 +28,13 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <ftw.h>
+#include <glob.h>
+#include <limits.h>
+#include <mach-o/dyld.h>
+#include <spawn.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
@@ -59,28 +65,55 @@ extern int sandbox_check(pid_t pid, const char *operation, int type, ...);
 #define DENIED  "/tmp/limbo-sandbox-denied"
 #define ALLOWED "/tmp/limbo-sandbox-allowed"
 
-#define ALLOW_ALL "(version 1) (allow default)"
+#define DEEP  "/tmp/limbo-sandbox-deep"
+#define DEPTH 60
+#define DEEP_NAME                                                              \
+	"dddddddddddddddddddddddddddddddddddddddddddddddddd"                   \
+	"dddddddddddddddddddddddddddddddddddddddddddddddddd"
+
+#define ALLOW_ALL   "(version 1) (allow default)"
+#define DENY_SECRET ALLOW_ALL " (deny file-write* (regex #\"\\.secret$\"))"
 #define DENY_FOLDER                                                            \
 	ALLOW_ALL " (deny file-write* (subpath \"/private" DENIED "\"))"
 
+static void clean_up(void);
+static void remove_deep(void);
+static void denied_spawning(void);
+static void check_deep(void);
+static void enter_deep(void);
 static void check_entered(void);
 static void enter(void);
 static void check_missing(void);
 static void check_profile(void);
 static void ask_profile(void);
+static void check_enforced(void);
+static void denied_opening(void);
+static void in_denied_folder(void (*body)(void));
+static int remove_entry(const char *path, const struct stat *st, int type,
+		struct FTW *ftw);
+static void enter_and_run(void);
 static void make_file(const char *path);
 static int exit_status_of(void (*body)(void));
 
+static void (*sandboxed_body)(void);
+static pid_t owner;
+
 int
-main(void)
+main(int argc, char *argv[])
 {
+	if (argc == 2) {
+		return 1;
+	}
 	int lock = open(LOCK, O_RDONLY | O_CREAT, 0644);
 	CHECK(lock >= 0);
 	CHECK(flock(lock, LOCK_EX) == 0);
+	owner = getpid();
+	CHECK(atexit(clean_up) == 0);
 
 	check_entered();
 	check_missing();
 	check_profile();
+	check_enforced();
 
 	char *token = sandbox_extension_issue_file(
 			APP_SANDBOX_READ_WRITE, "/tmp", 0);
@@ -173,22 +206,13 @@ check_missing(void)
 static void
 check_profile(void)
 {
-	unlink(DENIED "/existing");
-	rmdir(DENIED);
-	CHECK(mkdir(DENIED, 0755) == 0);
-	make_file(DENIED "/existing");
-	make_file(ALLOWED);
-	CHECK(exit_status_of(ask_profile) == 0);
-	CHECK(unlink(ALLOWED) == 0);
-	CHECK(unlink(DENIED "/existing") == 0);
-	CHECK(rmdir(DENIED) == 0);
+	in_denied_folder(ask_profile);
 }
 
 static void
 ask_profile(void)
 {
 	char *error = NULL;
-	CHECK(sandbox_init(DENY_FOLDER, 0, &error) == 0);
 	CHECK(sandbox_check(getpid(), "file-write-data", SANDBOX_FILTER_PATH,
 			      "/private" DENIED "/existing")
 			== 1);
@@ -217,6 +241,142 @@ ask_profile(void)
 }
 
 static void
+check_enforced(void)
+{
+	check_deep();
+	in_denied_folder(denied_spawning);
+	in_denied_folder(denied_opening);
+}
+
+static void
+check_deep(void)
+{
+	CHECK(exit_status_of(enter_deep) == 0);
+	remove_deep();
+	CHECK(access(DEEP, F_OK) == -1);
+}
+
+static void
+enter_deep(void)
+{
+	char *error = NULL;
+	CHECK(mkdir(DEEP, 0755) == 0);
+	CHECK(chdir(DEEP) == 0);
+	for (int i = 0; i != DEPTH; i++) {
+		CHECK(mkdir(DEEP_NAME, 0755) == 0);
+		CHECK(chdir(DEEP_NAME) == 0);
+	}
+	CHECK(sandbox_init(DENY_SECRET, 0, &error) == 0);
+	errno = 0;
+	CHECK(open("x.secret", O_WRONLY | O_CREAT, 0644) == -1);
+	CHECK(errno == EPERM);
+}
+
+static void
+denied_spawning(void)
+{
+	extern char **environ;
+	char self[PATH_MAX];
+	uint32_t size = sizeof(self);
+	CHECK(_NSGetExecutablePath(self, &size) == 0);
+	char *argv[] = {self, "unreached", NULL};
+	int flags = O_WRONLY | O_CREAT;
+	posix_spawn_file_actions_t named, moved;
+	CHECK(posix_spawn_file_actions_init(&named) == 0);
+	CHECK(posix_spawn_file_actions_addopen(
+			      &named, 3, DENIED "/made", flags, 0644)
+			== 0);
+	CHECK(posix_spawn(NULL, self, &named, NULL, argv, environ) == EPERM);
+	CHECK(posix_spawn_file_actions_init(&moved) == 0);
+	CHECK(posix_spawn_file_actions_addchdir(&moved, DENIED) == 0);
+	CHECK(posix_spawn_file_actions_addopen(&moved, 3, "made", flags, 0644)
+			== 0);
+	CHECK(posix_spawn(NULL, self, &moved, NULL, argv, environ) == EPERM);
+	posix_spawnattr_t replacing;
+	CHECK(posix_spawnattr_init(&replacing) == 0);
+	CHECK(posix_spawnattr_setflags(&replacing, POSIX_SPAWN_SETEXEC) == 0);
+	CHECK(posix_spawn(NULL, self, &named, &replacing, argv, environ)
+			== EPERM);
+	CHECK(access(DENIED "/made", F_OK) == -1);
+}
+
+static void
+denied_opening(void)
+{
+	errno = 0;
+	CHECK(open(DENIED "/file", O_WRONLY | O_CREAT, 0644) == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(open(DENIED "/existing", O_WRONLY) == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(open(DENIED "/existing", O_RDWR | O_APPEND) == -1);
+	CHECK(errno == EPERM);
+	int dir = open(DENIED, O_RDONLY);
+	CHECK(dir >= 0);
+	errno = 0;
+	CHECK(openat(dir, "file", O_WRONLY | O_CREAT, 0644) == -1);
+	CHECK(errno == EPERM);
+	CHECK(close(dir) == 0);
+	CHECK(access(DENIED "/file", F_OK) == -1);
+
+	int fd = open(DENIED "/existing", O_RDONLY | O_CREAT, 0644);
+	CHECK(fd >= 0);
+	CHECK(close(fd) == 0);
+	fd = open(ALLOWED, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	CHECK(fd >= 0);
+	CHECK(close(fd) == 0);
+	fd = open(ALLOWED "-new", O_WRONLY | O_CREAT | O_EXCL, 0644);
+	CHECK(fd >= 0);
+	CHECK(close(fd) == 0);
+	CHECK(unlink(ALLOWED "-new") == 0);
+
+	fd = open(DENIED "/existing", O_RDONLY | O_APPEND);
+	CHECK(fd >= 0);
+	CHECK(close(fd) == 0);
+	errno = 0;
+	CHECK(open(DENIED "/existing", O_RDONLY | O_TRUNC) == -1);
+	CHECK(errno == EPERM);
+	const char *targets[] = {DENIED "/made", "limbo-sandbox-denied/made"};
+	for (int i = 0; i != 2; i++) {
+		CHECK(symlink(targets[i], ALLOWED "-link") == 0);
+		errno = 0;
+		CHECK(open(ALLOWED "-link", O_WRONLY | O_CREAT, 0644) == -1);
+		CHECK(errno == EPERM);
+		CHECK(unlink(ALLOWED "-link") == 0);
+	}
+	CHECK(access(DENIED "/made", F_OK) == -1);
+}
+
+static void
+in_denied_folder(void (*body)(void))
+{
+	clean_up();
+	CHECK(mkdir(DENIED, 0755) == 0);
+	make_file(DENIED "/existing");
+	make_file(ALLOWED);
+	sandboxed_body = body;
+	CHECK(exit_status_of(enter_and_run) == 0);
+	CHECK(unlink(ALLOWED) == 0);
+	CHECK(unlink(DENIED "/existing") == 0);
+	CHECK(rmdir(DENIED) == 0);
+}
+
+static int
+remove_entry(const char *path, const struct stat *st, int type, struct FTW *ftw)
+{
+	return remove(path);
+}
+
+static void
+enter_and_run(void)
+{
+	char *error = NULL;
+	CHECK(sandbox_init(DENY_FOLDER, 0, &error) == 0);
+	sandboxed_body();
+}
+
+static void
 make_file(const char *path)
 {
 	int fd = open(path, O_WRONLY | O_CREAT, 0644);
@@ -237,4 +397,38 @@ exit_status_of(void (*body)(void))
 	CHECK(waitpid(child, &status, 0) == child);
 	CHECK(WIFEXITED(status));
 	return WEXITSTATUS(status);
+}
+
+static void
+clean_up(void)
+{
+	if (getpid() == owner) {
+		nftw(DENIED, remove_entry, 8, FTW_DEPTH | FTW_PHYS);
+		remove_deep();
+		glob_t allowed;
+		if (glob(ALLOWED "*", 0, NULL, &allowed) == 0) {
+			for (size_t i = 0; i != allowed.gl_pathc; i++) {
+				remove(allowed.gl_pathv[i]);
+			}
+			globfree(&allowed);
+		}
+	}
+}
+
+static void
+remove_deep(void)
+{
+	int depth = 0;
+	if (chdir(DEEP) == 0) {
+		while (chdir(DEEP_NAME) == 0) {
+			depth++;
+		}
+		unlink("x.secret");
+		for (; depth != 0; depth--) {
+			chdir("..");
+			rmdir(DEEP_NAME);
+		}
+		chdir("/");
+		rmdir(DEEP);
+	}
 }

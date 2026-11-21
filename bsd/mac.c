@@ -39,6 +39,7 @@
 #include "bsd/sandbox_profile.h"
 #include "fs/device.h"
 #include "handler.h"
+#include "mac.h"
 #include "sha.h"
 #include "sysroot.h"
 #include "trace.h"
@@ -248,6 +249,29 @@ profile_denies(int operation, int dirfd, const char *path, int follow)
 	}
 	return sandbox_profile_decide(&profile, operation, canonical)
 			== SANDBOX_DENY;
+}
+
+bool
+mac_sandbox_denies_open(int dirfd, const char *path, bool write, bool create,
+		int follow)
+{
+	if (profile.enforced == 0 || path == NULL || (!write && !create)) {
+		return false;
+	}
+	char buffer[PATH_MAX];
+	bool makes = create
+			&& faccessat(dirfd,
+					   sysroot_host_path(path, follow,
+							   buffer),
+					   F_OK, follow)
+					== -1;
+	if (makes) {
+		return profile_denies(
+				SANDBOX_FILE_WRITE_CREATE, dirfd, path, follow);
+	}
+	return write
+			&& profile_denies(SANDBOX_FILE_WRITE_DATA, dirfd, path,
+					follow);
 }
 
 static int

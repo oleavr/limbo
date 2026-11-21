@@ -61,6 +61,8 @@
 #define _POSIX_SPAWN_SETSID          0x0400
 #define _POSIX_SPAWN_CLOEXEC_DEFAULT 0x4000
 
+#define AS_FOLDER (O_PATH | O_DIRECTORY | O_CLOEXEC)
+
 typedef enum {
 	PSFA_OPEN = 0,
 	PSFA_CLOSE = 1,
@@ -107,8 +109,9 @@ struct darwin_spawn_args {
 
 static void convert_attr(
 		const struct darwin_spawnattr *src, posix_spawnattr_t *dst);
-static void convert_file_actions(const struct darwin_file_actions *src,
+static int convert_file_actions(const struct darwin_file_actions *src,
 		bool cloexec_default, posix_spawn_file_actions_t *dst);
+static int moved(int folder, int next);
 static int apply_file_actions(const struct darwin_file_actions *actions,
 		bool cloexec_default);
 static void close_unlisted(const struct darwin_file_actions *src,
@@ -139,11 +142,16 @@ sys_posix_spawn(void *pid, const char *path, void *adesc, char **argv,
 
 	posix_spawn_file_actions_t actions;
 	posix_spawn_file_actions_init(&actions);
-	convert_file_actions(file_actions,
+	int denied = convert_file_actions(file_actions,
 			attrp != NULL
 					&& (attrp->psa_flags
 							& _POSIX_SPAWN_CLOEXEC_DEFAULT),
 			&actions);
+	if (denied != 0) {
+		posix_spawn_file_actions_destroy(&actions);
+		posix_spawnattr_destroy(&attr);
+		return denied;
+	}
 
 	char buffer[PATH_MAX];
 	char **script_argv;
@@ -440,18 +448,24 @@ convert_attr(const struct darwin_spawnattr *src, posix_spawnattr_t *dst)
 	posix_spawnattr_setflags(dst, flags);
 }
 
-static void
+static int
 convert_file_actions(const struct darwin_file_actions *src,
 		bool cloexec_default, posix_spawn_file_actions_t *dst)
 {
 	int count = (src != NULL) ? src->count : 0;
-	for (int i = 0; i < count; i++) {
+	int folder = AT_FDCWD;
+	bool denied = false;
+	for (int i = 0; i < count && !denied; i++) {
 		const struct darwin_file_action *action = &src->actions[i];
 		char buffer[PATH_MAX];
+		const char *host;
 		switch (action->type) {
 		case PSFA_OPEN:
+			denied = sandbox_denies_open(folder, action->open.path,
+					action->open.oflag);
 			posix_spawn_file_actions_addopen(dst, action->filedes,
-					sysroot_host_path(action->open.path, 0,
+					open_path(folder, action->open.path,
+							action->open.oflag,
 							buffer),
 					open_flags(action->open.oflag),
 					action->open.mode);
@@ -468,22 +482,36 @@ convert_file_actions(const struct darwin_file_actions *src,
 					dst, action->filedes, action->filedes);
 			break;
 		case PSFA_CHDIR:
-			posix_spawn_file_actions_addchdir_np(dst,
-					sysroot_host_path(action->path, 0,
-							buffer));
+			host = sysroot_host_path(action->path, 0, buffer);
+			posix_spawn_file_actions_addchdir_np(dst, host);
+			folder = moved(folder, openat(folder, host, AS_FOLDER));
 			break;
 		case PSFA_FCHDIR:
 			posix_spawn_file_actions_addfchdir_np(
 					dst, action->filedes);
+			folder = moved(folder,
+					fcntl(action->filedes, F_DUPFD_CLOEXEC,
+							0));
 			break;
 		default:
 			unimplemented();
 		}
 	}
+	moved(folder, AT_FDCWD);
 
 	if (cloexec_default) {
 		close_unlisted(src, dst);
 	}
+	return denied ? _EPERM : 0;
+}
+
+static int
+moved(int folder, int next)
+{
+	if (folder != AT_FDCWD) {
+		close(folder);
+	}
+	return next;
 }
 
 static int
@@ -497,6 +525,10 @@ apply_file_actions(
 		int fd;
 		switch (action->type) {
 		case PSFA_OPEN:
+			if (sandbox_denies_open(AT_FDCWD, action->open.path,
+					    action->open.oflag)) {
+				return _EPERM;
+			}
 			fd = acl_openat(AT_FDCWD,
 					open_path(AT_FDCWD, action->open.path,
 							action->open.oflag,
