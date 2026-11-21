@@ -431,6 +431,11 @@ check_attributes(void)
 	CHECK(getattrlistbulk(fd, &bulk_request, &entries, sizeof(entries), 0)
 			>= 1);
 	CHECK(entries.returned.forkattr & ATTR_CMNEXT_EXT_FLAGS);
+	bulk_request.commonattr = ATTR_CMN_RETURNED_ATTRS;
+	errno = 0;
+	CHECK(getattrlistbulk(fd, &bulk_request, &entries, sizeof(entries), 0)
+			== -1);
+	CHECK(errno == EINVAL);
 	CHECK(close(fd) == 0);
 	CHECK(unlink("attributes") == 0);
 }
