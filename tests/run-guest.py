@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 
 import os
+import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 SKIP = 77
@@ -43,8 +45,21 @@ def start_broker(broker, outdir):
     if socket_path.exists():
         socket_path.unlink()
     process = subprocess.Popen([broker, str(socket_path)])
+    wait_for_broker(socket_path)
     os.environ["LIMBO_BROKER"] = str(socket_path)
     return process
+
+
+def wait_for_broker(socket_path):
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as probe:
+            try:
+                probe.connect(str(socket_path))
+                return
+            except OSError:
+                time.sleep(0.01)
+    sys.exit(f"{socket_path} accepted no connection")
 
 
 def skip(reason):
