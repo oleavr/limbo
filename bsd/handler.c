@@ -99,6 +99,7 @@
 #include "necp.h"
 #include "net.h"
 #include "osfmk/broker_client.h"
+#include "osfmk/eventlink.h"
 #include "osfmk/ipc.h"
 #include "osfmk/mach_vm.h"
 #include "osfmk/semaphore.h"
@@ -3998,7 +3999,7 @@ uint64_t
 sys_mach_eventlink_signal(
 		mach_port_name_t eventlink_port, uint64_t signal_count)
 {
-	unimplemented();
+	return eventlink_signal(eventlink_port);
 }
 
 uint64_t
@@ -4006,7 +4007,8 @@ sys_mach_eventlink_wait_until(mach_port_name_t eventlink_port,
 		uint64_t wait_count, uint64_t deadline, uint32_t clock_id,
 		uint32_t option)
 {
-	unimplemented();
+	return eventlink_wait_until(
+			eventlink_port, wait_count, deadline, clock_id, option);
 }
 
 uint64_t
@@ -4014,7 +4016,8 @@ sys_mach_eventlink_signal_wait_until(mach_port_name_t eventlink_port,
 		uint64_t wait_count, uint64_t signal_count, uint64_t deadline,
 		uint32_t clock_id, uint32_t option)
 {
-	unimplemented();
+	return eventlink_signal_wait_until(
+			eventlink_port, wait_count, deadline, clock_id, option);
 }
 
 int
