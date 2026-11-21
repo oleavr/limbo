@@ -2510,6 +2510,16 @@ sys_open_dprotected_np(
 			open_flags(flags), mode, class));
 }
 
+int
+sys_openat_dprotected_np(int fd, user_addr_t path, int flags, int class,
+		int dpflags, int mode, int authfd)
+{
+	char buffer[PATH_MAX];
+	return errno_map(open_protected(at_fd(fd),
+			open_path(at_fd(fd), path, flags, buffer),
+			open_flags(flags), mode, class));
+}
+
 static int
 open_protected(int dirfd, const char *host_path, int flags, int mode,
 		int dpclass)
@@ -4821,7 +4831,8 @@ sys_bsd(unsigned long syscall, uint64_t arg1, uint64_t arg2, uint64_t arg3,
 		return sys_fsgetpath_ext(
 				(void *)arg1, arg2, (void *)arg3, arg4, arg5);
 	case 0xda:
-		return sys_nosys();
+		return sys_openat_dprotected_np(arg1, (void *)arg2, arg3, arg4,
+				arg5, arg6, sp[1]);
 	case 0xdb:
 		return sys_nosys();
 	case 0xdc:
