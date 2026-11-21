@@ -73,11 +73,13 @@ static int remove_entry(const char *path, const struct stat *st, int type,
 		struct FTW *ftw);
 static void check_as_another(void (*body)(void));
 static void opens_as_itself(void);
+static void makes_as_itself(void);
 static void check_kept(void);
 static void check_listed(void);
 static void check_hidden(void);
 static void check_inherited(void);
 static void check_opened_with(void);
+static void check_made_with(void);
 static filesec_t filesec_of(mode_t mode, acl_t acl);
 static acl_t list_of(int count, const uid_t *users, const acl_perm_t *perms,
 		const int *flags);
@@ -113,6 +115,7 @@ main(void)
 	check_hidden();
 	check_inherited();
 	check_opened_with();
+	check_made_with();
 
 	CHECK(rmdir("shared") == 0);
 	CHECK(chdir("/") == 0);
@@ -189,6 +192,24 @@ opens_as_itself(void)
 	}
 	filesec_free(unwritable);
 	filesec_free(another);
+	acl_free(one);
+}
+
+static void
+makes_as_itself(void)
+{
+	uid_t users[] = {USER + 1};
+	acl_perm_t perms[] = {ACL_LIST_DIRECTORY};
+	int flags[] = {0};
+	acl_t one = list_of(1, users, perms, flags);
+	filesec_t unwritable = filesec_of(0555, one);
+	if (mkdirx_np("shared/listed", unwritable) == -1) {
+		CHECK(access("shared/listed", F_OK) == -1);
+	} else {
+		CHECK(entries("shared/listed") == 1);
+		CHECK(rmdir("shared/listed") == 0);
+	}
+	filesec_free(unwritable);
 	acl_free(one);
 }
 
@@ -469,6 +490,47 @@ check_opened_with(void)
 	CHECK(rmdir("giving") == 0);
 	CHECK(unlink("opened") == 0);
 	filesec_free(with_two);
+	filesec_free(with_one);
+	acl_free(two);
+	acl_free(one);
+}
+
+static void
+check_made_with(void)
+{
+	uid_t users[] = {USER, USER + 1};
+	acl_perm_t perms[] = {ACL_LIST_DIRECTORY, ACL_SEARCH};
+	int flags[] = {0, DIRECTORY_INHERIT};
+	acl_t one = list_of(1, users, perms, flags);
+	acl_t two = list_of(2, users, perms, flags);
+	filesec_t with_one = filesec_of(0750, one);
+
+	CHECK(mkdirx_np("made", with_one) == 0);
+	CHECK(entries("made") == 1);
+	struct stat st;
+	CHECK(stat("made", &st) == 0 && (st.st_mode & 0777) == 0750);
+	CHECK(mkdirx_np("made", with_one) == -1 && errno == EEXIST);
+
+	CHECK(acl_set_file("made", ACL_TYPE_EXTENDED, two) == 0);
+	CHECK(mkdirx_np("made/inside", with_one) == 0);
+	CHECK(entries("made/inside") == 2);
+	struct entry found;
+	CHECK(entry_for("made/inside", USER, &found));
+	CHECK(found.flags == ACL_EXTENDED_ALLOW);
+	CHECK(entry_for("made/inside", USER + 1, &found));
+	CHECK(found.flags
+			== (ACL_EXTENDED_ALLOW | INHERITED
+					| DIRECTORY_INHERIT));
+
+	uid_t another = geteuid() + 1;
+	CHECK(filesec_set_property(with_one, FILESEC_OWNER, &another) == 0);
+	CHECK(mkdirx_np("given", with_one) == 0);
+	CHECK(stat("given", &st) == 0 && st.st_uid == geteuid());
+	CHECK(rmdir("given") == 0);
+	check_as_another(makes_as_itself);
+
+	CHECK(rmdir("made/inside") == 0);
+	CHECK(rmdir("made") == 0);
 	filesec_free(with_one);
 	acl_free(two);
 	acl_free(one);

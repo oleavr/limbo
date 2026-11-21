@@ -1970,7 +1970,7 @@ sys_mkdir(user_addr_t path, int mode)
 	char buffer[PATH_MAX];
 	return errno_map(acl_mkdirat(AT_FDCWD,
 			sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer),
-			mode));
+			mode, NULL));
 }
 
 static bool
@@ -3033,7 +3033,15 @@ int
 sys_mkdir_extended(user_addr_t path, void *uid, void *gid, int mode,
 		user_addr_t xsecurity)
 {
-	unimplemented();
+	struct acl_list list;
+	const struct acl_list *initial;
+	if (initial_list(xsecurity, &list, &initial) == -1) {
+		return _EINVAL;
+	}
+	char buffer[PATH_MAX];
+	const char *host_path
+			= sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer);
+	return errno_map(acl_mkdirat(AT_FDCWD, host_path, mode, initial));
 }
 
 int
@@ -3931,7 +3939,7 @@ sys_mkdirat(int fd, user_addr_t path, int mode)
 	char buffer[PATH_MAX];
 	return errno_map(acl_mkdirat(at_fd(fd),
 			sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer),
-			mode));
+			mode, NULL));
 }
 
 int

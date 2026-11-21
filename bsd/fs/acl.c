@@ -252,19 +252,28 @@ inherit(int fd, const struct acl_list *parent, const struct acl_list *initial)
 }
 
 int
-acl_mkdirat(int dirfd, const char *host_path, mode_t mode)
+acl_mkdirat(int dirfd, const char *host_path, mode_t mode,
+		const struct acl_list *initial)
 {
 	struct acl_list parent;
 	bool gives = parent_gives(dirfd, host_path, &parent);
 	if (mkdirat(dirfd, host_path, mode) == -1) {
 		return -1;
 	}
-	int fd = gives ? openat(dirfd, host_path,
-					 O_PATH | O_NOFOLLOW | O_CLOEXEC)
-		       : -1;
-	if (fd != -1) {
-		inherit(fd, &parent, NULL);
-		close(fd);
+	int fd = (gives || initial != NULL)
+			? openat(dirfd, host_path,
+					  O_PATH | O_NOFOLLOW | O_CLOEXEC)
+			: -1;
+	if (fd == -1) {
+		return 0;
+	}
+	int stored = inherit(fd, &parent, initial);
+	int error = errno;
+	close(fd);
+	if (stored == -1 && initial != NULL) {
+		unlinkat(dirfd, host_path, AT_REMOVEDIR);
+		errno = error;
+		return -1;
 	}
 	return 0;
 }
