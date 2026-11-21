@@ -30,20 +30,31 @@
 #include "check.h"
 
 #define MELC_OPTION_NO_COPYIN 0x1
+#define MELA_OPTION_NONE              0x0
+#define MELA_OPTION_ASSOCIATE_ON_WAIT 0x1
+#define MELD_OPTION_NONE              0x0
 
 kern_return_t mach_eventlink_create(
 		task_t task, uint32_t option, mach_port_t eventlink_pair[2]);
 kern_return_t mach_eventlink_destroy(mach_port_t eventlink);
+kern_return_t mach_eventlink_associate(mach_port_t eventlink, thread_t thread,
+		mach_vm_address_t copyin_addr_wait, uint64_t copyin_mask_wait,
+		mach_vm_address_t copyin_addr_signal,
+		uint64_t copyin_mask_signal, uint32_t option);
+kern_return_t mach_eventlink_disassociate(
+		mach_port_t eventlink, uint32_t option);
 
 static mach_port_t ends[2];
 
 static void check_pairs(void);
+static void check_association(void);
 static void create_pair(void);
 
 int
 main(void)
 {
 	check_pairs();
+	check_association();
 	return 0;
 }
 
@@ -73,6 +84,39 @@ check_pairs(void)
 	CHECK(type == MACH_PORT_TYPE_SEND);
 	CHECK(mach_eventlink_destroy(ends[1]) == KERN_SUCCESS);
 	CHECK(mach_port_type(task, ends[1], &type) == KERN_INVALID_NAME);
+}
+
+static void
+check_association(void)
+{
+	create_pair();
+	mach_port_t thread = mach_thread_self();
+	CHECK(mach_eventlink_associate(ends[1], MACH_PORT_NULL, 0, 0, 0, 0,
+			      MELA_OPTION_NONE)
+			== KERN_INVALID_ARGUMENT);
+	CHECK(mach_eventlink_associate(ends[1], thread, 0, 0, 0, 0,
+			      MELA_OPTION_ASSOCIATE_ON_WAIT)
+			== KERN_INVALID_ARGUMENT);
+	CHECK(mach_eventlink_associate(
+			      ends[1], thread, 0, 0, 0, 0, MELA_OPTION_NONE)
+			== KERN_SUCCESS);
+	CHECK(mach_eventlink_associate(
+			      ends[1], thread, 0, 0, 0, 0, MELA_OPTION_NONE)
+			== KERN_NAME_EXISTS);
+	CHECK(mach_eventlink_disassociate(ends[1], MELD_OPTION_NONE)
+			== KERN_SUCCESS);
+	CHECK(mach_eventlink_disassociate(ends[1], MELD_OPTION_NONE)
+			== KERN_INVALID_ARGUMENT);
+	CHECK(mach_eventlink_associate(ends[1], MACH_PORT_NULL, 0, 0, 0, 0,
+			      MELA_OPTION_ASSOCIATE_ON_WAIT)
+			== KERN_SUCCESS);
+
+	CHECK(mach_eventlink_destroy(ends[0]) == KERN_SUCCESS);
+	CHECK(mach_eventlink_associate(
+			      ends[1], thread, 0, 0, 0, 0, MELA_OPTION_NONE)
+			== KERN_TERMINATED);
+	CHECK(mach_eventlink_destroy(ends[1]) == KERN_SUCCESS);
+	CHECK(mach_port_deallocate(mach_task_self(), thread) == KERN_SUCCESS);
 }
 
 static void

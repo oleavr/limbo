@@ -80,6 +80,8 @@ mach_port_name_t ipc_kobject_name(ipc_kobject_type_t type);
 mach_port_name_t ipc_kobject_alloc(ipc_kobject_type_t type, void *kobject);
 mach_port_name_t ipc_kobject_copy_send(mach_port_name_t name);
 void *ipc_kobject_lookup(mach_port_name_t name, ipc_kobject_type_t type);
+void *ipc_kobject_lookup_held(mach_port_name_t name, ipc_kobject_type_t type,
+		void (*hold)(void *kobject));
 void ipc_kobject_destroy(mach_port_name_t name);
 void *ipc_kobject_detach(mach_port_name_t name, ipc_kobject_type_t type);
 
