@@ -2075,6 +2075,9 @@ sys_rmdir(char *path)
 int
 sys_utimes(char *path, void *tptr)
 {
+	if (mac_sandbox_denies(SANDBOX_FILE_WRITE_TIMES, AT_FDCWD, path, 0)) {
+		return _EPERM;
+	}
 	char buffer[PATH_MAX];
 	struct timeval times[2];
 	return errno_map(utimes(sysroot_host_path(path, 0, buffer),
@@ -2099,6 +2102,9 @@ convert_timevals(const void *tptr, struct timeval *times)
 int
 sys_futimes(int fd, void *tptr)
 {
+	if (mac_sandbox_denies_fd(SANDBOX_FILE_WRITE_TIMES, fd)) {
+		return _EPERM;
+	}
 	struct timeval times[2];
 	return errno_map(futimes(fd, convert_timevals(tptr, times)));
 }
