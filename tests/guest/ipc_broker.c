@@ -1453,7 +1453,16 @@ check_sender_counts(void)
 	CHECK(!has_senders(port));
 	destroy_port(notify);
 	destroy_port(port);
+
+	port = give_send_right(holder.port);
+	notify = request_notification(port, MACH_NOTIFY_NO_SENDERS);
 	end_peer(&holder);
+	CHECK(receive_notification(
+			      notify, MACH_NOTIFY_NO_SENDERS, ANSWER_MS, &count)
+			== MACH_MSG_SUCCESS);
+	CHECK(!has_senders(port));
+	destroy_port(notify);
+	destroy_port(port);
 }
 
 static void

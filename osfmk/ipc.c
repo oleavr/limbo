@@ -1450,6 +1450,10 @@ ipc_remote_guest_gone(uint32_t guest_id)
 						== guest_id) {
 			turn_dead(&entries[i]);
 		}
+		if (port != NULL
+				&& (entries[i].type & MACH_PORT_TYPE_RECEIVE)) {
+			release_grants(&entries[i], guest_id, UINT64_MAX);
+		}
 	}
 	pthread_mutex_unlock(&lock);
 	flush_notices();
