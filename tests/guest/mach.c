@@ -114,6 +114,7 @@ static void check_fork_during_port_calls(void);
 static void *allocate_ports(void *arg);
 static void check_task_for_pid(void);
 static void check_pid_for_task(void);
+static void check_task_names(void);
 static void check_semaphores(void);
 static void *signal_semaphore(void *arg);
 static void check_time(void);
@@ -172,6 +173,7 @@ main(void)
 	check_fork_during_port_calls();
 	check_task_for_pid();
 	check_pid_for_task();
+	check_task_names();
 	check_semaphores();
 	check_time();
 	check_timers();
@@ -1818,6 +1820,56 @@ check_pid_for_task(void)
 	CHECK(pid == getpid());
 	CHECK(pid_for_task(mach_host_self(), &pid) == KERN_FAILURE);
 	CHECK(pid == -1);
+}
+
+static void
+check_task_names(void)
+{
+	mach_port_t task = mach_task_self();
+	mach_port_t name;
+	CHECK(task_name_for_pid(task, getppid(), &name) == KERN_SUCCESS);
+	CHECK(name != task);
+	int pid;
+	CHECK(pid_for_task(name, &pid) == KERN_SUCCESS);
+	CHECK(pid == getppid());
+	audit_token_t token;
+	mach_msg_type_number_t count = TASK_AUDIT_TOKEN_COUNT;
+	CHECK(task_info(name, TASK_AUDIT_TOKEN, (task_info_t)&token, &count)
+			== KERN_SUCCESS);
+	CHECK(token.val[1] == geteuid());
+	CHECK(token.val[3] == getuid());
+	CHECK(token.val[5] == (unsigned int)getppid());
+	struct task_dyld_info dyld;
+	count = TASK_DYLD_INFO_COUNT;
+	CHECK(task_info(name, TASK_DYLD_INFO, (task_info_t)&dyld, &count)
+			== KERN_INVALID_ARGUMENT);
+	CHECK(mach_port_deallocate(task, name) == KERN_SUCCESS);
+	mach_port_type_t type;
+	CHECK(mach_port_type(task, name, &type) == KERN_INVALID_NAME);
+
+	CHECK(task_name_for_pid(task, getpid(), &name) == KERN_SUCCESS);
+	count = TASK_AUDIT_TOKEN_COUNT;
+	CHECK(task_info(name, TASK_AUDIT_TOKEN, (task_info_t)&token, &count)
+			== KERN_SUCCESS);
+	CHECK(token.val[5] == (unsigned int)getpid());
+	CHECK(mach_port_deallocate(task, name) == KERN_SUCCESS);
+	CHECK(task_name_for_pid(task, -1, &name) == KERN_FAILURE);
+
+	pid_t child = fork();
+	CHECK(child != -1);
+	if (child == 0) {
+		_exit(0);
+	}
+	kern_return_t named = KERN_SUCCESS;
+	for (int tries = 0; tries < 100 && named == KERN_SUCCESS; tries++) {
+		usleep(10000);
+		named = task_name_for_pid(task, child, &name);
+		if (named == KERN_SUCCESS) {
+			CHECK(mach_port_deallocate(task, name) == KERN_SUCCESS);
+		}
+	}
+	CHECK(named == KERN_FAILURE);
+	CHECK(waitpid(child, NULL, 0) == child);
 }
 
 static void

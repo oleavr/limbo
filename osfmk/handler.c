@@ -42,9 +42,9 @@
 #include <fcntl.h>
 #include <mach-o/fat.h>
 #include <mach-o/loader.h>
-#include <mach/machine/thread_status.h>
 #include <mach/mach.h>
 #include <mach/machine/ndr_def.h> /* NDR_Record */
+#include <mach/machine/thread_status.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdio.h>
@@ -59,13 +59,14 @@
 #include <ucontext.h>
 #include <unistd.h>
 
-#include "commpage.h"
 #include "bsd/xnu-errno.h"
+#include "commpage.h"
 #include "handler.h"
 #include "ipc.h"
 #include "mach_vm.h"
 #include "mk_timer.h"
 #include "semaphore.h"
+#include "task.h"
 #include "thread.h"
 
 int
@@ -503,16 +504,33 @@ kern_return_t
 sys_task_name_for_pid(
 		mach_port_name_t target_tport, int pid, mach_port_name_t *tn)
 {
-	if (pid != getpid()) {
+	if (pid == getpid()) {
+		*tn = ipc_task_self();
+		return KERN_SUCCESS;
+	}
+
+	audit_token_t token;
+	if (!task_audit_token_of_pid(pid, &token)) {
 		return KERN_FAILURE;
 	}
-	*tn = ipc_task_self();
+	if (geteuid() != 0
+			&& (token.val[1] != geteuid()
+					|| token.val[3] != getuid())) {
+		return KERN_FAILURE;
+	}
+	*tn = ipc_kobject_alloc_send(
+			IPC_KOBJECT_TASK_NAME, (void *)(intptr_t)pid);
 	return KERN_SUCCESS;
 }
 
 kern_return_t
 sys_pid_for_task(mach_port_name_t t, int *x)
 {
+	void *named = ipc_kobject_lookup(t, IPC_KOBJECT_TASK_NAME);
+	if (named != NULL) {
+		*x = (int)(intptr_t)named;
+		return KERN_SUCCESS;
+	}
 	if (t != ipc_kobject_name(IPC_KOBJECT_TASK)) {
 		*x = -1;
 		return KERN_FAILURE;
