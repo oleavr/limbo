@@ -343,6 +343,8 @@ static void notify_send_once(struct ipc_port *port);
 static void notify_dead_name(struct ipc_port *notify, mach_port_name_t name);
 static bool deliver_notification(
 		struct ipc_port *port, const mach_msg_header_t *msg);
+static bool deliver_remote_notification(
+		uint64_t global_id, const mach_msg_header_t *msg);
 static kern_return_t request_notification(mach_port_name_t name,
 		mach_msg_id_t id, mach_port_mscount_t sync,
 		mach_port_name_t notify, mach_port_name_t *previous);
@@ -2655,6 +2657,12 @@ deliver_notification(struct ipc_port *port, const mach_msg_header_t *msg)
 {
 	pthread_mutex_lock(&lock);
 	port->kernel_sorights--;
+	if (port->remote) {
+		uint64_t global_id = port->global_id;
+		port_free_if_unheld(port);
+		pthread_mutex_unlock(&lock);
+		return deliver_remote_notification(global_id, msg);
+	}
 	if (!port_has_receiver(port)) {
 		port_free_if_unheld(port);
 		pthread_mutex_unlock(&lock);
@@ -2672,6 +2680,30 @@ deliver_notification(struct ipc_port *port, const mach_msg_header_t *msg)
 	enqueue(port, kmsg);
 	unlock_and_notify_arrival(port);
 	return true;
+}
+
+static bool
+deliver_remote_notification(uint64_t global_id, const mach_msg_header_t *msg)
+{
+	bool whole = !(msg->msgh_bits & MACH_MSGH_BITS_COMPLEX);
+	mach_msg_header_t unused = {
+			.msgh_size = sizeof(unused),
+			.msgh_id = MACH_NOTIFY_SEND_ONCE,
+	};
+	const mach_msg_header_t *sent = whole ? msg : &unused;
+	struct remote_header rh = {
+			.message_size = sent->msgh_size,
+			.dest_disposition = MACH_MSG_TYPE_MOVE_SEND_ONCE,
+			.sender_guest_id = broker_client_guest_id(),
+	};
+
+	uint32_t length = sizeof(rh) + sent->msgh_size;
+	char *blob = malloc(length);
+	memcpy(blob, &rh, sizeof(rh));
+	memcpy(blob + sizeof(rh), sent, sent->msgh_size);
+	broker_client_send(global_id, blob, length, NULL, 0);
+	free(blob);
+	return whole;
 }
 
 kern_return_t
@@ -3483,6 +3515,13 @@ send_once_name(struct ipc_port *port)
 	}
 
 	port->kernel_sorights--;
+	if (port->remote) {
+		struct ipc_entry *entry = port->name != MACH_PORT_NULL
+				? lookup(port->name)
+				: entry_alloc(port);
+		return (entry->type & MACH_PORT_TYPE_DEAD_NAME) ? MACH_PORT_DEAD
+								: port->name;
+	}
 	if (port_has_receiver(port)) {
 		return port->name;
 	}
