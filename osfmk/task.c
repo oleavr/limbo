@@ -129,9 +129,9 @@ _kernelrpc_mach_ports_lookup3(task_t target_task, mach_port_t *port1,
 	return KERN_SUCCESS;
 }
 
-static kern_return_t memory_and_time_info(task_flavor_t flavor,
+static kern_return_t memory_and_time_info(pid_t pid, task_flavor_t flavor,
 		task_info_t out, mach_msg_type_number_t *count);
-static void live_thread_times(uint64_t *user, uint64_t *system);
+static void live_thread_times(pid_t pid, uint64_t *user, uint64_t *system);
 static uint64_t ended_time(
 		uint64_t total, uint64_t live, _Atomic uint64_t *most);
 static uint64_t nanoseconds_to_absolute(uint64_t nanoseconds);
@@ -209,9 +209,13 @@ task_info(task_name_t target_task, task_flavor_t flavor,
 	case TASK_POWER_INFO:
 	case TASK_POWER_INFO_V2:
 	case TASK_ABSOLUTETIME_INFO:
-	case TASK_FLAGS_INFO:
-		return memory_and_time_info(flavor, task_info_out,
-				task_info_outCnt);
+	case TASK_FLAGS_INFO: {
+		void *named = ipc_kobject_lookup(
+				target_task, IPC_KOBJECT_TASK_NAME);
+		pid_t pid = named != NULL ? (pid_t)(intptr_t)named : getpid();
+		return memory_and_time_info(
+				pid, flavor, task_info_out, task_info_outCnt);
+	}
 	default:
 		return KERN_INVALID_ARGUMENT;
 	}
@@ -258,11 +262,13 @@ struct memory_usage {
 };
 
 static void
-memory_usage(struct memory_usage *usage)
+memory_usage(pid_t pid, struct memory_usage *usage)
 {
 	memset(usage, 0, sizeof(*usage));
 	long page = sysconf(_SC_PAGESIZE);
-	FILE *statm = fopen("/proc/self/statm", "r");
+	char path[32];
+	snprintf(path, sizeof(path), "/proc/%d/statm", pid);
+	FILE *statm = fopen(path, "r");
 	if (statm != NULL) {
 		unsigned long size, resident;
 		if (fscanf(statm, "%lu %lu", &size, &resident) == 2) {
@@ -271,7 +277,8 @@ memory_usage(struct memory_usage *usage)
 		}
 		fclose(statm);
 	}
-	FILE *status = fopen("/proc/self/status", "r");
+	snprintf(path, sizeof(path), "/proc/%d/status", pid);
+	FILE *status = fopen(path, "r");
 	if (status != NULL) {
 		char line[256];
 		unsigned long kilobytes;
@@ -295,22 +302,27 @@ time_value(uint64_t nanoseconds, time_value_t *to)
 }
 
 static kern_return_t
-memory_and_time_info(task_flavor_t flavor, task_info_t out,
+memory_and_time_info(pid_t pid, task_flavor_t flavor, task_info_t out,
 		mach_msg_type_number_t *count)
 {
+	bool self = pid == getpid();
 	struct memory_usage usage;
-	memory_usage(&usage);
-	struct rusage rusage;
-	getrusage(RUSAGE_SELF, &rusage);
-	struct process process;
-	process_lookup(getpid(), &process);
+	memory_usage(pid, &usage);
+	struct rusage rusage = {0};
+	if (self) {
+		getrusage(RUSAGE_SELF, &rusage);
+	}
+	struct process process = {0};
+	process_lookup(pid, &process);
 	uint64_t user = process_ticks_to_nanoseconds(process.user_ticks);
 	uint64_t system = process_ticks_to_nanoseconds(process.system_ticks);
 	uint64_t live_user, live_system;
-	live_thread_times(&live_user, &live_system);
+	live_thread_times(pid, &live_user, &live_system);
 	static _Atomic uint64_t most_user, most_system;
-	uint64_t ended_user = ended_time(user, live_user, &most_user);
-	uint64_t ended_system = ended_time(system, live_system, &most_system);
+	uint64_t ended_user
+			= ended_time(user, live_user, self ? &most_user : NULL);
+	uint64_t ended_system = ended_time(
+			system, live_system, self ? &most_system : NULL);
 
 	union {
 		struct task_absolutetime_info absolute;
@@ -403,23 +415,27 @@ memory_and_time_info(task_flavor_t flavor, task_info_t out,
 }
 
 static void
-live_thread_times(uint64_t *user, uint64_t *system)
+live_thread_times(pid_t pid, uint64_t *user, uint64_t *system)
 {
 	uint64_t user_ticks = 0, system_ticks = 0;
-	DIR *threads = opendir("/proc/self/task");
+	char path[32];
+	snprintf(path, sizeof(path), "/proc/%d/task", pid);
+	DIR *threads = opendir(path);
 	struct dirent *entry;
-	while ((entry = readdir(threads)) != NULL) {
+	while (threads != NULL && (entry = readdir(threads)) != NULL) {
 		if (entry->d_name[0] == '.') {
 			continue;
 		}
 		int32_t tid = atoi(entry->d_name);
 		struct process_thread thread;
-		if (process_thread_lookup(getpid(), tid, &thread) == 0) {
+		if (process_thread_lookup(pid, tid, &thread) == 0) {
 			user_ticks += thread.user_ticks;
 			system_ticks += thread.system_ticks;
 		}
 	}
-	closedir(threads);
+	if (threads != NULL) {
+		closedir(threads);
+	}
 	*user = process_ticks_to_nanoseconds(user_ticks);
 	*system = process_ticks_to_nanoseconds(system_ticks);
 }
@@ -428,6 +444,9 @@ static uint64_t
 ended_time(uint64_t total, uint64_t live, _Atomic uint64_t *most)
 {
 	uint64_t ended = total > live ? total - live : 0;
+	if (most == NULL) {
+		return ended;
+	}
 	uint64_t seen = atomic_load(most);
 	while (ended > seen
 			&& !atomic_compare_exchange_weak(most, &seen, ended)) {
@@ -443,7 +462,7 @@ nanoseconds_to_absolute(uint64_t nanoseconds)
 	return (uint64_t)((unsigned __int128)nanoseconds * denom / numer);
 }
 
-static kern_return_t memory_and_time_info(task_flavor_t flavor,
+static kern_return_t memory_and_time_info(pid_t pid, task_flavor_t flavor,
 		task_info_t out, mach_msg_type_number_t *count);
 
 #ifdef __x86_64__

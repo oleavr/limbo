@@ -40,6 +40,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -115,6 +116,8 @@ static void *allocate_ports(void *arg);
 static void check_task_for_pid(void);
 static void check_pid_for_task(void);
 static void check_task_names(void);
+static void check_named_task_memory(void);
+static mach_vm_size_t resident_size(mach_port_t task);
 static void check_semaphores(void);
 static void *signal_semaphore(void *arg);
 static void check_time(void);
@@ -174,6 +177,7 @@ main(void)
 	check_task_for_pid();
 	check_pid_for_task();
 	check_task_names();
+	check_named_task_memory();
 	check_semaphores();
 	check_time();
 	check_timers();
@@ -1870,6 +1874,54 @@ check_task_names(void)
 	}
 	CHECK(named == KERN_FAILURE);
 	CHECK(waitpid(child, NULL, 0) == child);
+}
+
+static void
+check_named_task_memory(void)
+{
+	const size_t touched = 64 << 20;
+	int sockets[2];
+	CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+	char byte = 0;
+	pid_t child = fork();
+	CHECK(child != -1);
+	if (child == 0) {
+		close(sockets[0]);
+		char *memory = malloc(touched);
+		CHECK(write(sockets[1], &byte, 1) == 1);
+		CHECK(read(sockets[1], &byte, 1) == 1);
+		memset(memory, 1, touched);
+		CHECK(write(sockets[1], &byte, 1) == 1);
+		CHECK(read(sockets[1], &byte, 1) == 1);
+		_exit(memory[touched - 1] - 1);
+	}
+
+	close(sockets[1]);
+	mach_port_t name;
+	CHECK(task_name_for_pid(mach_task_self(), child, &name)
+			== KERN_SUCCESS);
+	CHECK(read(sockets[0], &byte, 1) == 1);
+	mach_vm_size_t untouched = resident_size(name);
+	CHECK(write(sockets[0], &byte, 1) == 1);
+	CHECK(read(sockets[0], &byte, 1) == 1);
+	CHECK(resident_size(name) > untouched + touched / 2);
+
+	CHECK(write(sockets[0], &byte, 1) == 1);
+	int status;
+	CHECK(waitpid(child, &status, 0) == child);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	CHECK(mach_port_deallocate(mach_task_self(), name) == KERN_SUCCESS);
+	close(sockets[0]);
+}
+
+static mach_vm_size_t
+resident_size(mach_port_t task)
+{
+	mach_task_basic_info_data_t info;
+	mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+	CHECK(task_info(task, MACH_TASK_BASIC_INFO, (task_info_t)&info, &count)
+			== KERN_SUCCESS);
+	return info.resident_size;
 }
 
 static void
