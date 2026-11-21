@@ -191,7 +191,9 @@ struct proc_workqueueinfo {
 #define PROC_PIDTASKINFO    4
 
 #define PROC_PIDTHREADINFO     5
+#define PROC_PIDLISTTHREADS    6
 #define PROC_PIDTHREADID64INFO 15
+#define PROC_PIDLISTTHREADIDS  28
 
 struct proc_threadinfo {
 	uint64_t pth_user_time;
@@ -434,6 +436,19 @@ pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, user_addr_t buffer,
 		}
 		return threadinfo(arg, flavor == PROC_PIDTHREADID64INFO, buffer,
 				buffersize);
+	case PROC_PIDLISTTHREADS:
+	case PROC_PIDLISTTHREADIDS: {
+		if (buffersize < (int32_t)sizeof(uint64_t)) {
+			return _ENOMEM;
+		}
+		if (pid != getpid()) {
+			return _ESRCH;
+		}
+		size_t count = thread_guest_handles(buffer,
+				(size_t)buffersize / sizeof(uint64_t),
+				flavor == PROC_PIDLISTTHREADIDS);
+		return (int)(count * sizeof(uint64_t));
+	}
 	case PROC_PIDTASKALLINFO: {
 		struct proc_taskallinfo *info = buffer;
 		if (buffersize < (int32_t)sizeof(*info)) {
