@@ -76,6 +76,12 @@ typedef struct {
 } valued_t;
 
 typedef struct {
+	mach_msg_header_t Head;
+	mach_msg_body_t body;
+	mach_msg_port_descriptor_t port;
+} carrier_t;
+
+typedef struct {
 	uint32_t message_size;
 	mach_msg_type_name_t dest_disposition;
 	mach_msg_type_name_t reply_disposition;
@@ -101,6 +107,7 @@ static const char SERVICE_NAME[] = "com.limbo.test.ipc";
 static const char LOST_NAME[] = "com.limbo.test.ipc.lost";
 static const char *program;
 static const char PEER_NAME[] = "com.limbo.test.ipc.peer";
+static const char VICTIM_NAME[] = "com.limbo.test.ipc.victim";
 static const mach_msg_id_t CHECK_IN = 402;
 static const mach_msg_id_t LOOK_UP = 404;
 static const mach_msg_id_t REQUEST_ID = 7777;
@@ -112,6 +119,12 @@ static const mach_msg_id_t REPORT_ID = 7903;
 static const mach_msg_id_t LARGE_ID = 7904;
 static const mach_msg_id_t MARK_ID = 7905;
 static const mach_msg_id_t MARKED_ID = 7906;
+static const mach_msg_id_t FILEPORT_ID = 7907;
+
+static const char *peer_name = PEER_NAME;
+
+int fileport_makeport(int fd, mach_port_t *port);
+int fileport_makefd(mach_port_t port);
 static const char REQUEST_DATA[] = "out of line";
 
 static mach_port_t
@@ -542,10 +555,21 @@ patterned(const char *bytes, mach_msg_size_t size)
 	return (int32_t)size;
 }
 
+static int32_t
+write_through(mach_port_t fileport)
+{
+	int fd = fileport_makefd(fileport);
+	char byte = 'x';
+	ssize_t written = write(fd, &byte, sizeof(byte));
+	close(fd);
+	mach_port_deallocate(mach_task_self(), fileport);
+	return (int32_t)written;
+}
+
 static void
 serve_peer(void)
 {
-	mach_port_t service = bootstrap_call(CHECK_IN, PEER_NAME);
+	mach_port_t service = bootstrap_call(CHECK_IN, peer_name);
 	CHECK(service != MACH_PORT_NULL);
 
 	int32_t counted = 0;
@@ -554,6 +578,7 @@ serve_peer(void)
 		static union {
 			mach_msg_header_t Head;
 			valued_t valued;
+			carrier_t carrier;
 			char bytes[PEER_ROOM];
 		} message;
 		kern_return_t kr = mach_msg(&message.Head,
@@ -576,6 +601,10 @@ serve_peer(void)
 		} else if (message.Head.msgh_id == MARKED_ID) {
 			answer(&message.Head, marked);
 			marked = 0;
+		} else if (message.Head.msgh_id == FILEPORT_ID) {
+			answer(&message.Head,
+					write_through(message.carrier.port
+									.name));
 		} else if (message.Head.msgh_id == LARGE_ID) {
 			answer(&message.Head,
 					patterned(message.bytes,
@@ -905,6 +934,9 @@ check_malformed_messages(mach_port_t port)
 	raw = valid;
 	raw.message.data.size = INT32_MAX;
 	send_raw(fd, BROKER_SEND, &raw, sizeof(raw));
+	raw = valid;
+	raw.id = UINT64_MAX - 1;
+	send_raw(fd, BROKER_SEND, &raw, sizeof(raw));
 
 	send_raw(fd, BROKER_SEND, &valid, sizeof(valid));
 	CHECK(look_up_raw(fd, PEER_NAME) == valid.send.dest_global_id);
@@ -912,10 +944,58 @@ check_malformed_messages(mach_port_t port)
 	CHECK(ask_for(port, MARKED_ID) == 1);
 }
 
-static void
-check_stopped_receiver(pid_t peer, mach_port_t port)
+static mach_port_t
+fileport_of_pipe(int *read_end)
 {
-	stop(peer);
+	int ends[2];
+	CHECK(pipe(ends) == 0);
+	mach_port_t fileport;
+	CHECK(fileport_makeport(ends[1], &fileport) == 0);
+	CHECK(close(ends[1]) == 0);
+	*read_end = ends[0];
+	return fileport;
+}
+
+static carrier_t
+carrier_of(mach_port_t port, mach_msg_id_t id, mach_port_t carried)
+{
+	return (carrier_t){
+		.Head = {
+			.msgh_bits = MACH_MSGH_BITS_SET(MACH_MSG_TYPE_COPY_SEND,
+					0, 0, MACH_MSGH_BITS_COMPLEX),
+			.msgh_size = sizeof(carrier_t),
+			.msgh_remote_port = port,
+			.msgh_id = id,
+		},
+		.body = {.msgh_descriptor_count = 1},
+		.port = {
+			.name = carried,
+			.disposition = MACH_MSG_TYPE_MOVE_SEND,
+			.type = MACH_MSG_PORT_DESCRIPTOR,
+		},
+	};
+}
+
+static void
+check_fileport(mach_port_t port)
+{
+	int read_end;
+	mach_port_t fileport = fileport_of_pipe(&read_end);
+	carrier_t carrier = carrier_of(port, FILEPORT_ID, fileport);
+	CHECK(ask(&carrier.Head) == 1);
+
+	mach_port_type_t type;
+	CHECK(mach_port_type(mach_task_self(), fileport, &type)
+			== KERN_INVALID_NAME);
+	char byte = 0;
+	CHECK(read(read_end, &byte, sizeof(byte)) == 1 && byte == 'x');
+	CHECK(read(read_end, &byte, sizeof(byte)) == 0);
+	CHECK(close(read_end) == 0);
+}
+
+static void
+flood(mach_port_t port)
+{
 	static union {
 		valued_t valued;
 		char bytes[BULK_SIZE];
@@ -934,10 +1014,43 @@ check_stopped_receiver(pid_t peer, mach_port_t port)
 		};
 		send_request(&message.valued.Head);
 	}
+}
+
+static void
+check_stopped_receiver(pid_t peer, mach_port_t port)
+{
+	stop(peer);
+	flood(port);
 	CHECK(bootstrap_call(LOOK_UP, PEER_NAME) == port);
 
 	CHECK(kill(peer, SIGCONT) == 0);
 	CHECK(ask_for(port, REPORT_ID) == BULK_COUNT);
+}
+
+static void
+check_killed_receiver(void)
+{
+	peer_name = VICTIM_NAME;
+	pid_t victim = start(serve_peer);
+	pid_t guardian = guard(victim);
+	mach_port_t port = look_up(VICTIM_NAME);
+
+	stop(victim);
+	flood(port);
+	int read_end;
+	carrier_t carrier = carrier_of(
+			port, FILEPORT_ID, fileport_of_pipe(&read_end));
+	send_request(&carrier.Head);
+	CHECK(bootstrap_call(LOOK_UP, VICTIM_NAME) == port);
+	CHECK(kill(victim, SIGKILL) == 0);
+	int status = reap(victim);
+	CHECK(WIFSIGNALED(status));
+
+	char byte;
+	CHECK(read(read_end, &byte, sizeof(byte)) == 0);
+	CHECK(close(read_end) == 0);
+	kill(guardian, SIGKILL);
+	reap(guardian);
 }
 
 static void
@@ -952,12 +1065,14 @@ check_transport(void)
 	check_large_frames(port);
 	check_short_frames(port);
 	check_malformed_messages(port);
+	check_fileport(port);
 
 	send_quit(port);
 	int status = reap(peer);
 	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 	kill(guardian, SIGKILL);
 	reap(guardian);
+	check_killed_receiver();
 }
 
 int

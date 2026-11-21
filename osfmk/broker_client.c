@@ -47,12 +47,14 @@
 static void connect_to_broker(const char *path);
 static void *read_until_end(void *user);
 static void *read_frames(void *user);
-static void dispatch_frame(const struct broker_frame *header, const void *payload);
+static void dispatch_frame(const struct broker_frame *header,
+		const void *payload, const int *fds, size_t fd_count);
 static uint32_t least_length(uint32_t type);
 static void expect_reply(void);
 static struct broker_lookup_reply await_reply(void);
 static int send_frame(uint32_t type, const void *payload, uint32_t length);
-static int send_parts(uint32_t type, const struct iovec *parts, int part_count);
+static int send_parts(uint32_t type, const struct iovec *parts, int part_count,
+		const int *fds, size_t fd_count);
 static mach_msg_return_t send_result(int error);
 
 static int broker_fd = -1;
@@ -132,11 +134,9 @@ broker_client_look_up(const char *name, uint64_t *global_id)
 }
 
 mach_msg_return_t
-broker_client_send(uint64_t dest_global_id, const void *blob, uint32_t length)
+broker_client_send(uint64_t dest_global_id, const void *blob, uint32_t length,
+		const int *fds, size_t fd_count)
 {
-	if (length > BROKER_FRAME_MAX - sizeof(struct broker_send)) {
-		return MACH_SEND_TOO_LARGE;
-	}
 
 	struct broker_send send = {
 			.dest_global_id = dest_global_id,
@@ -147,7 +147,7 @@ broker_client_send(uint64_t dest_global_id, const void *blob, uint32_t length)
 			{.iov_base = (void *)blob, .iov_len = length},
 	};
 	pthread_mutex_lock(&call_lock);
-	int error = send_parts(BROKER_SEND, parts, 2);
+	int error = send_parts(BROKER_SEND, parts, 2, fds, fd_count);
 	pthread_mutex_unlock(&call_lock);
 	return send_result(error);
 }
@@ -164,7 +164,7 @@ connect_to_broker(const char *path)
 	pthread_create(&thread, NULL, read_until_end, NULL);
 
 	expect_reply();
-	send_parts(BROKER_HELLO, NULL, 0);
+	send_parts(BROKER_HELLO, NULL, 0, NULL, 0);
 	await_reply();
 	guest_id = pending_welcome.guest_id;
 }
@@ -202,16 +202,19 @@ read_frames(void *user)
 		};
 		char loaded[BROKER_FRAME_MAX];
 		if (!(frame->type & BROKER_FRAME_OOL)) {
-			dispatch_frame(&header, frame->payload);
+			dispatch_frame(&header, frame->payload, frame->fds,
+					frame->fd_count);
 		} else if (broker_wire_read(frame, 0, loaded, frame->length)) {
-			dispatch_frame(&header, loaded);
+			dispatch_frame(&header, loaded, frame->fds,
+					frame->fd_count - 1);
 		}
 		broker_wire_free(frame);
 	}
 }
 
 static void
-dispatch_frame(const struct broker_frame *header, const void *payload)
+dispatch_frame(const struct broker_frame *header, const void *payload,
+		const int *fds, size_t fd_count)
 {
 	if (header->length < least_length(header->type)) {
 		return;
@@ -236,7 +239,7 @@ dispatch_frame(const struct broker_frame *header, const void *payload)
 		const struct broker_send *send = (const struct broker_send *)payload;
 		if (send->blob_length <= header->length - sizeof(*send)) {
 			ipc_remote_deliver(send->dest_global_id, send + 1,
-					send->blob_length);
+					send->blob_length, fds, fd_count);
 		}
 		break;
 	}
@@ -283,14 +286,15 @@ static int
 send_frame(uint32_t type, const void *payload, uint32_t length)
 {
 	struct iovec part = {.iov_base = (void *)payload, .iov_len = length};
-	return send_parts(type, &part, 1);
+	return send_parts(type, &part, 1, NULL, 0);
 }
 
 static int
-send_parts(uint32_t type, const struct iovec *parts, int part_count)
+send_parts(uint32_t type, const struct iovec *parts, int part_count,
+		const int *fds, size_t fd_count)
 {
-	struct broker_wire_frame *frame
-			= broker_wire_new(type, parts, part_count);
+	struct broker_wire_frame *frame = broker_wire_new(
+			type, parts, part_count, fds, fd_count);
 	if (frame == NULL) {
 		return errno;
 	}

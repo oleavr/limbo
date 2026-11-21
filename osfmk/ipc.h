@@ -98,7 +98,7 @@ mach_msg_return_t ipc_kernel_send(mach_msg_header_t *msg);
 mach_msg_return_t ipc_launchd_send(mach_msg_header_t *msg);
 
 void ipc_remote_deliver(uint64_t dest_global_id, const void *blob,
-		uint32_t length);
+		uint32_t length, const int *fds, size_t fd_count);
 mach_port_name_t ipc_service_check_in(const char *name);
 mach_port_name_t ipc_service_look_up(const char *name);
 mach_port_name_t ipc_libinfo_self(void);

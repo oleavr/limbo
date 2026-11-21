@@ -39,5 +39,5 @@ bool broker_client_available(void);
 uint32_t broker_client_guest_id(void);
 void broker_client_register(const char *name, uint64_t global_id);
 bool broker_client_look_up(const char *name, uint64_t *global_id);
-mach_msg_return_t broker_client_send(
-		uint64_t dest_global_id, const void *blob, uint32_t length);
+mach_msg_return_t broker_client_send(uint64_t dest_global_id, const void *blob,
+		uint32_t length, const int *fds, size_t fd_count);
