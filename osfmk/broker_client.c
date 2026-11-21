@@ -237,6 +237,11 @@ dispatch_frame(const struct broker_frame *header, const void *payload,
 		pthread_cond_signal(&reply_ready);
 		pthread_mutex_unlock(&reply_lock);
 		break;
+	case BROKER_GUEST_GONE:
+		ipc_remote_guest_gone(
+				((const struct broker_guest_gone *)payload)
+						->guest_id);
+		break;
 	case BROKER_DELIVER: {
 		const struct broker_send *send = (const struct broker_send *)payload;
 		if (send->blob_length <= header->length - sizeof(*send)) {
@@ -258,6 +263,8 @@ least_length(uint32_t type)
 		return sizeof(struct broker_lookup_reply);
 	case BROKER_DELIVER:
 		return sizeof(struct broker_send);
+	case BROKER_GUEST_GONE:
+		return sizeof(struct broker_guest_gone);
 	default:
 		return 0;
 	}
