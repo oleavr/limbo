@@ -139,6 +139,7 @@ static void check_exception_ports(void);
 static void check_vouchers(void);
 static void check_destroy(void);
 static void check_tasks(void);
+static void check_host_statistics(void);
 static void check_thread_exception_ports(void);
 static handlers_t thread_handlers(mach_port_t thread, exception_mask_t mask);
 static mach_port_urefs_t send_refs(mach_port_t port);
@@ -177,6 +178,7 @@ main(void)
 	check_task_for_pid();
 	check_pid_for_task();
 	check_task_names();
+	check_host_statistics();
 	check_named_task_memory();
 	check_semaphores();
 	check_time();
@@ -2414,4 +2416,31 @@ handle_own_exceptions(void *arg)
 			      MACHINE_THREAD_STATE)
 			== KERN_SUCCESS);
 	return NULL;
+}
+
+static void
+check_host_statistics(void)
+{
+	enum { GUARD = 0x5a5a5a5a };
+	integer_t info[HOST_VM_INFO_COUNT + 1];
+	mach_msg_type_number_t counts[][2] = {
+			{HOST_VM_INFO_COUNT + 1, HOST_VM_INFO_COUNT},
+			{HOST_VM_INFO_REV1_COUNT, HOST_VM_INFO_REV1_COUNT},
+			{HOST_VM_INFO_REV0_COUNT + 1, HOST_VM_INFO_REV0_COUNT},
+			{HOST_VM_INFO_REV0_COUNT, HOST_VM_INFO_REV0_COUNT},
+	};
+	for (size_t i = 0; i < sizeof(counts) / sizeof(counts[0]); i++) {
+		for (size_t j = 0; j <= HOST_VM_INFO_COUNT; j++) {
+			info[j] = GUARD;
+		}
+		mach_msg_type_number_t count = counts[i][0];
+		CHECK(host_statistics(mach_host_self(), HOST_VM_INFO, info,
+				      &count)
+				== KERN_SUCCESS);
+		CHECK(count == counts[i][1]);
+		CHECK(info[count] == GUARD);
+	}
+	mach_msg_type_number_t count = HOST_VM_INFO_REV0_COUNT - 1;
+	CHECK(host_statistics(mach_host_self(), HOST_VM_INFO, info, &count)
+			== KERN_FAILURE);
 }
