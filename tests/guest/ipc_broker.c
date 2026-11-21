@@ -29,6 +29,7 @@
 
 #include <mach/mach.h>
 #include <mach/ndr.h>
+#include <pthread.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -242,6 +243,56 @@ send_dead_names(mach_port_t service)
 	send_request(&request.Head);
 }
 
+static void *
+receive_nothing(void *arg)
+{
+	struct {
+		mach_msg_header_t Head;
+		mach_msg_trailer_t trailer;
+	} message;
+	return (void *)(uintptr_t)mach_msg(&message.Head,
+			MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(message),
+			(mach_port_t)(uintptr_t)arg, 3000, MACH_PORT_NULL);
+}
+
+static void
+move_receive_right_away(mach_port_t service)
+{
+	void *result = (void *)(uintptr_t)MACH_RCV_INVALID_NAME;
+	while ((uintptr_t)result == MACH_RCV_INVALID_NAME) {
+		mach_port_t moved;
+		mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+				&moved);
+		pthread_t receiver;
+		CHECK(pthread_create(&receiver, NULL, receive_nothing,
+				      (void *)(uintptr_t)moved)
+				== 0);
+		usleep(100000);
+		struct {
+			mach_msg_header_t Head;
+			mach_msg_body_t body;
+			mach_msg_port_descriptor_t port;
+		} carrier = {
+			.Head = {
+				.msgh_bits = MACH_MSGH_BITS_SET(
+						MACH_MSG_TYPE_COPY_SEND, 0, 0,
+						MACH_MSGH_BITS_COMPLEX),
+				.msgh_size = sizeof(carrier),
+				.msgh_remote_port = service,
+			},
+			.body = {.msgh_descriptor_count = 1},
+			.port = {
+				.name = moved,
+				.disposition = MACH_MSG_TYPE_MOVE_RECEIVE,
+				.type = MACH_MSG_PORT_DESCRIPTOR,
+			},
+		};
+		send_request(&carrier.Head);
+		CHECK(pthread_join(receiver, &result) == 0);
+	}
+	CHECK((uintptr_t)result == MACH_RCV_PORT_CHANGED);
+}
+
 static void
 call(void)
 {
@@ -360,6 +411,8 @@ call(void)
 	kr = vm_allocate(
 			mach_task_self(), &given, vm_page_size, VM_FLAGS_FIXED);
 	CHECK(kr == KERN_SUCCESS);
+
+	move_receive_right_away(service);
 }
 
 int

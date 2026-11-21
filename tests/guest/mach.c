@@ -554,6 +554,8 @@ check_receive_on_destroyed(void)
 {
 	CHECK(receive_on_destroyed(MACH_PORT_RIGHT_RECEIVE)
 			== MACH_RCV_PORT_CHANGED);
+	CHECK(receive_on_destroyed(MACH_PORT_RIGHT_PORT_SET)
+			== MACH_RCV_PORT_CHANGED);
 }
 
 static mach_msg_return_t
