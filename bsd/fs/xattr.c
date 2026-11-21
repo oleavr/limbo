@@ -34,6 +34,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,6 +43,7 @@
 
 #include "bsd/xnu-errno.h"
 #include "bsd_flags.h"
+#include "protection.h"
 #include "purgeable.h"
 #include "sysroot.h"
 #include "trace.h"
@@ -55,6 +57,7 @@ typedef ssize_t user_ssize_t;
 
 static const char *host_path(const char *path, int options, char *buffer);
 static const char *host_name(const char *name, char *buffer);
+static bool is_record(const char *host_name);
 static user_ssize_t xattr_result(ssize_t result);
 static user_ssize_t list_result(ssize_t result, const char *names,
 		char *namebuf, size_t bufsize);
@@ -66,6 +69,9 @@ sys_getxattr(user_addr_t path, user_addr_t attrname, user_addr_t value,
 	char path_buffer[PATH_MAX], name[XATTR_NAME_MAX + 1];
 	const char *p = host_path(path, options, path_buffer);
 	const char *n = host_name(attrname, name);
+	if (is_record(n)) {
+		return _ENOATTR;
+	}
 	return xattr_result((options & _XATTR_NOFOLLOW)
 					? lgetxattr(p, n, value, size)
 					: getxattr(p, n, value, size));
@@ -76,8 +82,11 @@ sys_fgetxattr(int fd, user_addr_t attrname, user_addr_t value, size_t size,
 		uint32_t position, int options)
 {
 	char name[XATTR_NAME_MAX + 1];
-	return xattr_result(
-			fgetxattr(fd, host_name(attrname, name), value, size));
+	const char *n = host_name(attrname, name);
+	if (is_record(n)) {
+		return _ENOATTR;
+	}
+	return xattr_result(fgetxattr(fd, n, value, size));
 }
 
 int
@@ -87,6 +96,9 @@ sys_setxattr(user_addr_t path, user_addr_t attrname, user_addr_t value,
 	char path_buffer[PATH_MAX], name[XATTR_NAME_MAX + 1];
 	const char *p = host_path(path, options, path_buffer);
 	const char *n = host_name(attrname, name);
+	if (is_record(n)) {
+		return _EPERM;
+	}
 	return xattr_result((options & _XATTR_NOFOLLOW)
 					? lsetxattr(p, n, value, size, 0)
 					: setxattr(p, n, value, size, 0));
@@ -97,8 +109,11 @@ sys_fsetxattr(int fd, user_addr_t attrname, user_addr_t value, size_t size,
 		uint32_t position, int options)
 {
 	char name[XATTR_NAME_MAX + 1];
-	return xattr_result(fsetxattr(
-			fd, host_name(attrname, name), value, size, 0));
+	const char *n = host_name(attrname, name);
+	if (is_record(n)) {
+		return _EPERM;
+	}
+	return xattr_result(fsetxattr(fd, n, value, size, 0));
 }
 
 int
@@ -107,6 +122,9 @@ sys_removexattr(user_addr_t path, user_addr_t attrname, int options)
 	char path_buffer[PATH_MAX], name[XATTR_NAME_MAX + 1];
 	const char *p = host_path(path, options, path_buffer);
 	const char *n = host_name(attrname, name);
+	if (is_record(n)) {
+		return _EPERM;
+	}
 	return xattr_result((options & _XATTR_NOFOLLOW) ? lremovexattr(p, n)
 							: removexattr(p, n));
 }
@@ -115,7 +133,11 @@ int
 sys_fremovexattr(int fd, user_addr_t attrname, int options)
 {
 	char name[XATTR_NAME_MAX + 1];
-	return xattr_result(fremovexattr(fd, host_name(attrname, name)));
+	const char *n = host_name(attrname, name);
+	if (is_record(n)) {
+		return _EPERM;
+	}
+	return xattr_result(fremovexattr(fd, n));
 }
 
 user_ssize_t
@@ -159,6 +181,12 @@ host_name(const char *name, char *buffer)
 	return buffer;
 }
 
+static bool
+is_record(const char *host_name)
+{
+	return strcmp(host_name, PROTECTION_XATTR) == 0;
+}
+
 static user_ssize_t
 xattr_result(ssize_t result)
 {
@@ -181,6 +209,7 @@ list_result(ssize_t result, const char *names, char *namebuf, size_t bufsize)
 			name += strlen(name) + 1) {
 		if (strncmp(name, LINUX_NAMESPACE, prefix_length) != 0
 				|| strcmp(name, BSD_FLAGS_XATTR) == 0
+				|| strcmp(name, PROTECTION_XATTR) == 0
 				|| strcmp(name, PURGEABLE_XATTR) == 0) {
 			continue;
 		}
