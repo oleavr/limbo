@@ -27,6 +27,7 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <sys/types.h>
 
@@ -41,7 +42,8 @@
 int acl_from_filesec(const void *xsecurity, struct acl_list *list);
 int acl_set_at(int dirfd, const char *host_path, int at_flags,
 		const struct acl_list *list);
-int acl_openat(int dirfd, const char *host_path, int flags, mode_t mode);
+int acl_openat(int dirfd, const char *host_path, int flags, mode_t mode,
+		const struct acl_list *initial, bool *created);
 int acl_mkdirat(int dirfd, const char *host_path, mode_t mode);
 size_t acl_filesec_at(int dirfd, const char *host_path, int at_flags,
 		void *buffer, size_t size);

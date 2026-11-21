@@ -60,7 +60,8 @@ static void parent_path(
 		int dirfd, const char *host_path, char *buffer, size_t size);
 static int open_or_make(int dirfd, const char *host_path, int flags,
 		mode_t mode, bool *made);
-static void inherit(int fd, const struct acl_list *parent);
+static int inherit(int fd, const struct acl_list *parent,
+		const struct acl_list *initial);
 static int open_reaching(
 		int dirfd, const char *host_path, int flags, mode_t mode);
 
@@ -143,16 +144,29 @@ may_set(const struct stat *s)
 }
 
 int
-acl_openat(int dirfd, const char *host_path, int flags, mode_t mode)
+acl_openat(int dirfd, const char *host_path, int flags, mode_t mode,
+		const struct acl_list *initial, bool *created)
 {
+	bool unasked;
+	bool *made = created != NULL ? created : &unasked;
+	*made = false;
+	if (!(flags & O_CREAT)) {
+		return openat(dirfd, host_path, flags, mode);
+	}
 	struct acl_list parent;
-	if (!(flags & O_CREAT) || !parent_gives(dirfd, host_path, &parent)) {
+	bool gives = parent_gives(dirfd, host_path, &parent);
+	if (!gives && initial == NULL && created == NULL) {
 		return open_reaching(dirfd, host_path, flags, mode);
 	}
-	bool made;
-	int fd = open_or_make(dirfd, host_path, flags, mode, &made);
-	if (made) {
-		inherit(fd, &parent);
+	int fd = open_or_make(dirfd, host_path, flags, mode, made);
+	if (*made && (gives || initial != NULL)
+			&& inherit(fd, &parent, initial) == -1
+			&& initial != NULL) {
+		int error = errno;
+		unlinkat(dirfd, host_path, 0);
+		close(fd);
+		errno = error;
+		return -1;
 	}
 	return fd;
 }
@@ -223,19 +237,18 @@ open_reaching(int dirfd, const char *host_path, int flags, mode_t mode)
 	return fd;
 }
 
-static void
-inherit(int fd, const struct acl_list *parent)
+static int
+inherit(int fd, const struct acl_list *parent, const struct acl_list *initial)
 {
 	char path[48];
 	object_path(fd, path, sizeof(path));
 	struct stat s;
 	fstat(fd, &s);
 	struct acl_list list;
-	if (!S_ISLNK(s.st_mode)
-			&& acl_inherit(parent, NULL, S_ISDIR(s.st_mode),
-					&list)) {
-		acl_store(path, &list);
-	}
+	bool stores = !S_ISLNK(s.st_mode)
+			&& acl_inherit(parent, initial, S_ISDIR(s.st_mode),
+					&list);
+	return stores ? acl_store(path, &list) : 0;
 }
 
 int
@@ -250,7 +263,7 @@ acl_mkdirat(int dirfd, const char *host_path, mode_t mode)
 					 O_PATH | O_NOFOLLOW | O_CLOEXEC)
 		       : -1;
 	if (fd != -1) {
-		inherit(fd, &parent);
+		inherit(fd, &parent, NULL);
 		close(fd);
 	}
 	return 0;
