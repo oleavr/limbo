@@ -72,6 +72,7 @@ typedef struct {
 } handlers_t;
 
 static semaphore_t semaphore;
+static pthread_mutex_t gate = PTHREAD_MUTEX_INITIALIZER;
 static atomic_bool forked;
 
 static void check_space_info(void);
@@ -96,6 +97,8 @@ static mach_port_rights_t send_once_rights(mach_port_t port);
 static void check_request_rights(void);
 static void check_send_possible_on_dead_name(void);
 static void check_send_possible(void);
+static void check_dead_thread_name(void);
+static void *pass_gate(void *arg);
 static void check_make_send_count(void);
 static mach_port_mscount_t make_send_count(mach_port_t port);
 static void check_reference_deltas(void);
@@ -151,6 +154,7 @@ main(void)
 	check_request_rights();
 	check_send_possible_on_dead_name();
 	check_send_possible();
+	check_dead_thread_name();
 	check_make_send_count();
 	check_reference_deltas();
 	check_fork_during_port_calls();
@@ -1351,6 +1355,53 @@ check_send_possible(void)
 	CHECK(mach_port_deallocate(task, port) == KERN_SUCCESS);
 	CHECK(mach_port_mod_refs(task, notify, MACH_PORT_RIGHT_RECEIVE, -1)
 			== KERN_SUCCESS);
+}
+
+static void
+check_dead_thread_name(void)
+{
+	mach_port_t task = mach_task_self();
+	CHECK(pthread_mutex_lock(&gate) == 0);
+	pthread_t thread;
+	CHECK(pthread_create(&thread, NULL, pass_gate, NULL) == 0);
+	mach_port_t port = pthread_mach_thread_np(thread);
+	CHECK(mach_port_mod_refs(task, port, MACH_PORT_RIGHT_SEND, 1)
+			== KERN_SUCCESS);
+	mach_port_t notify = allocate_port();
+	mach_port_t previous = MACH_PORT_NULL;
+	CHECK(mach_port_request_notification(task, port, MACH_NOTIFY_DEAD_NAME,
+			      0, notify, MACH_MSG_TYPE_MAKE_SEND_ONCE,
+			      &previous)
+			== KERN_SUCCESS);
+	CHECK(pthread_mutex_unlock(&gate) == 0);
+	CHECK(pthread_join(thread, NULL) == 0);
+
+	struct {
+		mach_dead_name_notification_t notification;
+		mach_msg_trailer_t trailer;
+	} message;
+	CHECK(mach_msg(&message.notification.not_header,
+			      MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof(message), notify, 1000, MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	CHECK(message.notification.not_header.msgh_id == MACH_NOTIFY_DEAD_NAME);
+	CHECK(message.notification.not_port == port);
+	mach_port_type_t type;
+	CHECK(mach_port_type(task, port, &type) == KERN_SUCCESS);
+	CHECK(type == MACH_PORT_TYPE_DEAD_NAME);
+
+	CHECK(mach_port_deallocate(task, port) == KERN_SUCCESS);
+	CHECK(mach_port_deallocate(task, port) == KERN_SUCCESS);
+	CHECK(mach_port_mod_refs(task, notify, MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+}
+
+static void *
+pass_gate(void *arg)
+{
+	CHECK(pthread_mutex_lock(&gate) == 0);
+	CHECK(pthread_mutex_unlock(&gate) == 0);
+	return NULL;
 }
 
 static void
