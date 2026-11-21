@@ -102,7 +102,6 @@ static uint64_t sign_pointer(uint64_t value, void *location, bool address_div,
 static void pac_key_fingerprint(uint64_t fingerprint[2]);
 static bool prepared_cache_matches_key(const dyld_cache_header_t *header);
 static int write_pac_fingerprint(const char *directory_host);
-static void patch_thread_self_reads(uint64_t address, uint64_t size);
 #endif
 static uint64_t trampolines_offset(const dyld_cache_header_t *header);
 static int prepare_subcache(const char *source, const char *destination,
@@ -745,7 +744,7 @@ pac_key_fingerprint(uint64_t fingerprint[2])
 #define MRS_REGISTER    0x0000001f
 #define MOVZ_IMM0       0xd2800000
 
-static void
+void
 patch_thread_self_reads(uint64_t address, uint64_t size)
 {
 	uint32_t *code = (uint32_t *)address;
