@@ -26,13 +26,20 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <mach-o/dyld.h>
+#include <spawn.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include "check.h"
 
+extern char **environ;
 pid_t responsibility_get_pid_responsible_for_pid(pid_t pid);
 int __mac_syscall(const char *policy, int call, void *arg);
 int proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int size);
@@ -67,25 +74,53 @@ struct proc_bsdshortinfo {
 	uint32_t pbsi_rfu;
 };
 
+static int run_child(char *argv[]);
 static void check_answered(void);
 static void check_missing(void);
 static void check_faults(void);
 static void check_another_user(void);
 static int ask_as_another(void);
+static void check_forked(void);
+static int inherits(void);
+static void check_spawned(void);
+static void check_held(char **envp);
+static pid_t spawn_self(const char *mode, int number, char **envp);
 static int exit_status_of(pid_t child);
 static int exit_status_of_fork(int (*body)(void));
 
+static char self[PATH_MAX];
 static pid_t responsible;
 
 int
-main(void)
+main(int argc, char *argv[])
 {
 	alarm(DEADLINE);
+	uint32_t size = sizeof(self);
+	CHECK(_NSGetExecutablePath(self, &size) == 0);
+	if (argc > 1) {
+		return run_child(argv);
+	}
+
 	check_answered();
 	check_missing();
 	check_faults();
 	check_another_user();
+	check_forked();
+	check_spawned();
 	return 0;
+}
+
+static int
+run_child(char *argv[])
+{
+	int number = atoi(argv[2]);
+	if (strcmp(argv[1], "held") == 0) {
+		char byte;
+		return read(number, &byte, 1) == 1 ? 0 : 1;
+	}
+	return responsibility_get_pid_responsible_for_pid(getpid()) == number
+			? 0
+			: 1;
 }
 
 static void
@@ -190,6 +225,65 @@ ask_as_another(void)
 					&& errno == EPERM
 			? 0
 			: 1;
+}
+
+static void
+check_forked(void)
+{
+	int held[2];
+	CHECK(pipe(held) == 0);
+	pid_t child = fork();
+	CHECK(child != -1);
+	if (child == 0) {
+		char byte;
+		close(held[1]);
+		_exit(read(held[0], &byte, 1) == 0 ? inherits() : 1);
+	}
+	CHECK(responsibility_get_pid_responsible_for_pid(child) == responsible);
+	close(held[1]);
+	close(held[0]);
+	CHECK(exit_status_of(child) == 0);
+}
+
+static int
+inherits(void)
+{
+	return responsibility_get_pid_responsible_for_pid(getpid())
+					== responsible
+			? 0
+			: 1;
+}
+
+static void
+check_spawned(void)
+{
+	CHECK(exit_status_of(spawn_self("is", responsible, environ)) == 0);
+	check_held(environ);
+}
+
+static void
+check_held(char **envp)
+{
+	int held[2];
+	CHECK(pipe(held) == 0);
+	CHECK(fcntl(held[1], F_SETFD, FD_CLOEXEC) == 0);
+	pid_t child = spawn_self("held", held[0], envp);
+	CHECK(responsibility_get_pid_responsible_for_pid(child) == responsible);
+	CHECK(write(held[1], "", 1) == 1);
+	CHECK(exit_status_of(child) == 0);
+	close(held[0]);
+	close(held[1]);
+}
+
+static pid_t
+spawn_self(const char *mode, int number, char **envp)
+{
+	char text[16];
+	snprintf(text, sizeof(text), "%d", number);
+	char *argv[] = {self, (char *)mode, text, NULL};
+	pid_t child;
+	CHECK(posix_spawn(&child, self, NULL, NULL, argv, envp) == 0);
+	return child;
 }
 
 static int
