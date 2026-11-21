@@ -311,9 +311,17 @@ sys_open(user_addr_t path, int flags, int mode)
 		return fsevents_open(flags & _O_CLOEXEC);
 	}
 	char buffer[PATH_MAX];
-	return errno_map(open(
-			sysroot_host_path(path, open_follow(flags), buffer),
+	return errno_map(open(open_path(AT_FDCWD, path, flags, buffer),
 			open_flags(flags), mode));
+}
+
+const char *
+open_path(int dirfd, const char *path, int flags, char *buffer)
+{
+	int follow = open_follow(flags);
+	return (flags & _O_CREAT)
+			? sysroot_creation_path(dirfd, path, follow, buffer)
+			: sysroot_host_path(path, follow, buffer);
 }
 
 static int
@@ -2489,8 +2497,7 @@ sys_open_dprotected_np(
 		user_addr_t path, int flags, int class, int dpflags, int mode)
 {
 	char buffer[PATH_MAX];
-	return errno_map(open(
-			sysroot_host_path(path, open_follow(flags), buffer),
+	return errno_map(open(open_path(AT_FDCWD, path, flags, buffer),
 			open_flags(flags), mode));
 }
 
@@ -3772,7 +3779,7 @@ sys_openat(int fd, user_addr_t path, int flags, int mode)
 	}
 	char buffer[PATH_MAX];
 	return errno_map(openat(at_fd(fd),
-			sysroot_host_path(path, open_follow(flags), buffer),
+			open_path(at_fd(fd), path, flags, buffer),
 			open_flags(flags), mode));
 }
 

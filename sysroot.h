@@ -1,5 +1,6 @@
 /*
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -33,5 +34,7 @@
 
 int sysroot_open(void);
 const char *sysroot_host_path(const char *path, int flags, char *buffer);
+const char *sysroot_creation_path(
+		int dirfd, const char *path, int flags, char *buffer);
 const char *sysroot_guest_path(const char *path);
 uint64_t sysroot_file_id(dev_t dev, uint64_t ino);
