@@ -29,6 +29,7 @@
 #pragma once
 
 #include <limits.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <sys/types.h>
 
@@ -39,3 +40,7 @@ const char *sysroot_creation_path(
 const char *sysroot_guest_path(const char *path);
 uint64_t sysroot_file_id(dev_t dev, uint64_t ino);
 dev_t sysroot_device(dev_t dev);
+dev_t sysroot_root_device(void);
+bool sysroot_fd_on_data_volume(int fd);
+bool sysroot_at_on_data_volume(
+		int dirfd, const char *path, const char *host_path);

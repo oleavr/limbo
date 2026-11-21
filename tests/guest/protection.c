@@ -333,8 +333,8 @@ check_copy(void)
 	CHECK(copyfile("source", "copy", NULL,
 			      COPYFILE_ALL | COPYFILE_RECURSIVE)
 			== 0);
-	struct stat s;
-	CHECK(stat("copy/file", &s) == 0);
+	CHECK(class_of("copy") == CLASS_A);
+	CHECK(class_of("copy/file") == CLASS_B);
 	CHECK(unlink("copy/file") == 0);
 	CHECK(rmdir("copy") == 0);
 	CHECK(unlink("source/file") == 0);

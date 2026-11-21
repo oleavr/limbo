@@ -25,18 +25,28 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <fcntl.h>
+#include <string.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "check.h"
 
 #define DATA_VOLUME "/System/Volumes/Data"
 
+#ifndef MNT_EXT_ROOT_DATA_VOL
+#define MNT_EXT_ROOT_DATA_VOL 0x00000001
+#endif
+
 static void check_paths(void);
+static void check_statfs(void);
 
 int
 main(void)
 {
 	check_paths();
+	check_statfs();
 	return 0;
 }
 
@@ -51,4 +61,49 @@ check_paths(void)
 	CHECK(stat(DATA_VOLUME, &through) == 0);
 	CHECK(S_ISDIR(through.st_mode));
 	CHECK(stat(DATA_VOLUME "X", &through) == -1);
+}
+
+static void
+check_statfs(void)
+{
+	struct statfs system, data, named, relative, open_data, open_system;
+	struct stat root;
+	CHECK(statfs("/", &system) == 0);
+	CHECK(statfs("/private/tmp", &data) == 0);
+	CHECK(statfs(DATA_VOLUME, &named) == 0);
+	CHECK(stat("/", &root) == 0);
+
+	CHECK(strcmp(system.f_mntonname, "/") == 0);
+	CHECK(strcmp(data.f_mntonname, DATA_VOLUME) == 0);
+	CHECK(strcmp(named.f_mntonname, DATA_VOLUME) == 0);
+	CHECK(strcmp(system.f_mntfromname, data.f_mntfromname) != 0);
+	CHECK(strcmp(named.f_mntfromname, data.f_mntfromname) == 0);
+	CHECK(data.f_fsid.val[0] == root.st_dev);
+	CHECK(system.f_fsid.val[0] != root.st_dev);
+	CHECK(system.f_flags & MNT_ROOTFS);
+	CHECK(!(data.f_flags & MNT_ROOTFS));
+	CHECK(data.f_flags & MNT_LOCAL);
+	CHECK(data.f_flags & MNT_DONTBROWSE);
+	CHECK(data.f_flags_ext & MNT_EXT_ROOT_DATA_VOL);
+	CHECK(!(system.f_flags_ext & MNT_EXT_ROOT_DATA_VOL));
+	struct statfs devices;
+	struct stat dev;
+	CHECK(statfs("/dev", &devices) == 0);
+	CHECK(stat("/dev", &dev) == 0);
+	CHECK(devices.f_fsid.val[0] == dev.st_dev);
+
+	int fd = open("/private/tmp", O_RDONLY);
+	CHECK(fd != -1);
+	CHECK(fstatfs(fd, &open_data) == 0);
+	CHECK(strcmp(open_data.f_mntonname, DATA_VOLUME) == 0);
+	CHECK(fchdir(fd) == 0);
+	CHECK(statfs(".", &relative) == 0);
+	CHECK(strcmp(relative.f_mntonname, DATA_VOLUME) == 0);
+	CHECK(chdir("/") == 0);
+	CHECK(close(fd) == 0);
+	fd = open("/usr", O_RDONLY);
+	CHECK(fd != -1);
+	CHECK(fstatfs(fd, &open_system) == 0);
+	CHECK(strcmp(open_system.f_mntonname, "/") == 0);
+	CHECK(close(fd) == 0);
 }
