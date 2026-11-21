@@ -32,7 +32,8 @@ mkdir -p "$small/System/Library/CoreServices" \
 	"$small/System/Library/PrivateFrameworks" "$small/bin" "$small/usr/bin" \
 	"$small/usr/lib" "$small/usr/share" "$small/private/etc" \
 	"$small/private/var/db" "$small/private/var/select" \
-	"$small/private/var/run" "$small/private/tmp" "$small/Library/Preferences"
+	"$small/private/var/run" "$small/private/var/tmp" "$small/private/tmp" \
+	"$small/Library/Preferences"
 cp /System/Library/CoreServices/SystemVersion.plist \
 	"$small/System/Library/CoreServices/"
 cp -RP /System/Library/PrivateFrameworks/AppleSystemInfo.framework \
@@ -52,7 +53,7 @@ ln -s /Applications/Xcode.app/Contents/Developer \
 ln -s private/etc "$small/etc"
 ln -s private/var "$small/var"
 ln -s private/tmp "$small/tmp"
-chmod 1777 "$small/private/tmp"
+chmod 1777 "$small/private/tmp" "$small/private/var/tmp"
 (cd "$small" && tar -c --no-acls --no-fflags --no-xattrs -f "$work/small.tar" .)
 
 large=$work/large
