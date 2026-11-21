@@ -40,6 +40,7 @@ guest_tests = [
   'malloc.c',
   'paths.c',
   'persona.c',
+  'protection.c',
   'purgeable.c',
   'restartable.c',
   'route.c',
