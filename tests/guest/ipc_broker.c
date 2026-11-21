@@ -32,9 +32,12 @@
 #include <pthread.h>
 #include <signal.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "../../broker.h"
 #include "check.h"
 
 #define PORT_COUNT   32
@@ -686,6 +689,46 @@ check_large_frames(mach_port_t port)
 	}
 }
 
+static int
+connect_raw(void)
+{
+	const char *path = getenv(LIMBO_BROKER_SOCKET_ENV);
+	CHECK(path != NULL);
+	const char *name = strrchr(path, '/');
+	struct sockaddr_un address = {.sun_family = AF_UNIX};
+	strncpy(address.sun_path, name != NULL ? name + 1 : path,
+			sizeof(address.sun_path) - 1);
+	int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+	CHECK(fd != -1);
+	CHECK(connect(fd, (struct sockaddr *)&address, sizeof(address)) == 0);
+	return fd;
+}
+
+static void
+send_raw(int fd, uint32_t type, const void *payload, uint32_t length)
+{
+	struct broker_frame header = {.type = type, .length = length};
+	struct iovec parts[2] = {
+			{.iov_base = &header, .iov_len = sizeof(header)},
+			{.iov_base = (void *)payload, .iov_len = length},
+	};
+	struct msghdr message = {.msg_iov = parts, .msg_iovlen = 2};
+	CHECK(sendmsg(fd, &message, 0) == (ssize_t)(sizeof(header) + length));
+}
+
+static void
+check_short_frames(mach_port_t port)
+{
+	int fd = connect_raw();
+	uint32_t word = 0;
+	send_raw(fd, BROKER_REGISTER, &word, sizeof(word));
+	send_raw(fd, BROKER_LOOKUP, &word, sizeof(word));
+	send_raw(fd, BROKER_SEND, &word, sizeof(word));
+	send_raw(fd, BROKER_SEND | BROKER_FRAME_OOL, &word, 0);
+	close(fd);
+	CHECK(bootstrap_call(LOOK_UP, PEER_NAME) == port);
+}
+
 static void
 check_stopped_receiver(pid_t peer, mach_port_t port)
 {
@@ -724,6 +767,7 @@ check_transport(void)
 	check_oversized(port);
 	check_stopped_receiver(peer, port);
 	check_large_frames(port);
+	check_short_frames(port);
 
 	send_quit(port);
 	int status = reap(peer);

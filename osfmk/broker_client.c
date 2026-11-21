@@ -47,6 +47,7 @@
 static void connect_to_broker(const char *path);
 static void *read_frames(void *user);
 static void dispatch_frame(const struct broker_frame *header, const void *payload);
+static uint32_t least_length(uint32_t type);
 static void expect_reply(void);
 static struct broker_lookup_reply await_reply(void);
 static int send_frame(uint32_t type, const void *payload, uint32_t length);
@@ -193,6 +194,10 @@ read_frames(void *user)
 static void
 dispatch_frame(const struct broker_frame *header, const void *payload)
 {
+	if (header->length < least_length(header->type)) {
+		return;
+	}
+
 	switch (header->type) {
 	case BROKER_WELCOME:
 		pthread_mutex_lock(&reply_lock);
@@ -210,10 +215,27 @@ dispatch_frame(const struct broker_frame *header, const void *payload)
 		break;
 	case BROKER_DELIVER: {
 		const struct broker_send *send = (const struct broker_send *)payload;
-		ipc_remote_deliver(send->dest_global_id, send + 1,
-				send->blob_length);
+		if (send->blob_length <= header->length - sizeof(*send)) {
+			ipc_remote_deliver(send->dest_global_id, send + 1,
+					send->blob_length);
+		}
 		break;
 	}
+	}
+}
+
+static uint32_t
+least_length(uint32_t type)
+{
+	switch (type) {
+	case BROKER_WELCOME:
+		return sizeof(struct broker_welcome);
+	case BROKER_LOOKUP_REPLY:
+		return sizeof(struct broker_lookup_reply);
+	case BROKER_DELIVER:
+		return sizeof(struct broker_send);
+	default:
+		return 0;
 	}
 }
 

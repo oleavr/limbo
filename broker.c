@@ -166,17 +166,28 @@ handle_guest(int fd)
 		return;
 	}
 
+	union {
+		struct broker_register reg;
+		struct broker_lookup lookup;
+	} request;
 	switch (frame->type & ~BROKER_FRAME_OOL) {
 	case BROKER_HELLO:
 		welcome_guest(conn);
 		break;
 	case BROKER_REGISTER:
-		register_service(
-				(const struct broker_register *)frame->payload);
+		if (broker_wire_read(frame, 0, &request.reg,
+				    sizeof(request.reg))) {
+			request.reg.name[sizeof(request.reg.name) - 1] = '\0';
+			register_service(&request.reg);
+		}
 		break;
 	case BROKER_LOOKUP:
-		look_up_service(conn,
-				(const struct broker_lookup *)frame->payload);
+		if (broker_wire_read(frame, 0, &request.lookup,
+				    sizeof(request.lookup))) {
+			request.lookup.name[sizeof(request.lookup.name) - 1]
+					= '\0';
+			look_up_service(conn, &request.lookup);
+		}
 		break;
 	case BROKER_SEND:
 		route_send(frame);
