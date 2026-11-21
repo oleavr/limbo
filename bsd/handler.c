@@ -3017,6 +3017,11 @@ sys_chmod_extended(user_addr_t path, void *uid, void *gid, int mode,
 					path, 0)) {
 		return _EPERM;
 	}
+	if (xsecurity != NULL
+			&& mac_sandbox_denies(SANDBOX_FILE_WRITE_ACL, AT_FDCWD,
+					path, 0)) {
+		return _EPERM;
+	}
 	char buffer[PATH_MAX];
 	const char *host_path = sysroot_host_path(path, 0, buffer);
 	if (chown(host_path,
@@ -3051,6 +3056,10 @@ sys_fchmod_extended(
 		return _EPERM;
 	}
 	if (mode != -1 && mac_sandbox_denies_fd(SANDBOX_FILE_WRITE_MODE, fd)) {
+		return _EPERM;
+	}
+	if (xsecurity != NULL
+			&& mac_sandbox_denies_fd(SANDBOX_FILE_WRITE_ACL, fd)) {
 		return _EPERM;
 	}
 	if (fchown(fd, (uid == KAUTH_UID_NONE) ? (uid_t)-1 : uid,

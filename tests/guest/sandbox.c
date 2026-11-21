@@ -102,6 +102,7 @@ static void denied_owner(void);
 static void denied_flags(void);
 static void denied_times(void);
 static void denied_xattr(void);
+static void denied_acl(void);
 static void in_denied_folder(void (*body)(void));
 static void in_sandbox(const char *profile, void (*body)(void));
 static int remove_entry(const char *path, const struct stat *st, int type,
@@ -272,6 +273,7 @@ check_enforced(void)
 	in_sandbox(DENY("file-write-flags"), denied_flags);
 	in_sandbox(DENY("file-write-times"), denied_times);
 	in_sandbox(DENY("file-write-xattr"), denied_xattr);
+	in_sandbox(DENY("file-write-acl"), denied_acl);
 }
 
 static void
@@ -607,6 +609,30 @@ denied_xattr(void)
 	CHECK(setxattr(ALLOWED, "test.new", "x", 1, 0, 0) == 0);
 	CHECK(removexattr(ALLOWED, "test.new", 0) == 0);
 	CHECK(chmod(DENIED "/existing", 0600) == 0);
+}
+
+static void
+denied_acl(void)
+{
+	acl_t acl = acl_init(1);
+	CHECK(acl != NULL);
+	errno = 0;
+	CHECK(acl_set_file(DENIED "/existing", ACL_TYPE_EXTENDED, acl) == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(acl_set_fd(denied_fd, acl) == -1);
+	CHECK(errno == EPERM);
+	filesec_t filesec = filesec_init();
+	CHECK(filesec_set_property(filesec, FILESEC_ACL, _FILESEC_REMOVE_ACL)
+			== 0);
+	errno = 0;
+	CHECK(chmodx_np(DENIED "/existing", filesec) == -1);
+	CHECK(errno == EPERM);
+	filesec_free(filesec);
+
+	CHECK(acl_set_file(ALLOWED, ACL_TYPE_EXTENDED, acl) == 0);
+	CHECK(chmod(DENIED "/existing", 0600) == 0);
+	acl_free(acl);
 }
 
 static void
