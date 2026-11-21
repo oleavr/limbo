@@ -27,6 +27,7 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -35,6 +36,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "bsd/sandbox_profile.h"
 #include "fs/device.h"
 #include "handler.h"
 #include "sha.h"
@@ -161,19 +163,110 @@ struct sandbox_check_args {
 	uint64_t flags;
 };
 
+struct sandbox_set_profile_args {
+	const void *data;
+	uint64_t size;
+	const char *container;
+	uint64_t container_length;
+};
+
 static bool sandboxed;
+static struct sandbox_profile profile;
+
+static int
+sandbox_set_profile(const struct sandbox_set_profile_args *args)
+{
+	if (sandboxed) {
+		bool same = args->size == profile.size
+				&& memcmp(args->data, profile.data, args->size)
+						== 0;
+		return same ? 0 : _EPERM;
+	}
+	sandboxed = true;
+	if (args->data != NULL) {
+		sandbox_profile_parse(&profile, args->data, args->size);
+	}
+	return 0;
+}
+
+static bool
+canonical_path(int dirfd, const char *path, int follow, bool making, char *out)
+{
+	char joined[PATH_MAX];
+	if (path[0] == '/') {
+		snprintf(joined, sizeof(joined), "%s", path);
+	} else {
+		char base[PATH_MAX];
+		if (dirfd == AT_FDCWD) {
+			if (getcwd(base, sizeof(base)) == NULL) {
+				return false;
+			}
+		} else {
+			char link[48];
+			snprintf(link, sizeof(link), "/proc/thread-self/fd/%d",
+					dirfd);
+			ssize_t length = readlink(link, base, sizeof(base) - 1);
+			if (length == -1) {
+				return false;
+			}
+			base[length] = '\0';
+		}
+		const char *guest = sysroot_guest_path(base);
+		int length = snprintf(joined, sizeof(joined), "%s/%s",
+				strcmp(guest, "/") == 0 ? "" : guest, path);
+		if (length >= (int)sizeof(joined)) {
+			errno = ERANGE;
+			return false;
+		}
+	}
+	if (strncmp(joined, "/dev", 4) == 0
+			&& (joined[4] == '/' || joined[4] == '\0')) {
+		snprintf(out, PATH_MAX, "%s", joined);
+	} else {
+		char buffer[PATH_MAX];
+		const char *host = making
+				? sysroot_creation_path(AT_FDCWD, joined,
+						  follow, buffer)
+				: sysroot_host_path(joined, follow, buffer);
+		snprintf(out, PATH_MAX, "%s", sysroot_guest_path(host));
+	}
+	size_t length = strlen(out);
+	while (length > 1 && out[length - 1] == '/') {
+		out[--length] = '\0';
+	}
+	return true;
+}
+
+static bool
+profile_denies(int operation, int dirfd, const char *path, int follow)
+{
+	char canonical[PATH_MAX];
+	bool making = operation == SANDBOX_FILE_WRITE_CREATE;
+	errno = 0;
+	if (!canonical_path(dirfd, path, follow, making, canonical)) {
+		return errno == ERANGE;
+	}
+	return sandbox_profile_decide(&profile, operation, canonical)
+			== SANDBOX_DENY;
+}
 
 static int
 sandbox_check(struct sandbox_check_args *args)
 {
 	bool self = args->pid == 0 || args->pid == getpid();
 	*args->result = self && sandboxed && args->operation == NULL;
+	if (args->operation == NULL
+			|| args->filter_type != SANDBOX_FILTER_PATH) {
+		return 0;
+	}
 	char buffer[PATH_MAX];
 	const char *path = (const char *)args->filter;
-	if (args->operation != NULL && args->filter_type == SANDBOX_FILTER_PATH
-			&& access(sysroot_host_path(path, 0, buffer), F_OK)
-					== -1) {
+	if (access(sysroot_host_path(path, 0, buffer), F_OK) == -1) {
 		*args->result = 1;
+	} else if (self) {
+		*args->result = profile_denies(
+				sandbox_operation_index(args->operation),
+				AT_FDCWD, path, 0);
 	}
 	return 0;
 }
@@ -242,8 +335,7 @@ sandbox_handle_syscall(int call, void *arg)
 {
 	switch (call) {
 	case SANDBOX_SET_PROFILE:
-		sandboxed = true;
-		return 0;
+		return sandbox_set_profile(arg);
 	case SANDBOX_CHECK:
 		return sandbox_check(arg);
 	case SANDBOX_CONTAINER_PATH:

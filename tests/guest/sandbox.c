@@ -26,9 +26,13 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -50,18 +54,33 @@ extern int sandbox_check(pid_t pid, const char *operation, int type, ...);
 #define SANDBOX_FILTER_PATH     1
 #define SANDBOX_CHECK_NO_REPORT 0x40000000
 
+#define LOCK    "/tmp/limbo-sandbox.lock"
 #define MISSING "/private/tmp/limbo-sandbox-missing"
+#define DENIED  "/tmp/limbo-sandbox-denied"
+#define ALLOWED "/tmp/limbo-sandbox-allowed"
+
+#define ALLOW_ALL "(version 1) (allow default)"
+#define DENY_FOLDER                                                            \
+	ALLOW_ALL " (deny file-write* (subpath \"/private" DENIED "\"))"
 
 static void check_entered(void);
 static void enter(void);
 static void check_missing(void);
+static void check_profile(void);
+static void ask_profile(void);
+static void make_file(const char *path);
 static int exit_status_of(void (*body)(void));
 
 int
 main(void)
 {
+	int lock = open(LOCK, O_RDONLY | O_CREAT, 0644);
+	CHECK(lock >= 0);
+	CHECK(flock(lock, LOCK_EX) == 0);
+
 	check_entered();
 	check_missing();
+	check_profile();
 
 	char *token = sandbox_extension_issue_file(
 			APP_SANDBOX_READ_WRITE, "/tmp", 0);
@@ -110,7 +129,7 @@ enter(void)
 {
 	CHECK(sandbox_check(getpid(), NULL, 0) == 0);
 	char *error = NULL;
-	CHECK(sandbox_init("(version 1) (allow default)", 0, &error) == 0);
+	CHECK(sandbox_init(ALLOW_ALL, 0, &error) == 0);
 	CHECK(sandbox_check(getpid(), NULL, 0) == 1);
 	CHECK(sandbox_check(getpid(), "file-read-data", 0) == 0);
 	pid_t child = fork();
@@ -149,6 +168,60 @@ check_missing(void)
 			== 0);
 	CHECK(sandbox_check(getpid(), "file-read-data", 0) == 0);
 	CHECK(sandbox_check(getpid(), NULL, SANDBOX_FILTER_PATH, MISSING) == 0);
+}
+
+static void
+check_profile(void)
+{
+	unlink(DENIED "/existing");
+	rmdir(DENIED);
+	CHECK(mkdir(DENIED, 0755) == 0);
+	make_file(DENIED "/existing");
+	make_file(ALLOWED);
+	CHECK(exit_status_of(ask_profile) == 0);
+	CHECK(unlink(ALLOWED) == 0);
+	CHECK(unlink(DENIED "/existing") == 0);
+	CHECK(rmdir(DENIED) == 0);
+}
+
+static void
+ask_profile(void)
+{
+	char *error = NULL;
+	CHECK(sandbox_init(DENY_FOLDER, 0, &error) == 0);
+	CHECK(sandbox_check(getpid(), "file-write-data", SANDBOX_FILTER_PATH,
+			      "/private" DENIED "/existing")
+			== 1);
+	CHECK(sandbox_check(getpid(), "file-write-unlink", SANDBOX_FILTER_PATH,
+			      DENIED "/existing")
+			== 1);
+	CHECK(sandbox_check(getpid(), "file-write-create", SANDBOX_FILTER_PATH,
+			      "/private" DENIED)
+			== 1);
+	CHECK(sandbox_check(getpid(), "file-read-data", SANDBOX_FILTER_PATH,
+			      "/private" DENIED "/existing")
+			== 0);
+	CHECK(sandbox_check(getpid(), "file-write-data", SANDBOX_FILTER_PATH,
+			      "/private" ALLOWED)
+			== 0);
+	CHECK(sandbox_check(getpid(), "file-write-create", SANDBOX_FILTER_PATH,
+			      "/private/tmp")
+			== 0);
+
+	CHECK(sandbox_init(DENY_FOLDER, 0, &error) == 0);
+	CHECK(sandbox_init(ALLOW_ALL, 0, &error) == -1);
+	CHECK(strcmp(error, strerror(EPERM)) == 0);
+	CHECK(sandbox_check(getpid(), "file-write-data", SANDBOX_FILTER_PATH,
+			      "/private" DENIED "/existing")
+			== 1);
+}
+
+static void
+make_file(const char *path)
+{
+	int fd = open(path, O_WRONLY | O_CREAT, 0644);
+	CHECK(fd >= 0);
+	CHECK(close(fd) == 0);
 }
 
 static int
