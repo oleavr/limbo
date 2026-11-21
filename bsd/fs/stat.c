@@ -352,10 +352,14 @@ sys_fstatfs64(int fd, void *buf)
 int
 sys_getfsstat64(user_addr_t buf, int bufsize, int flags)
 {
-	if (buf == NULL
-			|| bufsize < (int)sizeof(
-					   struct __darwin_struct_statfs64)) {
-		return 1;
+	enum { SYSTEM_VOLUME, DATA_VOLUME, VOLUME_COUNT };
+	struct __darwin_struct_statfs64 *volumes = buf;
+	int count = bufsize / (int)sizeof(*volumes);
+	if (buf == NULL || count > VOLUME_COUNT) {
+		count = VOLUME_COUNT;
+	}
+	if (buf == NULL) {
+		return count;
 	}
 
 	char buffer[PATH_MAX];
@@ -365,8 +369,10 @@ sys_getfsstat64(user_addr_t buf, int bufsize, int flags)
 	if (statfs(host_path, &tmp) == -1 || stat(host_path, &st) == -1) {
 		return err_map(errno);
 	}
-	convert_statfs(&tmp, st.st_dev, false, buf);
-	return 1;
+	for (int i = 0; i < count; i++) {
+		convert_statfs(&tmp, st.st_dev, i == DATA_VOLUME, &volumes[i]);
+	}
+	return count;
 }
 
 int

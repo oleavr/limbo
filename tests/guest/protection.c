@@ -25,6 +25,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <CoreFoundation/CoreFoundation.h>
 #include <copyfile.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -59,6 +60,12 @@ int open_dprotected_np(
 int openat_dprotected_np(int dirfd, const char *path, int flags, int dpclass,
 		int dpflags, ...);
 
+#define PROTECTION_KEY      CFSTR("NSURLFileProtectionKey")
+#define PROTECTION_COMPLETE CFSTR("NSURLFileProtectionComplete")
+#define PROTECTION_NONE     CFSTR("NSURLFileProtectionNone")
+#define PROTECTION_UNTIL_FIRST_AUTHENTICATION                                  \
+	CFSTR("NSURLFileProtectionCompleteUntilFirstUserAuthentication")
+
 static void clean_up(void);
 static int remove_entry(const char *path, const struct stat *st, int type,
 		struct FTW *ftw);
@@ -68,6 +75,7 @@ static void check_attrlist(void);
 static void check_hidden(void);
 static void check_inherited(void);
 static void check_open_dprotected(void);
+static void check_corefoundation(void);
 static void check_copy(void);
 static void check_user(void);
 static void user_sets(void);
@@ -76,6 +84,8 @@ static int attrlist_class_of(const char *path);
 static int set_class(const char *path, int dpclass);
 static int set_attrlist_class(const char *path, uint32_t dpclass);
 static void make_file(const char *path);
+static CFStringRef cf_class_of(const char *path);
+static bool cf_set_class(const char *path, CFStringRef value);
 static int as_user(void (*body)(void));
 
 static char folder[] = "/tmp/limbo-protection-XXXXXX";
@@ -97,6 +107,7 @@ main(void)
 	check_hidden();
 	check_inherited();
 	check_open_dprotected();
+	check_corefoundation();
 	check_copy();
 	check_user();
 
@@ -324,6 +335,36 @@ check_open_dprotected(void)
 }
 
 static void
+check_corefoundation(void)
+{
+	CHECK(mkdir("store", 0755) == 0);
+	CHECK(cf_class_of("store") == NULL);
+
+	CHECK(cf_set_class("store", PROTECTION_COMPLETE));
+	CHECK(class_of("store") == CLASS_A);
+	CFStringRef value = cf_class_of("store");
+	CHECK(value != NULL && CFEqual(value, PROTECTION_COMPLETE));
+	CFRelease(value);
+
+	make_file("store/file");
+	value = cf_class_of("store/file");
+	CHECK(value != NULL && CFEqual(value, PROTECTION_COMPLETE));
+	CFRelease(value);
+
+	CHECK(mkdir("none", 0755) == 0);
+	CHECK(cf_set_class("none", PROTECTION_NONE));
+	value = cf_class_of("none");
+	CHECK(value != NULL
+			&& CFEqual(value,
+					PROTECTION_UNTIL_FIRST_AUTHENTICATION));
+	CFRelease(value);
+
+	CHECK(rmdir("none") == 0);
+	CHECK(unlink("store/file") == 0);
+	CHECK(rmdir("store") == 0);
+}
+
+static void
 check_copy(void)
 {
 	CHECK(mkdir("source", 0755) == 0);
@@ -429,6 +470,37 @@ make_file(const char *path)
 	int fd = open(path, O_RDWR | O_CREAT | O_EXCL, 0644);
 	CHECK(fd != -1);
 	CHECK(close(fd) == 0);
+}
+
+static CFStringRef
+cf_class_of(const char *path)
+{
+	char absolute[PATH_MAX];
+	CHECK(realpath(path, absolute) != NULL);
+	CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL,
+			(const UInt8 *)absolute, (CFIndex)strlen(absolute),
+			false);
+	CHECK(url != NULL);
+	CFTypeRef value = NULL;
+	CHECK(CFURLCopyResourcePropertyForKey(
+			url, PROTECTION_KEY, &value, NULL));
+	CFRelease(url);
+	return value;
+}
+
+static bool
+cf_set_class(const char *path, CFStringRef value)
+{
+	char absolute[PATH_MAX];
+	CHECK(realpath(path, absolute) != NULL);
+	CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL,
+			(const UInt8 *)absolute, (CFIndex)strlen(absolute),
+			true);
+	CHECK(url != NULL);
+	bool set = CFURLSetResourcePropertyForKey(
+			url, PROTECTION_KEY, value, NULL);
+	CFRelease(url);
+	return set;
 }
 
 static int

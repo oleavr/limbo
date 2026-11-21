@@ -26,6 +26,7 @@
  */
 
 #include <fcntl.h>
+#include <stdbool.h>
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
@@ -41,12 +42,14 @@
 
 static void check_paths(void);
 static void check_statfs(void);
+static void check_mounts(void);
 
 int
 main(void)
 {
 	check_paths();
 	check_statfs();
+	check_mounts();
 	return 0;
 }
 
@@ -106,4 +109,22 @@ check_statfs(void)
 	CHECK(fstatfs(fd, &open_system) == 0);
 	CHECK(strcmp(open_system.f_mntonname, "/") == 0);
 	CHECK(close(fd) == 0);
+}
+
+static void
+check_mounts(void)
+{
+	int count = getfsstat(NULL, 0, MNT_NOWAIT);
+	CHECK(count >= 2);
+	static struct statfs mounts[64];
+	count = getfsstat(mounts, sizeof(mounts), MNT_NOWAIT);
+	CHECK(count >= 2);
+	bool system = false, data = false;
+	for (int i = 0; i != count; i++) {
+		system |= strcmp(mounts[i].f_mntonname, "/") == 0;
+		data |= strcmp(mounts[i].f_mntonname, DATA_VOLUME) == 0;
+	}
+	CHECK(system && data);
+	CHECK(getfsstat(mounts, sizeof(mounts[0]), MNT_NOWAIT) == 1);
+	CHECK(strcmp(mounts[0].f_mntonname, "/") == 0);
 }
