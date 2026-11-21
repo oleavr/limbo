@@ -74,6 +74,7 @@ limbo = executable('limbo',
 limbo_broker = executable('limbo-broker',
   sources: [
     'broker.c',
+    'broker_wire.c',
   ],
   include_directories: include_dir,
   link_args: [
