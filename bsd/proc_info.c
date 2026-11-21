@@ -750,6 +750,9 @@ setcontrol(uint32_t flavor, user_addr_t buffer, int32_t buffersize)
 	struct thread *thread = thread_current();
 	memset(thread->name, 0, sizeof(thread->name));
 	memcpy(thread->name, buffer, buffersize);
+	if (thread->tid == getpid()) {
+		return 0;
+	}
 
 	char name[16];
 	snprintf(name, sizeof(name), "%.*s", buffersize, (char *)buffer);
