@@ -130,6 +130,25 @@ thread_guest_ports(mach_port_name_t *ports, size_t max)
 	return count;
 }
 
+mach_port_name_t
+thread_guest_port_of(uint64_t value, bool id)
+{
+	mach_port_name_t port = MACH_PORT_NULL;
+	pthread_mutex_lock(&all_threads_lock);
+	for (struct thread *thread = all_threads; thread != NULL;
+			thread = thread->all_next) {
+		if (thread->guest && !thread->terminating
+				&& (id ? (uint64_t)thread->tid
+				       : thread->tsd_base)
+						== value) {
+			port = thread->port;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&all_threads_lock);
+	return port;
+}
+
 int
 thread_start(struct thread *thread, const struct thread_state *state)
 {

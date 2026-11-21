@@ -107,6 +107,7 @@ struct thread *thread_current(void);
 void thread_fork_child(void);
 struct thread *thread_new(thread_continuation_t continuation, void *context);
 size_t thread_guest_ports(mach_port_name_t *ports, size_t max);
+mach_port_name_t thread_guest_port_of(uint64_t value, bool id);
 int thread_start(struct thread *thread, const struct thread_state *state);
 int thread_create_own(pthread_t *handle, const pthread_attr_t *attr,
 		void *(*start)(void *), void *arg);
