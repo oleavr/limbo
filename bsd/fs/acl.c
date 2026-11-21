@@ -40,6 +40,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "protection.h"
+
 struct filesec_header {
 	uint32_t magic;
 	uint8_t owner[16];
@@ -58,6 +60,7 @@ static bool parent_gives(
 		int dirfd, const char *host_path, struct acl_list *parent);
 static void parent_path(
 		int dirfd, const char *host_path, char *buffer, size_t size);
+static uint32_t class_given(int dirfd, const char *host_path);
 static int open_or_make(int dirfd, const char *host_path, int flags,
 		mode_t mode, bool *made);
 static int inherit(int fd, const struct acl_list *parent,
@@ -155,7 +158,9 @@ acl_openat(int dirfd, const char *host_path, int flags, mode_t mode,
 	}
 	struct acl_list parent;
 	bool gives = parent_gives(dirfd, host_path, &parent);
-	if (!gives && initial == NULL && created == NULL) {
+	uint32_t dpclass = class_given(dirfd, host_path);
+	if (!gives && initial == NULL && created == NULL
+			&& dpclass == PROTECTION_CLASS_DIR_NONE) {
 		return open_reaching(dirfd, host_path, flags, mode);
 	}
 	int fd = open_or_make(dirfd, host_path, flags, mode, made);
@@ -167,6 +172,9 @@ acl_openat(int dirfd, const char *host_path, int flags, mode_t mode,
 		close(fd);
 		errno = error;
 		return -1;
+	}
+	if (*made && dpclass != PROTECTION_CLASS_DIR_NONE) {
+		protection_set(fd, (int)dpclass);
 	}
 	return fd;
 }
@@ -203,6 +211,14 @@ parent_path(int dirfd, const char *host_path, char *buffer, size_t size)
 	} else {
 		object_path(dirfd, buffer, size);
 	}
+}
+
+static uint32_t
+class_given(int dirfd, const char *host_path)
+{
+	char path[PATH_MAX + 48];
+	parent_path(dirfd, host_path, path, sizeof(path));
+	return protection_folder_gives(path);
 }
 
 static int
@@ -257,24 +273,29 @@ acl_mkdirat(int dirfd, const char *host_path, mode_t mode,
 {
 	struct acl_list parent;
 	bool gives = parent_gives(dirfd, host_path, &parent);
+	uint32_t dpclass = class_given(dirfd, host_path);
 	if (mkdirat(dirfd, host_path, mode) == -1) {
 		return -1;
 	}
-	int fd = (gives || initial != NULL)
-			? openat(dirfd, host_path,
-					  O_PATH | O_NOFOLLOW | O_CLOEXEC)
-			: -1;
+	bool lists = gives || initial != NULL;
+	if (!lists && dpclass == PROTECTION_CLASS_DIR_NONE) {
+		return 0;
+	}
+	int fd = openat(dirfd, host_path, O_PATH | O_NOFOLLOW | O_CLOEXEC);
 	if (fd == -1) {
 		return 0;
 	}
-	int stored = inherit(fd, &parent, initial);
-	int error = errno;
-	close(fd);
-	if (stored == -1 && initial != NULL) {
+	if (lists && inherit(fd, &parent, initial) == -1 && initial != NULL) {
+		int error = errno;
+		close(fd);
 		unlinkat(dirfd, host_path, AT_REMOVEDIR);
 		errno = error;
 		return -1;
 	}
+	if (dpclass != PROTECTION_CLASS_DIR_NONE) {
+		protection_set(fd, (int)dpclass);
+	}
+	close(fd);
 	return 0;
 }
 

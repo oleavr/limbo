@@ -60,6 +60,7 @@ static void check_defaults(void);
 static void check_kept(void);
 static void check_attrlist(void);
 static void check_hidden(void);
+static void check_inherited(void);
 static void check_copy(void);
 static void check_user(void);
 static void user_sets(void);
@@ -87,6 +88,7 @@ main(void)
 	check_kept();
 	check_attrlist();
 	check_hidden();
+	check_inherited();
 	check_copy();
 	check_user();
 
@@ -225,6 +227,48 @@ check_hidden(void)
 	CHECK(class_of("hidden") == CLASS_A);
 
 	CHECK(rmdir("hidden") == 0);
+}
+
+static void
+check_inherited(void)
+{
+	CHECK(mkdir("given", 0755) == 0);
+	CHECK(set_class("given", CLASS_A) == 0);
+	make_file("given/file");
+	CHECK(mkdir("given/folder", 0755) == 0);
+	make_file("given/folder/file");
+	CHECK(class_of("given/file") == CLASS_A);
+	CHECK(class_of("given/folder") == CLASS_A);
+	CHECK(class_of("given/folder/file") == CLASS_A);
+	int dir = open("given", O_RDONLY);
+	CHECK(dir != -1);
+	int fd = openat(dir, "relative", O_RDWR | O_CREAT, 0644);
+	CHECK(fd != -1 && close(fd) == 0);
+	CHECK(mkdirat(dir, "relative-folder", 0755) == 0);
+	CHECK(close(dir) == 0);
+	CHECK(class_of("given/relative") == CLASS_A);
+	CHECK(class_of("given/relative-folder") == CLASS_A);
+
+	CHECK(set_class("given", CLASS_B) == 0);
+	CHECK(class_of("given/file") == CLASS_A);
+	fd = open("given/file", O_RDWR | O_CREAT, 0644);
+	CHECK(fd != -1);
+	CHECK(close(fd) == 0);
+	CHECK(class_of("given/file") == CLASS_A);
+
+	CHECK(symlink("given/through", "dangling") == 0);
+	fd = open("dangling", O_RDWR | O_CREAT, 0644);
+	CHECK(fd != -1 && close(fd) == 0);
+	CHECK(class_of("given/through") == CLASS_B);
+	CHECK(unlink("given/through") == 0);
+	CHECK(unlink("dangling") == 0);
+
+	CHECK(rmdir("given/relative-folder") == 0);
+	CHECK(unlink("given/relative") == 0);
+	CHECK(unlink("given/folder/file") == 0);
+	CHECK(rmdir("given/folder") == 0);
+	CHECK(unlink("given/file") == 0);
+	CHECK(rmdir("given") == 0);
 }
 
 static void
