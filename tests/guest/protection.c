@@ -30,7 +30,9 @@
 #include <fcntl.h>
 #include <ftw.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <sys/attr.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -54,10 +56,12 @@ static int remove_entry(const char *path, const struct stat *st, int type,
 		struct FTW *ftw);
 static void check_defaults(void);
 static void check_kept(void);
+static void check_attrlist(void);
 static void check_copy(void);
 static void check_user(void);
 static void user_sets(void);
 static int class_of(const char *path);
+static int attrlist_class_of(const char *path);
 static int set_class(const char *path, int dpclass);
 static void make_file(const char *path);
 static int as_user(void (*body)(void));
@@ -77,6 +81,7 @@ main(void)
 
 	check_defaults();
 	check_kept();
+	check_attrlist();
 	check_copy();
 	check_user();
 
@@ -158,6 +163,23 @@ check_kept(void)
 }
 
 static void
+check_attrlist(void)
+{
+	CHECK(mkdir("listed", 0755) == 0);
+	make_file("listed/file");
+	CHECK(attrlist_class_of("listed") == CLASS_DIR_NONE);
+	CHECK(attrlist_class_of("listed/file") == CLASS_C);
+
+	CHECK(set_class("listed", CLASS_A) == 0);
+	CHECK(attrlist_class_of("listed") == CLASS_A);
+	CHECK(set_class("listed/file", CLASS_B) == 0);
+	CHECK(attrlist_class_of("listed/file") == CLASS_B);
+
+	CHECK(unlink("listed/file") == 0);
+	CHECK(rmdir("listed") == 0);
+}
+
+static void
 check_copy(void)
 {
 	CHECK(mkdir("source", 0755) == 0);
@@ -217,6 +239,22 @@ class_of(const char *path)
 	int dpclass = fcntl(fd, F_GETPROTECTIONCLASS);
 	CHECK(close(fd) == 0);
 	return dpclass;
+}
+
+static int
+attrlist_class_of(const char *path)
+{
+	struct attrlist list = {
+			.bitmapcount = ATTR_BIT_MAP_COUNT,
+			.commonattr = ATTR_CMN_DATA_PROTECT_FLAGS,
+	};
+	struct {
+		uint32_t length;
+		uint32_t dpclass;
+	} __attribute__((packed)) buffer;
+	CHECK(getattrlist(path, &list, &buffer, sizeof(buffer), 0) == 0);
+	CHECK(buffer.length == sizeof(buffer));
+	return (int)buffer.dpclass;
 }
 
 static int
