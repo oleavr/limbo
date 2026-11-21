@@ -153,6 +153,8 @@ static const mach_msg_id_t HOLD_REPLY_ID = 7915;
 static const mach_msg_id_t DROP_REPLY_ID = 7916;
 static const mach_msg_id_t CHECK_IN_ID = 7917;
 static const mach_msg_id_t DESTROY_ID = 7918;
+static const mach_msg_id_t WATCH_ID = 7919;
+static const mach_msg_id_t WATCHED_ID = 7920;
 static const char FROM_SENDER[] = "from the sender";
 static const char FROM_RECEIVER[] = "from the receiver";
 
@@ -661,6 +663,37 @@ carrier_of(mach_port_t port, mach_msg_id_t id, mach_port_t carried)
 	};
 }
 
+static mach_port_t
+request_notification(mach_port_t name, mach_msg_id_t id)
+{
+	mach_port_t notify;
+	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &notify);
+	mach_port_t previous = MACH_PORT_NULL;
+	kern_return_t kr = mach_port_request_notification(mach_task_self(),
+			name, id, 0, notify, MACH_MSG_TYPE_MAKE_SEND_ONCE,
+			&previous);
+	CHECK(kr == KERN_SUCCESS && previous == MACH_PORT_NULL);
+	return notify;
+}
+
+static mach_msg_return_t
+receive_notification(mach_port_t notify, mach_msg_id_t id,
+		mach_msg_timeout_t timeout, mach_port_name_t *name)
+{
+	struct {
+		mach_dead_name_notification_t notification;
+		mach_msg_trailer_t trailer;
+	} message;
+	kern_return_t kr = mach_msg(&message.notification.not_header,
+			MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(message),
+			notify, timeout, MACH_PORT_NULL);
+	if (kr == MACH_MSG_SUCCESS) {
+		CHECK(message.notification.not_header.msgh_id == id);
+		*name = message.notification.not_port;
+	}
+	return kr;
+}
+
 static int32_t
 type_of(mach_port_t name)
 {
@@ -688,6 +721,8 @@ serve_peer(void)
 	mach_port_t kept = MACH_PORT_NULL;
 	mach_port_t held_reply = MACH_PORT_NULL;
 	mach_port_t doomed = MACH_PORT_NULL;
+	mach_port_t watch = MACH_PORT_NULL;
+	mach_port_name_t seen;
 	for (;;) {
 		static union {
 			mach_msg_header_t Head;
@@ -760,6 +795,16 @@ serve_peer(void)
 							doomed,
 							MACH_PORT_RIGHT_RECEIVE,
 							-1));
+		} else if (message.Head.msgh_id == WATCH_ID) {
+			watch = request_notification(
+					kept, MACH_NOTIFY_NO_SENDERS);
+			answer(&message.Head, 1);
+		} else if (message.Head.msgh_id == WATCHED_ID) {
+			answer(&message.Head,
+					receive_notification(watch,
+							MACH_NOTIFY_NO_SENDERS,
+							200, &seen)
+							== MACH_MSG_SUCCESS);
 		} else if (message.Head.msgh_id == LARGE_ID) {
 			answer(&message.Head,
 					patterned(message.bytes,
@@ -1356,37 +1401,6 @@ end_peer(const child_t *child)
 	reap(child->guardian);
 }
 
-static mach_port_t
-request_notification(mach_port_t name, mach_msg_id_t id)
-{
-	mach_port_t notify;
-	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &notify);
-	mach_port_t previous = MACH_PORT_NULL;
-	kern_return_t kr = mach_port_request_notification(mach_task_self(),
-			name, id, 0, notify, MACH_MSG_TYPE_MAKE_SEND_ONCE,
-			&previous);
-	CHECK(kr == KERN_SUCCESS && previous == MACH_PORT_NULL);
-	return notify;
-}
-
-static mach_msg_return_t
-receive_notification(mach_port_t notify, mach_msg_id_t id,
-		mach_msg_timeout_t timeout, mach_port_name_t *name)
-{
-	struct {
-		mach_dead_name_notification_t notification;
-		mach_msg_trailer_t trailer;
-	} message;
-	kern_return_t kr = mach_msg(&message.notification.not_header,
-			MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(message),
-			notify, timeout, MACH_PORT_NULL);
-	if (kr == MACH_MSG_SUCCESS) {
-		CHECK(message.notification.not_header.msgh_id == id);
-		*name = message.notification.not_port;
-	}
-	return kr;
-}
-
 static mach_port_name_t
 receive_raw_port(mach_port_t home)
 {
@@ -1520,6 +1534,15 @@ check_sender_counts(void)
 	destroy_port(notify);
 	destroy_port(port);
 	end_peer(&third);
+
+	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
+	carrier = carrier_of(holder.port, KEEP_ID, port);
+	carrier.port.disposition = MACH_MSG_TYPE_MOVE_RECEIVE;
+	CHECK(ask(&carrier.Head) == 1);
+	CHECK(ask_for(holder.port, WATCH_ID) == 1);
+	CHECK(ask_for(holder.port, WATCHED_ID) == 0);
+	CHECK(mach_port_deallocate(mach_task_self(), port) == KERN_SUCCESS);
+	CHECK(ask_for(holder.port, WATCHED_ID) == 1);
 
 	port = give_send_right(holder.port);
 	CHECK(ask_for(holder.port, TYPE_ID) == MACH_PORT_TYPE_SEND);

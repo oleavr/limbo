@@ -909,6 +909,7 @@ export_body_port(mach_port_name_t name, mach_msg_type_name_t disposition,
 			0x80000000 | (broker_client_guest_id() & 0x7ff) << 20
 					| (++transfer_counter & 0xfffff));
 	entry->port->remote = true;
+	entry->port->grants = 1;
 	entry->type = MACH_PORT_TYPE_SEND;
 	if (entry->urefs == 0) {
 		entry->urefs = 1;
@@ -1529,6 +1530,7 @@ import_body_port(uint64_t global_id, mach_msg_type_name_t type, const int **fds,
 		struct ipc_entry *entry = entry_alloc(port_alloc(IPC_KOBJECT_NONE));
 		entry->type = MACH_PORT_TYPE_RECEIVE;
 		entry->port->global_id = global_id;
+		count_sender_guest(entry->port, sender_guest_id, 1);
 		return entry->port->name;
 	}
 	return import_remote_send(global_id, type, sender_guest_id);
