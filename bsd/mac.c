@@ -259,6 +259,24 @@ mac_sandbox_denies(int operation, int dirfd, const char *path, int follow)
 }
 
 bool
+mac_sandbox_denies_fd(int operation, int fd)
+{
+	if (profile.enforced == 0) {
+		return false;
+	}
+	char link[48], host[PATH_MAX];
+	snprintf(link, sizeof(link), "/proc/thread-self/fd/%d", fd);
+	ssize_t length = readlink(link, host, sizeof(host) - 1);
+	if (length <= 0 || host[0] != '/') {
+		return false;
+	}
+	host[length] = '\0';
+	return sandbox_profile_decide(
+			       &profile, operation, sysroot_guest_path(host))
+			== SANDBOX_DENY;
+}
+
+bool
 mac_sandbox_denies_open(int dirfd, const char *path, bool write, bool create,
 		int follow)
 {

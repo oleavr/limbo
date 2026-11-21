@@ -508,6 +508,9 @@ sys_mknod(user_addr_t path, int mode, int dev)
 int
 sys_chmod(user_addr_t path, int mode)
 {
+	if (mac_sandbox_denies(SANDBOX_FILE_WRITE_MODE, AT_FDCWD, path, 0)) {
+		return _EPERM;
+	}
 	char buffer[PATH_MAX];
 	return errno_map(chmod(sysroot_host_path(path, 0, buffer), mode));
 }
@@ -1911,6 +1914,9 @@ sys_fchown(int fd, int uid, int gid)
 int
 sys_fchmod(int fd, int mode)
 {
+	if (mac_sandbox_denies_fd(SANDBOX_FILE_WRITE_MODE, fd)) {
+		return _EPERM;
+	}
 	return errno_map(fchmod(fd, mode));
 }
 
@@ -2981,6 +2987,11 @@ sys_chmod_extended(user_addr_t path, void *uid, void *gid, int mode,
 	if (xsecurity != NULL && acl_from_filesec(xsecurity, &list) == -1) {
 		return _EINVAL;
 	}
+	if (mode != -1
+			&& mac_sandbox_denies(SANDBOX_FILE_WRITE_MODE, AT_FDCWD,
+					path, 0)) {
+		return _EPERM;
+	}
 	char buffer[PATH_MAX];
 	const char *host_path = sysroot_host_path(path, 0, buffer);
 	if (chown(host_path,
@@ -3009,6 +3020,9 @@ sys_fchmod_extended(
 	struct acl_list list;
 	if (xsecurity != NULL && acl_from_filesec(xsecurity, &list) == -1) {
 		return _EINVAL;
+	}
+	if (mode != -1 && mac_sandbox_denies_fd(SANDBOX_FILE_WRITE_MODE, fd)) {
+		return _EPERM;
 	}
 	if (fchown(fd, (uid == KAUTH_UID_NONE) ? (uid_t)-1 : uid,
 			    (gid == KAUTH_GID_NONE) ? (gid_t)-1 : gid)
@@ -3974,6 +3988,10 @@ sys_faccessat(int fd, user_addr_t path, int amode, int flag)
 int
 sys_fchmodat(int fd, user_addr_t path, int mode, int flag)
 {
+	if (mac_sandbox_denies(SANDBOX_FILE_WRITE_MODE, at_fd(fd), path,
+			    at_flags(flag) & AT_SYMLINK_NOFOLLOW)) {
+		return _EPERM;
+	}
 	char buffer[PATH_MAX];
 	int flags = at_flags(flag);
 	return errno_map(fchmodat(at_fd(fd),
