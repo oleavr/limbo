@@ -41,6 +41,7 @@
 #include <unistd.h>
 
 #include "../../broker.h"
+#include "../../osfmk/ipc_remote.h"
 #include "check.h"
 
 #define PORT_COUNT   32
@@ -103,18 +104,8 @@ typedef struct {
 } child_t;
 
 typedef struct {
-	uint32_t message_size;
-	mach_msg_type_name_t dest_disposition;
-	mach_msg_type_name_t reply_disposition;
-	uint64_t reply_global_id;
-	pid_t sender_pid;
-	uint32_t descriptor_count;
-	uint32_t sender_guest_id;
-} remote_header_t;
-
-typedef struct {
 	struct broker_send send;
-	remote_header_t remote;
+	struct remote_header remote;
 	struct {
 		mach_msg_header_t Head;
 		mach_msg_body_t body;
