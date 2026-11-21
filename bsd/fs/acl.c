@@ -61,6 +61,8 @@ static void parent_path(
 static int open_or_make(int dirfd, const char *host_path, int flags,
 		mode_t mode, bool *made);
 static void inherit(int fd, const struct acl_list *parent);
+static int open_reaching(
+		int dirfd, const char *host_path, int flags, mode_t mode);
 
 int
 acl_from_filesec(const void *xsecurity, struct acl_list *list)
@@ -145,7 +147,7 @@ acl_openat(int dirfd, const char *host_path, int flags, mode_t mode)
 {
 	struct acl_list parent;
 	if (!(flags & O_CREAT) || !parent_gives(dirfd, host_path, &parent)) {
-		return openat(dirfd, host_path, flags, mode);
+		return open_reaching(dirfd, host_path, flags, mode);
 	}
 	bool made;
 	int fd = open_or_make(dirfd, host_path, flags, mode, &made);
@@ -208,7 +210,17 @@ open_or_make(int dirfd, const char *host_path, int flags, mode_t mode,
 			return -1;
 		}
 	}
-	return fd != -1 ? fd : openat(dirfd, host_path, flags, mode);
+	return fd != -1 ? fd : open_reaching(dirfd, host_path, flags, mode);
+}
+
+static int
+open_reaching(int dirfd, const char *host_path, int flags, mode_t mode)
+{
+	int fd = openat(dirfd, host_path, flags, mode);
+	if (fd == -1 && errno == EISDIR && (flags & O_ACCMODE) == O_RDONLY) {
+		fd = openat(dirfd, host_path, flags & ~O_CREAT);
+	}
+	return fd;
 }
 
 static void
