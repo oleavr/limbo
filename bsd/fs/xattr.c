@@ -41,6 +41,7 @@
 #include <string.h>
 #include <sys/xattr.h>
 
+#include "acl.h"
 #include "bsd/xnu-errno.h"
 #include "bsd_flags.h"
 #include "protection.h"
@@ -184,7 +185,8 @@ host_name(const char *name, char *buffer)
 static bool
 is_record(const char *host_name)
 {
-	return strcmp(host_name, PROTECTION_XATTR) == 0;
+	return strcmp(host_name, ACL_XATTR) == 0
+			|| strcmp(host_name, PROTECTION_XATTR) == 0;
 }
 
 static user_ssize_t
@@ -209,6 +211,7 @@ list_result(ssize_t result, const char *names, char *namebuf, size_t bufsize)
 			name += strlen(name) + 1) {
 		if (strncmp(name, LINUX_NAMESPACE, prefix_length) != 0
 				|| strcmp(name, BSD_FLAGS_XATTR) == 0
+				|| strcmp(name, ACL_XATTR) == 0
 				|| strcmp(name, PROTECTION_XATTR) == 0
 				|| strcmp(name, PURGEABLE_XATTR) == 0) {
 			continue;

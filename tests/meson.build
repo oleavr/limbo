@@ -24,6 +24,7 @@ python = import('python').find_installation('python3')
 runner = files('run-guest.py')
 
 guest_tests = [
+  'acl.c',
   'corefoundation.c',
   'credentials.c',
   'cxx.cpp',

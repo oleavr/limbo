@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -39,9 +40,10 @@
 #include <sys/vfs.h>
 #include <unistd.h>
 
+#include "acl.h"
 #include "at.h"
-#include "bsd_flags.h"
 #include "bsd/xnu-errno.h"
+#include "bsd_flags.h"
 #include "device.h"
 #include "sysroot.h"
 
@@ -116,7 +118,8 @@ struct __darwin_struct_statfs64 {
 static int stat_at(int fd, const char *path, int flags,
 		struct __darwin_user64_stat64 *ub);
 static int stat_extended_at(int fd, const char *path, int flags,
-		struct __darwin_user64_stat64 *ub, uint64_t *xsecurity_size);
+		struct __darwin_user64_stat64 *ub, void *xsecurity,
+		uint64_t *xsecurity_size);
 static void convert_statfs(const struct statfs *src, dev_t device,
 		struct __darwin_struct_statfs64 *dest);
 static void convert_statx(
@@ -211,13 +214,20 @@ encode_timespec(struct __darwin_user64_timespec *to,
 
 static int
 stat_extended_at(int fd, const char *path, int flags,
-		struct __darwin_user64_stat64 *ub, uint64_t *xsecurity_size)
+		struct __darwin_user64_stat64 *ub, void *xsecurity,
+		uint64_t *xsecurity_size)
 {
 	int result = stat_at(fd, path, flags, ub);
-	if (result == 0 && xsecurity_size != NULL) {
-		*xsecurity_size = 0;
+	if (result != 0 || xsecurity == NULL) {
+		return result;
 	}
-	return result;
+	char buffer[PATH_MAX];
+	const char *host_path = (flags & AT_EMPTY_PATH)
+			? ""
+			: sysroot_host_path(path, flags, buffer);
+	*xsecurity_size = acl_filesec_at(
+			fd, host_path, flags, xsecurity, *xsecurity_size);
+	return 0;
 }
 
 int
@@ -263,7 +273,8 @@ int
 sys_stat64_extended(user_addr_t path, user_addr_t ub, user_addr_t xsecurity,
 		user_addr_t xsecurity_size)
 {
-	return stat_extended_at(AT_FDCWD, path, 0, ub, xsecurity_size);
+	return stat_extended_at(
+			AT_FDCWD, path, 0, ub, xsecurity, xsecurity_size);
 }
 
 int
@@ -271,14 +282,15 @@ sys_lstat64_extended(user_addr_t path, user_addr_t ub, user_addr_t xsecurity,
 		user_addr_t xsecurity_size)
 {
 	return stat_extended_at(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, ub,
-			xsecurity_size);
+			xsecurity, xsecurity_size);
 }
 
 int
 sys_sys_fstat64_extended(int fd, user_addr_t ub, user_addr_t xsecurity,
 		user_addr_t xsecurity_size)
 {
-	return stat_extended_at(fd, "", AT_EMPTY_PATH, ub, xsecurity_size);
+	return stat_extended_at(
+			fd, "", AT_EMPTY_PATH, ub, xsecurity, xsecurity_size);
 }
 
 int
