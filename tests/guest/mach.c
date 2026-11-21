@@ -94,6 +94,7 @@ static void expect_send_once_notification(mach_port_t port);
 static void check_dead_name(void);
 static mach_port_rights_t send_once_rights(mach_port_t port);
 static void check_request_rights(void);
+static void check_send_possible_on_dead_name(void);
 static void check_make_send_count(void);
 static mach_port_mscount_t make_send_count(mach_port_t port);
 static void check_reference_deltas(void);
@@ -147,6 +148,7 @@ main(void)
 	check_send_once_destroyed();
 	check_dead_name();
 	check_request_rights();
+	check_send_possible_on_dead_name();
 	check_make_send_count();
 	check_reference_deltas();
 	check_fork_during_port_calls();
@@ -1264,6 +1266,43 @@ check_request_rights(void)
 	CHECK(mach_port_deallocate(task, port) == KERN_SUCCESS);
 	CHECK(mach_port_deallocate(task, port) == KERN_SUCCESS);
 	CHECK(mach_port_mod_refs(task, second, MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+}
+
+static void
+check_send_possible_on_dead_name(void)
+{
+	mach_port_t task = mach_task_self();
+	mach_port_t port = allocate_port();
+	CHECK(mach_port_insert_right(task, port, port, MACH_MSG_TYPE_MAKE_SEND)
+			== KERN_SUCCESS);
+	CHECK(mach_port_mod_refs(task, port, MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+	mach_port_t notify = allocate_port();
+	mach_port_t previous = MACH_PORT_NULL;
+	CHECK(mach_port_request_notification(task, port,
+			      MACH_NOTIFY_SEND_POSSIBLE, 0, notify,
+			      MACH_MSG_TYPE_MAKE_SEND_ONCE, &previous)
+			== KERN_SUCCESS);
+
+	struct {
+		mach_dead_name_notification_t notification;
+		mach_msg_trailer_t trailer;
+	} message;
+	CHECK(mach_msg(&message.notification.not_header,
+			      MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof(message), notify, 1000, MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	CHECK(message.notification.not_header.msgh_id == MACH_NOTIFY_DEAD_NAME);
+	CHECK(message.notification.not_port == port);
+	mach_port_urefs_t refs;
+	CHECK(mach_port_get_refs(task, port, MACH_PORT_RIGHT_DEAD_NAME, &refs)
+			== KERN_SUCCESS);
+	CHECK(refs == 2);
+
+	CHECK(mach_port_mod_refs(task, port, MACH_PORT_RIGHT_DEAD_NAME, -2)
+			== KERN_SUCCESS);
+	CHECK(mach_port_mod_refs(task, notify, MACH_PORT_RIGHT_RECEIVE, -1)
 			== KERN_SUCCESS);
 }
 
