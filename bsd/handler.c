@@ -844,6 +844,9 @@ sys_access(user_addr_t path, int flags)
 int
 sys_chflags(char *path, int flags)
 {
+	if (mac_sandbox_denies(SANDBOX_FILE_WRITE_FLAGS, AT_FDCWD, path, 0)) {
+		return _EPERM;
+	}
 	char buffer[PATH_MAX];
 	int fd = open(sysroot_host_path(path, 0, buffer), O_PATH | O_CLOEXEC);
 	if (fd == -1) {
@@ -857,6 +860,9 @@ sys_chflags(char *path, int flags)
 int
 sys_fchflags(int fd, int flags)
 {
+	if (mac_sandbox_denies_fd(SANDBOX_FILE_WRITE_FLAGS, fd)) {
+		return _EPERM;
+	}
 	return keep_bsd_flags(fd, flags);
 }
 
