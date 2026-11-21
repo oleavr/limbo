@@ -64,8 +64,6 @@
 #define FDS_MAX      1024
 #define WAITING      5
 #define CROWDING     8
-#define CROWD_TAKEN  6
-#define FDS_NEEDED   4096
 
 typedef struct {
 	mach_msg_header_t Head;
@@ -1503,15 +1501,13 @@ check_descriptors_wait(pid_t peer, mach_port_t port)
 {
 	struct rlimit files;
 	CHECK(getrlimit(RLIMIT_NOFILE, &files) == 0);
-	if (files.rlim_max < FDS_NEEDED) {
-		fprintf(stderr,
-				"not checked: descriptors that wait in the "
-				"broker need a limit of %d open files\n",
-				FDS_NEEDED);
-		return;
-	}
-	CHECK(arriving_of(peer, port, WAITING) == WAITING);
-	CHECK(arriving_of(peer, port, CROWDING) == CROWD_TAKEN);
+	int share = files.rlim_max / 4 < 2 * FDS_MAX ? (int)files.rlim_max / 4
+						     : 2 * FDS_MAX;
+	int taken = share / MANY_PORTS;
+	CHECK(arriving_of(peer, port, WAITING)
+			== (taken < WAITING ? taken : WAITING));
+	CHECK(arriving_of(peer, port, CROWDING)
+			== (taken < CROWDING ? taken : CROWDING));
 }
 
 static child_t
