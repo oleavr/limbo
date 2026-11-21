@@ -258,6 +258,8 @@ static uint32_t pack_u32(char *buffer, uint32_t offset, uint32_t value);
 static uint32_t directory_entry_count(int fd);
 static uint32_t pack_u64(char *buffer, uint32_t offset, uint64_t value);
 static const char *unpack_timespec(const char *buffer, struct timespec *ts);
+static int set_list(int dirfd, const char *path, int flags, const void *filesec,
+		uint32_t size);
 static int set_protection_class(
 		int dirfd, const char *path, int flags, uint32_t dpclass);
 
@@ -1103,7 +1105,16 @@ set_attributes(int dirfd, const char *path, int flags, void *alist,
 		cursor += sizeof(uint32_t);
 	}
 	if (alistp->commonattr & ATTR_CMN_EXTENDED_SECURITY) {
-		cursor += sizeof(attrreference_t);
+		attrreference_t reference;
+		memcpy(&reference, cursor, sizeof(reference));
+		int r = set_list(dirfd, path, flags,
+				cursor + reference.attr_dataoffset,
+				reference.attr_length);
+		bool link = flags & AT_SYMLINK_NOFOLLOW;
+		if (r == -1 && !(link && errno == EOPNOTSUPP)) {
+			return -1;
+		}
+		cursor += sizeof(reference);
 	}
 	if (alistp->commonattr & ATTR_CMN_UUID) {
 		cursor += GUID_SIZE;
@@ -1130,6 +1141,25 @@ unpack_timespec(const char *buffer, struct timespec *ts)
 	ts->tv_sec = value[0];
 	ts->tv_nsec = value[1];
 	return buffer + sizeof(value);
+}
+
+static int
+set_list(int dirfd, const char *path, int flags, const void *filesec,
+		uint32_t size)
+{
+	struct acl_list list;
+	if (acl_from_filesec(filesec, &list) == -1) {
+		return -1;
+	}
+	uint32_t count = list.count == KAUTH_FILESEC_NOACL ? 0 : list.count;
+	if (size
+			!= ACL_FILESEC_HEADER_SIZE
+					+ count * sizeof(struct kauth_ace)) {
+		errno = EINVAL;
+		return -1;
+	}
+	return (path == NULL) ? acl_set_at(dirfd, "", AT_EMPTY_PATH, &list)
+			      : acl_set_at(dirfd, path, flags, &list);
 }
 
 static int
