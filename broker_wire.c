@@ -45,6 +45,11 @@ union fd_control {
 
 static int payload_file(const struct iovec *parts, int part_count);
 static bool write_whole(int fd, const struct iovec *part);
+static int send_datagram(int fd, struct iovec *iov, int iov_count,
+		const int *fds, size_t fd_count, int flags);
+static void take_ahead(struct broker_wire_ahead *ahead,
+		struct broker_wire_frame *frame);
+static void close_fds(const int *fds, size_t count);
 static size_t take_fds(struct msghdr *msg, int *fds);
 
 struct broker_wire_frame *
@@ -66,7 +71,7 @@ broker_wire_new(uint32_t type, const struct iovec *parts, int part_count,
 		frame->fds[frame->fd_count++] = fds[i];
 	}
 	if (length > BROKER_FRAME_MAX
-			|| fd_count + out_of_line > BROKER_DATAGRAM_FDS) {
+			|| fd_count + out_of_line > BROKER_FDS_MAX) {
 		broker_wire_free(frame);
 		errno = EMSGSIZE;
 		return NULL;
@@ -125,28 +130,57 @@ write_whole(int fd, const struct iovec *part)
 }
 
 int
-broker_wire_send(int fd, const struct broker_wire_frame *frame, int flags)
+broker_wire_send(int fd, struct broker_wire_frame *frame, int flags)
 {
+	struct broker_frame ahead = {.type = BROKER_FDS};
+	struct iovec ahead_iov = {.iov_base = &ahead, .iov_len = sizeof(ahead)};
+	int error = 0;
+	while (error == 0
+			&& frame->fd_count - frame->fds_sent
+					> BROKER_DATAGRAM_FDS) {
+		error = send_datagram(fd, &ahead_iov, 1,
+				frame->fds + frame->fds_sent,
+				BROKER_DATAGRAM_FDS, flags);
+		if (error == 0) {
+			frame->fds_sent += BROKER_DATAGRAM_FDS;
+		}
+	}
+
 	struct broker_frame header = {
 			.type = frame->type,
 			.length = frame->length,
 	};
 	struct iovec iov[2] = {
 			{.iov_base = &header, .iov_len = sizeof(header)},
-			{.iov_base = (void *)frame->payload,
+			{.iov_base = frame->payload,
 					.iov_len = frame->inline_length},
 	};
+	if (error == 0) {
+		error = send_datagram(fd, iov, 2, frame->fds + frame->fds_sent,
+				frame->fd_count - frame->fds_sent, flags);
+	}
+	if (error != 0 && error != EAGAIN && error != EWOULDBLOCK
+			&& frame->fds_sent != 0) {
+		shutdown(fd, SHUT_RDWR);
+	}
+	return error;
+}
+
+static int
+send_datagram(int fd, struct iovec *iov, int iov_count, const int *fds,
+		size_t fd_count, int flags)
+{
 	union fd_control control;
-	struct msghdr msg = {.msg_iov = iov, .msg_iovlen = 2};
-	if (frame->fd_count != 0) {
-		size_t size = sizeof(int) * frame->fd_count;
+	struct msghdr msg = {.msg_iov = iov, .msg_iovlen = iov_count};
+	if (fd_count != 0) {
+		size_t size = sizeof(int) * fd_count;
 		msg.msg_control = control.buffer;
 		msg.msg_controllen = CMSG_SPACE(size);
 		struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
 		cmsg->cmsg_level = SOL_SOCKET;
 		cmsg->cmsg_type = SCM_RIGHTS;
 		cmsg->cmsg_len = CMSG_LEN(size);
-		memcpy(CMSG_DATA(cmsg), frame->fds, size);
+		memcpy(CMSG_DATA(cmsg), fds, size);
 	}
 
 	ssize_t n;
@@ -157,7 +191,8 @@ broker_wire_send(int fd, const struct broker_wire_frame *frame, int flags)
 }
 
 int
-broker_wire_receive(int fd, struct broker_wire_frame **received)
+broker_wire_receive(int fd, struct broker_wire_ahead *ahead,
+		struct broker_wire_frame **received)
 {
 	struct broker_wire_frame *frame
 			= calloc(1, sizeof(*frame) + BROKER_INLINE_MAX);
@@ -191,18 +226,32 @@ broker_wire_receive(int fd, struct broker_wire_frame **received)
 		memcpy(frame->fds, fds, sizeof(int) * frame->fd_count);
 	}
 	if (msg.msg_flags & MSG_CTRUNC) {
-		broker_wire_free(frame);
-		return 0;
+		ahead->lost = true;
 	}
 
 	size_t carried = (size_t)n - sizeof(header);
 	bool out_of_line = header.type & BROKER_FRAME_OOL;
-	bool whole = out_of_line ? carried == 0 && frame->fd_count != 0
-					&& header.length <= BROKER_FRAME_MAX
-				 : carried == header.length;
-	if (!whole || (msg.msg_flags & MSG_TRUNC)) {
+	bool whole = out_of_line
+			? carried == 0 && header.length <= BROKER_FRAME_MAX
+					&& (frame->fd_count != 0 || ahead->lost)
+			: carried == header.length;
+	if (!whole || (msg.msg_flags & MSG_TRUNC)
+			|| ahead->count + frame->fd_count > BROKER_FDS_MAX) {
 		broker_wire_free(frame);
 		return -1;
+	}
+
+	take_ahead(ahead, frame);
+	if (header.type == BROKER_FDS) {
+		ahead->fds = frame->fds;
+		ahead->count = frame->fd_count;
+		free(frame);
+		return 0;
+	}
+	if (ahead->lost) {
+		ahead->lost = false;
+		broker_wire_free(frame);
+		return 0;
 	}
 
 	frame->type = header.type;
@@ -210,6 +259,25 @@ broker_wire_receive(int fd, struct broker_wire_frame **received)
 	frame->inline_length = out_of_line ? 0 : header.length;
 	*received = realloc(frame, sizeof(*frame) + frame->inline_length);
 	return 1;
+}
+
+static void
+take_ahead(struct broker_wire_ahead *ahead, struct broker_wire_frame *frame)
+{
+	if (ahead->count == 0) {
+		return;
+	}
+
+	ahead->fds = realloc(ahead->fds,
+			sizeof(int) * (ahead->count + frame->fd_count));
+	for (size_t i = 0; i != frame->fd_count; i++) {
+		ahead->fds[ahead->count + i] = frame->fds[i];
+	}
+	free(frame->fds);
+	frame->fds = ahead->fds;
+	frame->fd_count += ahead->count;
+	ahead->fds = NULL;
+	ahead->count = 0;
 }
 
 static size_t
@@ -261,9 +329,23 @@ broker_wire_read(const struct broker_wire_frame *frame, uint32_t offset,
 void
 broker_wire_free(struct broker_wire_frame *frame)
 {
-	for (size_t i = 0; i != frame->fd_count; i++) {
-		close(frame->fds[i]);
-	}
+	close_fds(frame->fds, frame->fd_count);
 	free(frame->fds);
 	free(frame);
+}
+
+void
+broker_wire_forget(struct broker_wire_ahead *ahead)
+{
+	close_fds(ahead->fds, ahead->count);
+	free(ahead->fds);
+	*ahead = (struct broker_wire_ahead){0};
+}
+
+static void
+close_fds(const int *fds, size_t count)
+{
+	for (size_t i = 0; i != count; i++) {
+		close(fds[i]);
+	}
 }

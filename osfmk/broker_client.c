@@ -186,10 +186,12 @@ read_until_end(void *user)
 static void *
 read_frames(void *user)
 {
+	struct broker_wire_ahead ahead = {0};
 	for (;;) {
 		struct broker_wire_frame *frame;
-		int received = broker_wire_receive(broker_fd, &frame);
+		int received = broker_wire_receive(broker_fd, &ahead, &frame);
 		if (received == -1) {
+			broker_wire_forget(&ahead);
 			return NULL;
 		}
 		if (received == 0) {
@@ -315,6 +317,7 @@ send_result(int error)
 	case ENOMEM:
 	case EMFILE:
 	case ENFILE:
+	case ETOOMANYREFS:
 		return MACH_SEND_NO_BUFFER;
 	default:
 		return MACH_SEND_INVALID_DEST;

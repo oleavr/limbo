@@ -55,6 +55,8 @@
 #define LARGEST_SIZE ((1 << 20) - 4096)
 #define INLINE_EDGE  (64 * 1024)
 #define PEER_ROOM    (1 << 20)
+#define MANY_PORTS   300
+#define FDS_MAX      1024
 
 typedef struct {
 	mach_msg_header_t Head;
@@ -80,6 +82,12 @@ typedef struct {
 	mach_msg_body_t body;
 	mach_msg_port_descriptor_t port;
 } carrier_t;
+
+typedef struct {
+	mach_msg_header_t Head;
+	mach_msg_body_t body;
+	mach_msg_port_descriptor_t ports[FDS_MAX + 1];
+} carriers_t;
 
 typedef struct {
 	uint32_t message_size;
@@ -120,6 +128,7 @@ static const mach_msg_id_t LARGE_ID = 7904;
 static const mach_msg_id_t MARK_ID = 7905;
 static const mach_msg_id_t MARKED_ID = 7906;
 static const mach_msg_id_t FILEPORT_ID = 7907;
+static const mach_msg_id_t OFFSETS_ID = 7908;
 
 static const char *peer_name = PEER_NAME;
 
@@ -566,6 +575,19 @@ write_through(mach_port_t fileport)
 	return (int32_t)written;
 }
 
+static int32_t
+count_offsets(const carriers_t *carriers)
+{
+	int32_t found = 0;
+	for (uint32_t i = 0; i != carriers->body.msgh_descriptor_count; i++) {
+		int fd = fileport_makefd(carriers->ports[i].name);
+		found += lseek(fd, 0, SEEK_CUR) == (off_t)i;
+		close(fd);
+		mach_port_deallocate(mach_task_self(), carriers->ports[i].name);
+	}
+	return found;
+}
+
 static void
 serve_peer(void)
 {
@@ -579,6 +601,7 @@ serve_peer(void)
 			mach_msg_header_t Head;
 			valued_t valued;
 			carrier_t carrier;
+			carriers_t carriers;
 			char bytes[PEER_ROOM];
 		} message;
 		kern_return_t kr = mach_msg(&message.Head,
@@ -605,6 +628,8 @@ serve_peer(void)
 			answer(&message.Head,
 					write_through(message.carrier.port
 									.name));
+		} else if (message.Head.msgh_id == OFFSETS_ID) {
+			answer(&message.Head, count_offsets(&message.carriers));
 		} else if (message.Head.msgh_id == LARGE_ID) {
 			answer(&message.Head,
 					patterned(message.bytes,
@@ -994,6 +1019,70 @@ check_fileport(mach_port_t port)
 }
 
 static void
+carry(carriers_t *carriers, mach_port_t port, uint32_t count)
+{
+	carriers->Head = (mach_msg_header_t){
+			.msgh_bits = MACH_MSGH_BITS_SET(MACH_MSG_TYPE_COPY_SEND,
+					0, 0, MACH_MSGH_BITS_COMPLEX),
+			.msgh_size = sizeof(carriers->Head)
+					+ sizeof(carriers->body)
+					+ count * sizeof(carriers->ports[0]),
+			.msgh_remote_port = port,
+			.msgh_id = OFFSETS_ID,
+	};
+	carriers->body.msgh_descriptor_count = count;
+}
+
+static void
+carry_offsets(carriers_t *carriers, mach_msg_type_name_t disposition)
+{
+	char path[] = "/tmp/limbo-fileports-XXXXXX";
+	int first = mkstemp(path);
+	CHECK(first != -1);
+	for (uint32_t i = 0; i != MANY_PORTS; i++) {
+		int fd = open(path, O_RDONLY);
+		CHECK(fd != -1 && lseek(fd, i, SEEK_SET) == (off_t)i);
+		mach_port_t fileport;
+		CHECK(fileport_makeport(fd, &fileport) == 0);
+		CHECK(close(fd) == 0);
+		carriers->ports[i] = (mach_msg_port_descriptor_t){
+				.name = fileport,
+				.disposition = disposition,
+				.type = MACH_MSG_PORT_DESCRIPTOR,
+		};
+	}
+	CHECK(unlink(path) == 0 && close(first) == 0);
+}
+
+static void
+check_many_fileports(mach_port_t port)
+{
+	static carriers_t carriers;
+	carry(&carriers, port, MANY_PORTS);
+	carry_offsets(&carriers, MACH_MSG_TYPE_MOVE_SEND);
+	CHECK(ask(&carriers.Head) == MANY_PORTS);
+
+	int read_end;
+	mach_port_t fileport = fileport_of_pipe(&read_end);
+	carry(&carriers, port, FDS_MAX + 1);
+	for (uint32_t i = 0; i != FDS_MAX + 1; i++) {
+		carriers.ports[i] = (mach_msg_port_descriptor_t){
+				.name = fileport,
+				.disposition = MACH_MSG_TYPE_COPY_SEND,
+				.type = MACH_MSG_PORT_DESCRIPTOR,
+		};
+	}
+	kern_return_t kr = mach_msg(&carriers.Head, MACH_SEND_MSG,
+			carriers.Head.msgh_size, 0, MACH_PORT_NULL,
+			MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	CHECK(kr == MACH_SEND_TOO_LARGE);
+	CHECK(mach_port_deallocate(mach_task_self(), fileport) == KERN_SUCCESS);
+	char byte;
+	CHECK(read(read_end, &byte, sizeof(byte)) == 0);
+	CHECK(close(read_end) == 0);
+}
+
+static void
 flood(mach_port_t port)
 {
 	static union {
@@ -1066,6 +1155,7 @@ check_transport(void)
 	check_short_frames(port);
 	check_malformed_messages(port);
 	check_fileport(port);
+	check_many_fileports(port);
 
 	send_quit(port);
 	int status = reap(peer);
