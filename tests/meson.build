@@ -33,6 +33,12 @@ broker_wire_test = executable('broker_wire_test',
 )
 test('broker_wire', broker_wire_test, suite: 'unit')
 
+responsibility_test = executable('responsibility_test',
+  sources: ['responsibility_test.c', '../bsd/responsibility.c'],
+  include_directories: include_dir,
+)
+test('responsibility_named', responsibility_test, suite: 'unit')
+
 python = import('python').find_installation('python3')
 runner = files('run-guest.py')
 
