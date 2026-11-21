@@ -68,6 +68,8 @@ struct ipc_port {
 	struct ipc_port **psets;
 	uint32_t pset_count;
 	bool is_pset;
+	struct ipc_port **members;
+	uint32_t member_count;
 	struct ipc_kmsg *messages;
 	struct ipc_kmsg **messages_tail;
 	mach_port_seqno_t seqno;
@@ -216,8 +218,10 @@ static bool port_in_set(
 		const struct ipc_port *port, const struct ipc_port *pset);
 static void port_join_set(struct ipc_port *port, struct ipc_port *pset);
 static void port_leave_all_sets(struct ipc_port *port);
-static void pset_release_members(const struct ipc_port *pset);
-static bool port_leave_set(struct ipc_port *port, const struct ipc_port *pset);
+static void pset_release_members(struct ipc_port *pset);
+static bool port_leave_set(struct ipc_port *port, struct ipc_port *pset);
+static void pset_drop_member(
+		struct ipc_port *pset, const struct ipc_port *port);
 
 __attribute__((constructor)) static void
 ipc_init(void)
@@ -1380,11 +1384,10 @@ port_with_message(struct ipc_entry *entry)
 		return (entry->port->messages != NULL) ? entry->port : NULL;
 	}
 
-	for (uint32_t i = 1; i < entry_count; i++) {
-		struct ipc_port *member = entries[i].port;
-		if (member != NULL && member->messages != NULL
-				&& port_in_set(member, entry->port)) {
-			return member;
+	struct ipc_port *pset = entry->port;
+	for (uint32_t i = 0; i < pset->member_count; i++) {
+		if (pset->members[i]->messages != NULL) {
+			return pset->members[i];
 		}
 	}
 	return NULL;
@@ -2104,7 +2107,7 @@ entry_release_if_unused(struct ipc_entry *entry)
 		pset_release_members(port);
 	}
 	if (port->kotype == IPC_KOBJECT_NONE) {
-		free(port->psets);
+		port_leave_all_sets(port);
 		free(port);
 	} else if (port->kotype == IPC_KOBJECT_FILEPORT) {
 		close(*(int *)port->kobject);
@@ -2134,35 +2137,53 @@ port_join_set(struct ipc_port *port, struct ipc_port *pset)
 	port->psets = realloc(port->psets,
 			(port->pset_count + 1) * sizeof(*port->psets));
 	port->psets[port->pset_count++] = pset;
+	pset->members = realloc(pset->members,
+			(pset->member_count + 1) * sizeof(*pset->members));
+	pset->members[pset->member_count++] = port;
 }
 
 static void
 port_leave_all_sets(struct ipc_port *port)
 {
+	for (uint32_t i = 0; i < port->pset_count; i++) {
+		pset_drop_member(port->psets[i], port);
+	}
 	free(port->psets);
 	port->psets = NULL;
 	port->pset_count = 0;
 }
 
 static void
-pset_release_members(const struct ipc_port *pset)
+pset_release_members(struct ipc_port *pset)
 {
-	for (uint32_t i = 1; i < entry_count; i++) {
-		struct ipc_port *member = entries[i].port;
-		if (member != NULL) {
-			port_leave_set(member, pset);
-		}
+	while (pset->member_count != 0) {
+		port_leave_set(pset->members[pset->member_count - 1], pset);
 	}
+	free(pset->members);
+	pset->members = NULL;
 }
 
 static bool
-port_leave_set(struct ipc_port *port, const struct ipc_port *pset)
+port_leave_set(struct ipc_port *port, struct ipc_port *pset)
 {
 	for (uint32_t i = 0; i < port->pset_count; i++) {
 		if (port->psets[i] == pset) {
 			port->psets[i] = port->psets[--port->pset_count];
+			pset_drop_member(pset, port);
 			return true;
 		}
 	}
 	return false;
+}
+
+static void
+pset_drop_member(struct ipc_port *pset, const struct ipc_port *port)
+{
+	uint32_t i = 0;
+	while (pset->members[i] != port) {
+		i++;
+	}
+	pset->member_count--;
+	memmove(&pset->members[i], &pset->members[i + 1],
+			(pset->member_count - i) * sizeof(*pset->members));
 }
