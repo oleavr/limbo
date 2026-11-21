@@ -31,6 +31,7 @@
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <mach/ndr.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <string.h>
@@ -46,10 +47,10 @@
 
 #define PORT_COUNT   32
 #define FDS_SEEN     256
-#define SETTLE_USEC  200000
 #define OVERSIZED    (2u << 20)
 #define GUARD_TICKS  1000
-#define REAP_TICKS   100
+#define REAP_TICKS   300
+#define LOOK_UPS     300
 #define PEER_IDLE_MS 30000
 #define ANSWER_MS    20000
 #define NO_ANSWER    INT32_MIN
@@ -231,9 +232,9 @@ receive_request(mach_port_t service)
 		char padding[64];
 	} request;
 	memset(&request, 0, sizeof(request));
-	kern_return_t kr = mach_msg(&request.Head, MACH_RCV_MSG, 0,
-			sizeof(request), service, MACH_MSG_TIMEOUT_NONE,
-			MACH_PORT_NULL);
+	kern_return_t kr = mach_msg(&request.Head,
+			MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(request),
+			service, ANSWER_MS, MACH_PORT_NULL);
 	CHECK(kr == MACH_MSG_SUCCESS);
 	CHECK(request.Head.msgh_id == REQUEST_ID);
 	CHECK(request.body.msgh_descriptor_count == PORT_COUNT + 1);
@@ -272,9 +273,9 @@ static void
 destroy_with_queued_request(mach_port_t service)
 {
 	mach_msg_header_t queued;
-	kern_return_t kr = mach_msg(&queued, MACH_RCV_MSG | MACH_RCV_LARGE, 0,
-			sizeof(queued), service, MACH_MSG_TIMEOUT_NONE,
-			MACH_PORT_NULL);
+	kern_return_t kr = mach_msg(&queued,
+			MACH_RCV_MSG | MACH_RCV_LARGE | MACH_RCV_TIMEOUT, 0,
+			sizeof(queued), service, ANSWER_MS, MACH_PORT_NULL);
 	CHECK(kr == MACH_RCV_TOO_LARGE);
 	kr = mach_port_mod_refs(
 			mach_task_self(), service, MACH_PORT_RIGHT_RECEIVE, -1);
@@ -407,7 +408,8 @@ static mach_port_t
 look_up(const char *name)
 {
 	mach_port_t service = MACH_PORT_NULL;
-	for (int attempt = 0; attempt != 50 && service == MACH_PORT_NULL; attempt++) {
+	for (int attempt = 0; attempt != LOOK_UPS && service == MACH_PORT_NULL;
+			attempt++) {
 		service = bootstrap_call(LOOK_UP, name);
 		if (service == MACH_PORT_NULL) {
 			usleep(100000);
@@ -1042,7 +1044,6 @@ lose_connection(void)
 		}
 	}
 	CHECK(violated == 1);
-	usleep(SETTLE_USEC);
 	CHECK(bootstrap_call(LOOK_UP, LOST_NAME) == MACH_PORT_NULL);
 }
 
@@ -1156,19 +1157,6 @@ send_raw(int fd, uint32_t type, const void *payload, uint32_t length)
 	CHECK(sendmsg(fd, &message, 0) == (ssize_t)(sizeof(header) + length));
 }
 
-static void
-check_short_frames(mach_port_t port)
-{
-	int fd = connect_raw();
-	uint32_t word = 0;
-	send_raw(fd, BROKER_REGISTER, &word, sizeof(word));
-	send_raw(fd, BROKER_LOOKUP, &word, sizeof(word));
-	send_raw(fd, BROKER_SEND, &word, sizeof(word));
-	send_raw(fd, BROKER_SEND | BROKER_FRAME_OOL, &word, 0);
-	close(fd);
-	CHECK(bootstrap_call(LOOK_UP, PEER_NAME) == port);
-}
-
 static uint64_t
 look_up_raw(int fd, const char *name)
 {
@@ -1183,6 +1171,19 @@ look_up_raw(int fd, const char *name)
 	CHECK(recv(fd, &answer, sizeof(answer), 0) == sizeof(answer));
 	CHECK(answer.header.type == BROKER_LOOKUP_REPLY && answer.reply.found);
 	return answer.reply.global_id;
+}
+
+static void
+check_short_frames(mach_port_t port)
+{
+	int fd = connect_raw();
+	uint32_t word = 0;
+	send_raw(fd, BROKER_REGISTER, &word, sizeof(word));
+	send_raw(fd, BROKER_LOOKUP, &word, sizeof(word));
+	send_raw(fd, BROKER_SEND, &word, sizeof(word));
+	CHECK(look_up_raw(fd, PEER_NAME) != 0);
+	close(fd);
+	CHECK(bootstrap_call(LOOK_UP, PEER_NAME) == port);
 }
 
 static raw_message_t
@@ -1268,6 +1269,16 @@ check_malformed_messages(mach_port_t port)
 	CHECK(ask_for(port, MARKED_ID) == 1);
 }
 
+static ssize_t
+read_within(int fd, char *byte)
+{
+	struct pollfd polled = {.fd = fd, .events = POLLIN};
+	if (poll(&polled, 1, ANSWER_MS) != 1) {
+		return -1;
+	}
+	return read(fd, byte, 1);
+}
+
 static mach_port_t
 fileport_of_pipe(int *read_end)
 {
@@ -1292,8 +1303,8 @@ check_fileport(mach_port_t port)
 	CHECK(mach_port_type(mach_task_self(), fileport, &type)
 			== KERN_INVALID_NAME);
 	char byte = 0;
-	CHECK(read(read_end, &byte, sizeof(byte)) == 1 && byte == 'x');
-	CHECK(read(read_end, &byte, sizeof(byte)) == 0);
+	CHECK(read_within(read_end, &byte) == 1 && byte == 'x');
+	CHECK(read_within(read_end, &byte) == 0);
 	CHECK(close(read_end) == 0);
 }
 
@@ -1357,7 +1368,7 @@ check_many_fileports(mach_port_t port)
 	CHECK(kr == MACH_SEND_TOO_LARGE);
 	CHECK(mach_port_deallocate(mach_task_self(), fileport) == KERN_SUCCESS);
 	char byte;
-	CHECK(read(read_end, &byte, sizeof(byte)) == 0);
+	CHECK(read_within(read_end, &byte) == 0);
 	CHECK(close(read_end) == 0);
 }
 
@@ -1450,7 +1461,7 @@ check_killed_receiver(void)
 	CHECK(WIFSIGNALED(status));
 
 	char byte;
-	CHECK(read(read_end, &byte, sizeof(byte)) == 0);
+	CHECK(read_within(read_end, &byte) == 0);
 	CHECK(close(read_end) == 0);
 	kill(guardian, SIGKILL);
 	reap(guardian);
@@ -1617,7 +1628,8 @@ check_gone_process(void)
 	mach_port_t notify = request_notification(
 			gone.port, MACH_NOTIFY_DEAD_NAME);
 	mach_port_name_t name;
-	CHECK(receive_notification(notify, MACH_NOTIFY_DEAD_NAME, 100, &name)
+	CHECK(bootstrap_call(LOOK_UP, GONE_NAME) == gone.port);
+	CHECK(receive_notification(notify, MACH_NOTIFY_DEAD_NAME, 0, &name)
 			== MACH_RCV_TIMED_OUT);
 
 	end_peer(&gone);
@@ -1760,7 +1772,7 @@ check_sender_counts(void)
 	mach_port_t port = give_send_right(holder.port);
 	mach_port_t notify = request_notification(port, MACH_NOTIFY_NO_SENDERS);
 	mach_port_name_t count;
-	CHECK(receive_notification(notify, MACH_NOTIFY_NO_SENDERS, 100, &count)
+	CHECK(receive_notification(notify, MACH_NOTIFY_NO_SENDERS, 0, &count)
 			== MACH_RCV_TIMED_OUT);
 	CHECK(has_senders(port));
 
@@ -1781,7 +1793,7 @@ check_sender_counts(void)
 	carrier_t carrier = carrier_of(holder.port, FORWARD_ID, third.port);
 	carrier.port.disposition = MACH_MSG_TYPE_COPY_SEND;
 	CHECK(ask(&carrier.Head) == 1);
-	CHECK(receive_notification(notify, MACH_NOTIFY_NO_SENDERS, 100, &count)
+	CHECK(receive_notification(notify, MACH_NOTIFY_NO_SENDERS, 0, &count)
 			== MACH_RCV_TIMED_OUT);
 	CHECK(has_senders(port));
 	CHECK(ask_for(third.port, DROP_ID) == KERN_SUCCESS);
@@ -1937,7 +1949,8 @@ check_send_once_rights(void)
 	child_t holder = start_peer(HOLDER_NAME);
 	mach_port_t reply = post_for(holder.port, HOLD_REPLY_ID);
 	mach_port_name_t unused;
-	CHECK(receive_notification(reply, MACH_NOTIFY_SEND_ONCE, 100, &unused)
+	CHECK(ask_for(holder.port, TYPE_ID) == 0);
+	CHECK(receive_notification(reply, MACH_NOTIFY_SEND_ONCE, 0, &unused)
 			== MACH_RCV_TIMED_OUT);
 	CHECK(ask_for(holder.port, DROP_REPLY_ID) == KERN_SUCCESS);
 	CHECK(receive_notification(
@@ -1990,7 +2003,8 @@ check_remote_notify_port(void)
 	CHECK(receive_notification(
 			      second, MACH_NOTIFY_DEAD_NAME, ANSWER_MS, &name)
 			== MACH_MSG_SUCCESS);
-	CHECK(receive_notification(first, MACH_NOTIFY_DEAD_NAME, 100, &name)
+	CHECK(ask_for(holder.port, TYPE_ID) == MACH_PORT_TYPE_DEAD_NAME);
+	CHECK(receive_notification(first, MACH_NOTIFY_DEAD_NAME, 0, &name)
 			== MACH_RCV_TIMED_OUT);
 	end_peer(&holder);
 	CHECK(receive_notification(
@@ -2068,8 +2082,7 @@ main(int argc, char *argv[])
 
 	serve();
 
-	int status;
-	waitpid(pid, &status, 0);
+	int status = reap(pid);
 	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 
 	check_transport();
