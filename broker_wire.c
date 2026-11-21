@@ -261,7 +261,7 @@ broker_wire_receive(int fd, struct broker_wire_ahead *ahead,
 	do {
 		n = recvmsg(fd, &msg, MSG_CMSG_CLOEXEC);
 	} while (n == -1 && (errno == EINTR || errno == ECONNRESET));
-	if (n <= 0) {
+	if (n < 0) {
 		free(frame);
 		return -1;
 	}
