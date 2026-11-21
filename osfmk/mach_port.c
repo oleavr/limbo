@@ -166,8 +166,8 @@ mach_port_request_notification(ipc_space_t task, mach_port_name_t name,
 		mach_msg_id_t msgid, mach_port_mscount_t sync,
 		mach_port_t notify, mach_port_t *previous)
 {
-	*previous = MACH_PORT_NULL;
-	return KERN_SUCCESS;
+	return ipc_port_request_notification(
+			name, msgid, sync, notify, previous);
 }
 
 kern_return_t

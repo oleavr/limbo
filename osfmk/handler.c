@@ -480,8 +480,13 @@ sys__kernelrpc_mach_port_request_notification_trap(ipc_space_t task,
 		mach_port_mscount_t sync, mach_port_name_t notify,
 		mach_msg_type_name_t notifyPoly, mach_port_name_t *previous)
 {
-	*previous = MACH_PORT_NULL;
-	return KERN_SUCCESS;
+	if ((notifyPoly != MACH_MSG_TYPE_MAKE_SEND_ONCE
+			    && notifyPoly != MACH_MSG_TYPE_MOVE_SEND_ONCE)
+			|| !MACH_PORT_VALID(notify)) {
+		return MACH_SEND_INVALID_DEST;
+	}
+	return ipc_port_request_notification_trap(
+			name, msgid, sync, notify, notifyPoly, previous);
 }
 
 kern_return_t

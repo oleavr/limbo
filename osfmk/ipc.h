@@ -133,3 +133,10 @@ kern_return_t ipc_port_move_member(
 		mach_port_name_t member, mach_port_name_t pset);
 kern_return_t ipc_port_get_status(
 		mach_port_name_t name, mach_port_status_t *status);
+kern_return_t ipc_port_request_notification(mach_port_name_t name,
+		mach_msg_id_t id, mach_port_mscount_t sync,
+		mach_port_name_t notify, mach_port_name_t *previous);
+kern_return_t ipc_port_request_notification_trap(mach_port_name_t name,
+		mach_msg_id_t id, mach_port_mscount_t sync,
+		mach_port_name_t notify, mach_msg_type_name_t notify_poly,
+		mach_port_name_t *previous);
