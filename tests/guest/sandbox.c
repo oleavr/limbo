@@ -93,6 +93,7 @@ static void denied_opening(void);
 static void denied_creating(void);
 static void denied_unlinking(void);
 static void denied_renaming(void);
+static void denied_truncating(void);
 static void in_denied_folder(void (*body)(void));
 static int remove_entry(const char *path, const struct stat *st, int type,
 		struct FTW *ftw);
@@ -102,6 +103,7 @@ static int exit_status_of(void (*body)(void));
 
 static void (*sandboxed_body)(void);
 static pid_t owner;
+static int denied_fd;
 
 int
 main(int argc, char *argv[])
@@ -254,6 +256,7 @@ check_enforced(void)
 	in_denied_folder(denied_creating);
 	in_denied_folder(denied_unlinking);
 	in_denied_folder(denied_renaming);
+	in_denied_folder(denied_truncating);
 }
 
 static void
@@ -463,14 +466,32 @@ denied_renaming(void)
 }
 
 static void
+denied_truncating(void)
+{
+	errno = 0;
+	CHECK(truncate(DENIED "/existing", 0) == -1);
+	CHECK(errno == EPERM);
+	CHECK(ftruncate(denied_fd, 0) == 0);
+
+	CHECK(truncate(ALLOWED, 1) == 0);
+	int fd = open(ALLOWED, O_WRONLY);
+	CHECK(fd >= 0);
+	CHECK(ftruncate(fd, 0) == 0);
+	CHECK(close(fd) == 0);
+}
+
+static void
 in_denied_folder(void (*body)(void))
 {
 	clean_up();
 	CHECK(mkdir(DENIED, 0755) == 0);
 	make_file(DENIED "/existing");
 	make_file(ALLOWED);
+	denied_fd = open(DENIED "/existing", O_RDWR);
+	CHECK(denied_fd >= 0);
 	sandboxed_body = body;
 	CHECK(exit_status_of(enter_and_run) == 0);
+	CHECK(close(denied_fd) == 0);
 	CHECK(unlink(ALLOWED) == 0);
 	CHECK(unlink(DENIED "/existing") == 0);
 	CHECK(rmdir(DENIED) == 0);
