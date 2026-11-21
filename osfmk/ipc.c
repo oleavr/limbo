@@ -1272,11 +1272,6 @@ ipc_remote_deliver(uint64_t dest_global_id, const void *blob, uint32_t length,
 
 	pthread_mutex_lock(&lock);
 	struct ipc_port *dest = port_for_global_id(dest_global_id);
-	if (dest == NULL) {
-		pthread_mutex_unlock(&lock);
-		return;
-	}
-
 	struct ipc_kmsg *kmsg = malloc(sizeof(*kmsg) + rh->message_size
 			+ sizeof(mach_msg_max_trailer_t));
 	kmsg->sender_pid = rh->sender_pid;
@@ -1287,15 +1282,17 @@ ipc_remote_deliver(uint64_t dest_global_id, const void *blob, uint32_t length,
 			? import_remote_send(rh->reply_global_id, reply_type,
 					  rh->sender_guest_id)
 			: MACH_PORT_NULL;
-	if (received_type(rh->dest_disposition)
-			== MACH_MSG_TYPE_PORT_SEND_ONCE) {
+	if (dest != NULL
+			&& received_type(rh->dest_disposition)
+					== MACH_MSG_TYPE_PORT_SEND_ONCE) {
 		forget_send_onces(dest->name, rh->sender_guest_id, 1);
 	}
 	kmsg->header->msgh_bits = MACH_MSGH_BITS_SET(reply_type,
 			received_type(rh->dest_disposition), 0,
 			message->msgh_bits & MACH_MSGH_BITS_COMPLEX);
 	kmsg->header->msgh_remote_port = reply_name;
-	kmsg->header->msgh_local_port = dest->name;
+	kmsg->header->msgh_local_port
+			= dest != NULL ? dest->name : MACH_PORT_NULL;
 	kmsg->header->msgh_voucher_port = MACH_PORT_NULL;
 	kmsg->header->msgh_size = rh->message_size;
 
@@ -1303,6 +1300,13 @@ ipc_remote_deliver(uint64_t dest_global_id, const void *blob, uint32_t length,
 			(const uint8_t *)&global_ids[rh->descriptor_count], fds,
 			rh->sender_guest_id);
 
+	if (dest == NULL) {
+		destroy_rights(kmsg->header);
+		free(kmsg);
+		pthread_mutex_unlock(&lock);
+		flush_notices();
+		return;
+	}
 	enqueue(dest, kmsg);
 	unlock_and_notify_arrival(dest);
 }

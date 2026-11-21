@@ -129,6 +129,7 @@ static const char GONE_NAME[] = "com.limbo.test.ipc.gone";
 static const char HOME_NAME[] = "com.limbo.test.ipc.home";
 static const char HOLDER_NAME[] = "com.limbo.test.ipc.holder";
 static const char THIRD_NAME[] = "com.limbo.test.ipc.third";
+static const char DOOMED_NAME[] = "com.limbo.test.ipc.doomed";
 static const mach_msg_id_t CHECK_IN = 402;
 static const mach_msg_id_t LOOK_UP = 404;
 static const mach_msg_id_t REQUEST_ID = 7777;
@@ -150,6 +151,8 @@ static const mach_msg_id_t FORWARD_ID = 7913;
 static const mach_msg_id_t TYPE_ID = 7914;
 static const mach_msg_id_t HOLD_REPLY_ID = 7915;
 static const mach_msg_id_t DROP_REPLY_ID = 7916;
+static const mach_msg_id_t CHECK_IN_ID = 7917;
+static const mach_msg_id_t DESTROY_ID = 7918;
 static const char FROM_SENDER[] = "from the sender";
 static const char FROM_RECEIVER[] = "from the receiver";
 
@@ -684,6 +687,7 @@ serve_peer(void)
 	int32_t marked = 0;
 	mach_port_t kept = MACH_PORT_NULL;
 	mach_port_t held_reply = MACH_PORT_NULL;
+	mach_port_t doomed = MACH_PORT_NULL;
 	for (;;) {
 		static union {
 			mach_msg_header_t Head;
@@ -747,6 +751,15 @@ serve_peer(void)
 			answer(&message.Head,
 					mach_port_deallocate(mach_task_self(),
 							held_reply));
+		} else if (message.Head.msgh_id == CHECK_IN_ID) {
+			doomed = bootstrap_call(CHECK_IN, DOOMED_NAME);
+			answer(&message.Head, doomed != MACH_PORT_NULL);
+		} else if (message.Head.msgh_id == DESTROY_ID) {
+			answer(&message.Head,
+					mach_port_mod_refs(mach_task_self(),
+							doomed,
+							MACH_PORT_RIGHT_RECEIVE,
+							-1));
 		} else if (message.Head.msgh_id == LARGE_ID) {
 			answer(&message.Head,
 					patterned(message.bytes,
@@ -1546,6 +1559,15 @@ check_send_once_rights(void)
 	CHECK(receive_notification(reply, MACH_NOTIFY_SEND_ONCE, 100, &unused)
 			== MACH_RCV_TIMED_OUT);
 	CHECK(ask_for(holder.port, DROP_REPLY_ID) == KERN_SUCCESS);
+	CHECK(receive_notification(
+			      reply, MACH_NOTIFY_SEND_ONCE, ANSWER_MS, &unused)
+			== MACH_MSG_SUCCESS);
+	destroy_port(reply);
+
+	CHECK(ask_for(holder.port, CHECK_IN_ID) == 1);
+	mach_port_t doomed = look_up(DOOMED_NAME);
+	CHECK(ask_for(holder.port, DESTROY_ID) == KERN_SUCCESS);
+	reply = post_for(doomed, MARK_ID);
 	CHECK(receive_notification(
 			      reply, MACH_NOTIFY_SEND_ONCE, ANSWER_MS, &unused)
 			== MACH_MSG_SUCCESS);
