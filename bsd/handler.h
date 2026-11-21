@@ -33,6 +33,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "bsd/responsibility.h"
+
 #define ULF_NO_ERRNO 0x01000000
 
 typedef void *user_addr_t;
@@ -47,7 +49,8 @@ bool sandbox_denies_open(int dirfd, const char *path, int flags);
 const char *open_path(int dirfd, const char *path, int flags, char *buffer);
 const char *exec_path(const char *path, char **argv, char *buffer,
 		char ***script_argv, const char **executable);
-char **exec_environment(char **envp, const char *executable);
+char **exec_environment(char **envp, const char *executable,
+		enum responsibility_told told);
 
 int sys_nosys(void);
 int __attribute__((noreturn)) sys_exit(int rval);

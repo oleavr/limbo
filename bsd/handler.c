@@ -1185,7 +1185,8 @@ sys_execve(char *fname, char **argp, char **envp)
 	const char *executable;
 	const char *host = exec_path(
 			fname, argp, buffer, &script_argv, &executable);
-	char **env = exec_environment(envp, executable);
+	char **env = exec_environment(
+			envp, executable, RESPONSIBILITY_INHERITED);
 	int result = errno_map(execve(
 			host, (script_argv != NULL) ? script_argv : argp, env));
 	if (env != envp) {
