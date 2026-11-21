@@ -61,6 +61,7 @@ guest_tests = [
   'spawn.c',
   'suspend.c',
   'sysinfo.c',
+  'terminals.c',
   'threads.c',
   'vm_copy_after_main.c',
   'volumes.c',

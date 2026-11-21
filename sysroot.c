@@ -56,6 +56,8 @@
 
 #define DATA_VOLUME "/System/Volumes/Data"
 
+#define DARWIN_PTY_PREFIX "/dev/ttys"
+
 #define DEVICES_MAX     8
 #define DEVICE_ID_SHIFT 40
 
@@ -75,6 +77,7 @@ static void load_firmlinks(void);
 static bool leads_on(
 		int dirfd, const char *path, const char *host, char *target);
 static const char *host_path(const char *path, int flags, char *buffer);
+static const char *pty_host_path(const char *path, char *buffer);
 static bool under(const char *path, const char *prefix);
 static bool covers(const char *path);
 static const char *in_root(const char *path, char *buffer);
@@ -270,7 +273,7 @@ host_path(const char *path, int flags, char *buffer)
 
 	if (strncmp(path, "/dev", 4) == 0
 			&& (path[4] == '/' || path[4] == '\0')) {
-		return path;
+		return pty_host_path(path, buffer);
 	}
 
 	int fd = open_in_root(path, flags, resolve);
@@ -316,6 +319,23 @@ host_path(const char *path, int flags, char *buffer)
 	}
 	snprintf(buffer + length, PATH_MAX - length, "/%.*s",
 			(int)name_length, name);
+	return buffer;
+}
+
+static const char *
+pty_host_path(const char *path, char *buffer)
+{
+	const char *digits = path + strlen(DARWIN_PTY_PREFIX);
+	if (strncmp(path, DARWIN_PTY_PREFIX, strlen(DARWIN_PTY_PREFIX)) != 0
+			|| !isdigit((unsigned char)*digits)) {
+		return path;
+	}
+	char *end;
+	unsigned long number = strtoul(digits, &end, 10);
+	if (*end != '\0' && *end != '/') {
+		return path;
+	}
+	snprintf(buffer, PATH_MAX, "/dev/pts/%lu%s", number, end);
 	return buffer;
 }
 
