@@ -29,6 +29,7 @@
 
 #include <fcntl.h>
 #include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <mach/ndr.h>
 #include <pthread.h>
 #include <signal.h>
@@ -129,6 +130,10 @@ static const mach_msg_id_t MARK_ID = 7905;
 static const mach_msg_id_t MARKED_ID = 7906;
 static const mach_msg_id_t FILEPORT_ID = 7907;
 static const mach_msg_id_t OFFSETS_ID = 7908;
+static const mach_msg_id_t ENTRY_ID = 7909;
+static const mach_msg_id_t DATA_ENTRY_ID = 7910;
+static const char FROM_SENDER[] = "from the sender";
+static const char FROM_RECEIVER[] = "from the receiver";
 
 static const char *peer_name = PEER_NAME;
 
@@ -588,6 +593,30 @@ count_offsets(const carriers_t *carriers)
 	return found;
 }
 
+static int32_t
+write_to_entry(mach_port_t entry, int flags)
+{
+	mach_vm_address_t address = 0;
+	mach_vm_size_t size = flags != VM_FLAGS_ANYWHERE ? sizeof(FROM_SENDER)
+							 : 2 * vm_page_size;
+	vm_prot_t rw = VM_PROT_READ | VM_PROT_WRITE;
+	kern_return_t kr = mach_vm_map(mach_task_self(), &address, size, 0,
+			flags, entry, 0, false, rw, rw, VM_INHERIT_NONE);
+	if (kr != KERN_SUCCESS
+			|| memcmp((void *)address, FROM_SENDER,
+					   sizeof(FROM_SENDER))
+					!= 0) {
+		return -1;
+	}
+	if (flags == VM_FLAGS_ANYWHERE) {
+		memcpy((char *)address + vm_page_size, FROM_RECEIVER,
+				sizeof(FROM_RECEIVER));
+	}
+	mach_vm_deallocate(mach_task_self(), address, size);
+	mach_port_deallocate(mach_task_self(), entry);
+	return 1;
+}
+
 static void
 serve_peer(void)
 {
@@ -630,6 +659,17 @@ serve_peer(void)
 									.name));
 		} else if (message.Head.msgh_id == OFFSETS_ID) {
 			answer(&message.Head, count_offsets(&message.carriers));
+		} else if (message.Head.msgh_id == ENTRY_ID) {
+			answer(&message.Head,
+					write_to_entry(message.carrier.port
+									.name,
+							VM_FLAGS_ANYWHERE));
+		} else if (message.Head.msgh_id == DATA_ENTRY_ID) {
+			answer(&message.Head,
+					write_to_entry(message.carrier.port
+									.name,
+							VM_FLAGS_ANYWHERE
+									| VM_FLAGS_RETURN_DATA_ADDR));
 		} else if (message.Head.msgh_id == LARGE_ID) {
 			answer(&message.Head,
 					patterned(message.bytes,
@@ -962,6 +1002,9 @@ check_malformed_messages(mach_port_t port)
 	raw = valid;
 	raw.id = UINT64_MAX - 1;
 	send_raw(fd, BROKER_SEND, &raw, sizeof(raw));
+	raw = valid;
+	raw.id = UINT64_MAX - 2;
+	send_raw(fd, BROKER_SEND, &raw, sizeof(raw));
 
 	send_raw(fd, BROKER_SEND, &valid, sizeof(valid));
 	CHECK(look_up_raw(fd, PEER_NAME) == valid.send.dest_global_id);
@@ -1083,6 +1126,41 @@ check_many_fileports(mach_port_t port)
 }
 
 static void
+check_memory_entry(mach_port_t port)
+{
+	memory_object_size_t size = 2 * vm_page_size;
+	mach_port_t entry = MACH_PORT_NULL;
+	vm_prot_t rw = VM_PROT_READ | VM_PROT_WRITE;
+	CHECK(mach_make_memory_entry_64(mach_task_self(), &size, 0,
+			      MAP_MEM_NAMED_CREATE | rw, &entry, MACH_PORT_NULL)
+			== KERN_SUCCESS);
+	mach_vm_address_t address = 0;
+	CHECK(mach_vm_map(mach_task_self(), &address, size, 0,
+			      VM_FLAGS_ANYWHERE, entry, 0, false, rw, rw,
+			      VM_INHERIT_NONE)
+			== KERN_SUCCESS);
+	memcpy((void *)address, FROM_SENDER, sizeof(FROM_SENDER));
+
+	carrier_t carrier = carrier_of(port, ENTRY_ID, entry);
+	CHECK(ask(&carrier.Head) == 1);
+	CHECK(memcmp((char *)address + vm_page_size, FROM_RECEIVER,
+			      sizeof(FROM_RECEIVER))
+			== 0);
+
+	memory_object_size_t within = sizeof(FROM_SENDER);
+	mach_port_t data_entry = MACH_PORT_NULL;
+	memcpy((char *)address + 100, FROM_SENDER, sizeof(FROM_SENDER));
+	CHECK(mach_make_memory_entry_64(mach_task_self(), &within,
+			      address + 100, MAP_MEM_USE_DATA_ADDR | rw,
+			      &data_entry, MACH_PORT_NULL)
+			== KERN_SUCCESS);
+	carrier = carrier_of(port, DATA_ENTRY_ID, data_entry);
+	CHECK(ask(&carrier.Head) == 1);
+	CHECK(mach_vm_deallocate(mach_task_self(), address, size)
+			== KERN_SUCCESS);
+}
+
+static void
 flood(mach_port_t port)
 {
 	static union {
@@ -1156,6 +1234,7 @@ check_transport(void)
 	check_malformed_messages(port);
 	check_fileport(port);
 	check_many_fileports(port);
+	check_memory_entry(port);
 
 	send_quit(port);
 	int status = reap(peer);
