@@ -304,7 +304,7 @@ send_frame(struct connection *conn, uint32_t type, const void *payload,
 		uint32_t length)
 {
 	struct iovec part = {.iov_base = (void *)payload, .iov_len = length};
-	queue_frame(conn, broker_wire_new(type, &part, 1));
+	queue_frame(conn, broker_wire_new(type, &part, 1, NULL, 0));
 }
 
 static void

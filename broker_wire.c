@@ -48,9 +48,10 @@ static bool write_whole(int fd, const struct iovec *part);
 static size_t take_fds(struct msghdr *msg, int *fds);
 
 struct broker_wire_frame *
-broker_wire_new(uint32_t type, const struct iovec *parts, int part_count)
+broker_wire_new(uint32_t type, const struct iovec *parts, int part_count,
+		const int *fds, size_t fd_count)
 {
-	uint32_t length = 0;
+	size_t length = 0;
 	for (int i = 0; i != part_count; i++) {
 		length += parts[i].iov_len;
 	}
@@ -60,6 +61,16 @@ broker_wire_new(uint32_t type, const struct iovec *parts, int part_count)
 			1, sizeof(*frame) + (out_of_line ? 0 : length));
 	frame->type = type;
 	frame->length = length;
+	frame->fds = malloc(sizeof(*frame->fds) * (fd_count + 1));
+	for (size_t i = 0; i != fd_count; i++) {
+		frame->fds[frame->fd_count++] = fds[i];
+	}
+	if (length > BROKER_FRAME_MAX
+			|| fd_count + out_of_line > BROKER_DATAGRAM_FDS) {
+		broker_wire_free(frame);
+		errno = EMSGSIZE;
+		return NULL;
+	}
 	if (!out_of_line) {
 		for (int i = 0; i != part_count; i++) {
 			memcpy(frame->payload + frame->inline_length,
@@ -71,11 +82,12 @@ broker_wire_new(uint32_t type, const struct iovec *parts, int part_count)
 
 	int fd = payload_file(parts, part_count);
 	if (fd == -1) {
-		free(frame);
+		int error = errno;
+		broker_wire_free(frame);
+		errno = error;
 		return NULL;
 	}
 	frame->type |= BROKER_FRAME_OOL;
-	frame->fds = malloc(sizeof(*frame->fds));
 	frame->fds[frame->fd_count++] = fd;
 	return frame;
 }

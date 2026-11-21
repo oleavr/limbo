@@ -31,6 +31,7 @@
 #endif
 
 #include <errno.h>
+#include <fcntl.h>
 #include <mach/mach.h>
 #include <mach/mig.h>
 #include <mach/notify.h>
@@ -124,6 +125,12 @@ struct remote_header {
 	uint32_t descriptor_count;
 };
 
+struct remote_fds {
+	int *fds;
+	size_t count;
+	bool failed;
+};
+
 struct task_subsystem;
 struct mach_vm_subsystem;
 struct mach_port_subsystem;
@@ -181,6 +188,7 @@ static struct ipc_port *kobjects[IPC_KOBJECT_VOUCHER + 1];
 static uint32_t export_counter;
 static uint32_t transfer_counter;
 static const uint64_t dead_global_id = UINT64_MAX;
+static const uint64_t fileport_global_id = UINT64_MAX - 1;
 
 static void ipc_fork_prepare(void);
 static void ipc_fork_parent(void);
@@ -191,20 +199,28 @@ static mach_msg_return_t remote_copyin(
 		mach_msg_header_t *header, ipc_side_t sender);
 static uint32_t export_body_ports(mach_msg_header_t *header,
 		uint64_t *global_ids, uint8_t **data, uint32_t *data_length,
-		uint32_t dest_guest_id);
+		uint32_t dest_guest_id, struct remote_fds *fds);
 static uint64_t export_body_port(mach_port_name_t name,
-		mach_msg_type_name_t disposition, uint32_t dest_guest_id);
-static bool remote_message_fits(
-		const struct remote_header *rh, uint32_t length);
+		mach_msg_type_name_t disposition, uint32_t dest_guest_id,
+		struct remote_fds *fds);
+static uint64_t export_fileport(
+		const struct ipc_port *port, struct remote_fds *fds);
+static void close_fds(const struct remote_fds *fds);
+static bool remote_message_fits(const struct remote_header *rh, uint32_t length,
+		size_t fd_count);
 static bool remote_body_fits(const mach_msg_header_t *message,
 		mach_msg_size_t size, const uint64_t *global_ids,
-		uint32_t id_count, uint32_t room);
+		uint32_t id_count, uint32_t room, size_t fd_count);
+static bool remote_port_fits(uint64_t global_id,
+		mach_msg_type_name_t disposition, size_t *fd_count);
 static bool remote_right_fits(
 		uint64_t global_id, mach_msg_type_name_t disposition);
 static void import_body_ports(mach_msg_header_t *header,
-		const uint64_t *global_ids, const uint8_t *data);
-static mach_port_name_t import_body_port(uint64_t global_id,
-		mach_msg_type_name_t type);
+		const uint64_t *global_ids, const uint8_t *data,
+		const int *fds);
+static mach_port_name_t import_body_port(
+		uint64_t global_id, mach_msg_type_name_t type, const int **fds);
+static mach_port_name_t import_fileport(int fd);
 static uint64_t export_local_port(mach_port_name_t name);
 static struct ipc_port *port_for_global_id(uint64_t global_id);
 static mach_port_name_t import_remote_send(
@@ -666,8 +682,11 @@ remote_send(mach_msg_header_t *header, mach_msg_size_t size, ipc_side_t sender,
 	uint64_t *global_ids = malloc(id_capacity * sizeof(*global_ids));
 	uint8_t *data = NULL;
 	uint32_t data_length = 0;
+	struct remote_fds fds = {
+			.fds = malloc(id_capacity * sizeof(*fds.fds)),
+	};
 	uint32_t descriptor_count = export_body_ports(header, global_ids, &data,
-			&data_length, broker_guest_of(dest_global_id));
+			&data_length, broker_guest_of(dest_global_id), &fds);
 
 	struct remote_header rh = {
 		.message_size = size,
@@ -692,7 +711,14 @@ remote_send(mach_msg_header_t *header, mach_msg_size_t size, ipc_side_t sender,
 
 	release_unused_entries(header);
 	pthread_mutex_unlock(&lock);
-	mr = broker_client_send(dest_global_id, blob, blob_length);
+	if (fds.failed) {
+		close_fds(&fds);
+		mr = MACH_SEND_NO_BUFFER;
+	} else {
+		mr = broker_client_send(dest_global_id, blob, blob_length,
+				fds.fds, fds.count);
+	}
+	free(fds.fds);
 	free(blob);
 	return mr;
 }
@@ -726,7 +752,8 @@ remote_copyin(mach_msg_header_t *header, ipc_side_t sender)
 
 static uint32_t
 export_body_ports(mach_msg_header_t *header, uint64_t *global_ids,
-		uint8_t **data, uint32_t *data_length, uint32_t dest_guest_id)
+		uint8_t **data, uint32_t *data_length, uint32_t dest_guest_id,
+		struct remote_fds *fds)
 {
 	if (!(header->msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
 		return 0;
@@ -742,7 +769,7 @@ export_body_ports(mach_msg_header_t *header, uint64_t *global_ids,
 			mach_msg_port_descriptor_t *d
 					= (mach_msg_port_descriptor_t *)cursor;
 			global_ids[count++] = export_body_port(d->name,
-					d->disposition, dest_guest_id);
+					d->disposition, dest_guest_id, fds);
 			cursor += sizeof(*d);
 		} else if (descriptor->type == MACH_MSG_OOL_DESCRIPTOR
 				|| descriptor->type
@@ -763,7 +790,7 @@ export_body_ports(mach_msg_header_t *header, uint64_t *global_ids,
 					= (mach_msg_guarded_port_descriptor64_t *)
 							cursor;
 			global_ids[count++] = export_body_port(d->name,
-					d->disposition, dest_guest_id);
+					d->disposition, dest_guest_id, fds);
 			cursor += sizeof(*d);
 		}
 	}
@@ -772,10 +799,15 @@ export_body_ports(mach_msg_header_t *header, uint64_t *global_ids,
 
 static uint64_t
 export_body_port(mach_port_name_t name, mach_msg_type_name_t disposition,
-		uint32_t dest_guest_id)
+		uint32_t dest_guest_id, struct remote_fds *fds)
 {
 	if (name == MACH_PORT_NULL) {
 		return 0;
+	}
+
+	struct ipc_entry *held = lookup(name);
+	if (held != NULL && held->port->kotype == IPC_KOBJECT_FILEPORT) {
+		return export_fileport(held->port, fds);
 	}
 
 	if (name == MACH_PORT_DEAD
@@ -793,6 +825,26 @@ export_body_port(mach_port_name_t name, mach_msg_type_name_t disposition,
 		entry->urefs = 1;
 	}
 	return entry->port->global_id;
+}
+
+static uint64_t
+export_fileport(const struct ipc_port *port, struct remote_fds *fds)
+{
+	int fd = fcntl(*(int *)port->kobject, F_DUPFD_CLOEXEC, 0);
+	if (fd == -1) {
+		fds->failed = true;
+		return 0;
+	}
+	fds->fds[fds->count++] = fd;
+	return fileport_global_id;
+}
+
+static void
+close_fds(const struct remote_fds *fds)
+{
+	for (size_t i = 0; i != fds->count; i++) {
+		close(fds->fds[i]);
+	}
 }
 
 static uint64_t
@@ -859,10 +911,11 @@ import_remote_send(uint64_t global_id, mach_msg_type_name_t type)
 }
 
 void
-ipc_remote_deliver(uint64_t dest_global_id, const void *blob, uint32_t length)
+ipc_remote_deliver(uint64_t dest_global_id, const void *blob, uint32_t length,
+		const int *fds, size_t fd_count)
 {
 	const struct remote_header *rh = blob;
-	if (!remote_message_fits(rh, length)) {
+	if (!remote_message_fits(rh, length, fd_count)) {
 		return;
 	}
 	const mach_msg_header_t *message
@@ -897,14 +950,16 @@ ipc_remote_deliver(uint64_t dest_global_id, const void *blob, uint32_t length)
 	kmsg->header->msgh_size = rh->message_size;
 
 	import_body_ports(kmsg->header, global_ids,
-			(const uint8_t *)&global_ids[rh->descriptor_count]);
+			(const uint8_t *)&global_ids[rh->descriptor_count],
+			fds);
 
 	enqueue(dest, kmsg);
 	unlock_and_notify_arrival(dest);
 }
 
 static bool
-remote_message_fits(const struct remote_header *rh, uint32_t length)
+remote_message_fits(const struct remote_header *rh, uint32_t length,
+		size_t fd_count)
 {
 	if (length < sizeof(*rh)) {
 		return false;
@@ -925,6 +980,7 @@ remote_message_fits(const struct remote_header *rh, uint32_t length)
 	if (dest_type == MACH_MSG_TYPE_PORT_NONE
 			|| dest_type == MACH_MSG_TYPE_PORT_RECEIVE
 			|| reply_type == MACH_MSG_TYPE_PORT_RECEIVE
+			|| rh->reply_global_id == fileport_global_id
 			|| !remote_right_fits(rh->reply_global_id,
 					rh->reply_disposition)) {
 		return false;
@@ -934,15 +990,16 @@ remote_message_fits(const struct remote_header *rh, uint32_t length)
 	const uint64_t *global_ids = (const uint64_t *)((const char *)message
 			+ rh->message_size);
 	if (!(message->msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
-		return rh->descriptor_count == 0;
+		return rh->descriptor_count == 0 && fd_count == 0;
 	}
 	return remote_body_fits(message, rh->message_size, global_ids,
-			rh->descriptor_count, room);
+			rh->descriptor_count, room, fd_count);
 }
 
 static bool
 remote_body_fits(const mach_msg_header_t *message, mach_msg_size_t size,
-		const uint64_t *global_ids, uint32_t id_count, uint32_t room)
+		const uint64_t *global_ids, uint32_t id_count, uint32_t room,
+		size_t fd_count)
 {
 	if (size < sizeof(*message) + sizeof(mach_msg_body_t)) {
 		return false;
@@ -963,9 +1020,10 @@ remote_body_fits(const mach_msg_header_t *message, mach_msg_size_t size,
 					= (const mach_msg_port_descriptor_t *)
 							cursor;
 			if (count == id_count
-					|| !remote_right_fits(
+					|| !remote_port_fits(
 							global_ids[count++],
-							d->disposition)) {
+							d->disposition,
+							&fd_count)) {
 				return false;
 			}
 			cursor += sizeof(*d);
@@ -981,9 +1039,10 @@ remote_body_fits(const mach_msg_header_t *message, mach_msg_size_t size,
 									*)
 							cursor;
 			if (count == id_count
-					|| !remote_right_fits(
+					|| !remote_port_fits(
 							global_ids[count++],
-							d->disposition)) {
+							d->disposition,
+							&fd_count)) {
 				return false;
 			}
 		} else if (descriptor->type == MACH_MSG_OOL_DESCRIPTOR
@@ -1001,7 +1060,23 @@ remote_body_fits(const mach_msg_header_t *message, mach_msg_size_t size,
 		}
 		cursor += sizeof(mach_msg_ool_descriptor64_t);
 	}
-	return count == id_count;
+	return count == id_count && fd_count == 0;
+}
+
+static bool
+remote_port_fits(uint64_t global_id, mach_msg_type_name_t disposition,
+		size_t *fd_count)
+{
+	if (global_id != fileport_global_id) {
+		return remote_right_fits(global_id, disposition);
+	}
+	if (*fd_count == 0
+			|| received_type(disposition)
+					!= MACH_MSG_TYPE_PORT_SEND) {
+		return false;
+	}
+	(*fd_count)--;
+	return true;
 }
 
 static bool
@@ -1014,7 +1089,7 @@ remote_right_fits(uint64_t global_id, mach_msg_type_name_t disposition)
 
 static void
 import_body_ports(mach_msg_header_t *header, const uint64_t *global_ids,
-		const uint8_t *data)
+		const uint8_t *data, const int *fds)
 {
 	if (!(header->msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
 		return;
@@ -1030,7 +1105,8 @@ import_body_ports(mach_msg_header_t *header, const uint64_t *global_ids,
 			mach_msg_port_descriptor_t *d
 					= (mach_msg_port_descriptor_t *)cursor;
 			mach_msg_type_name_t type = received_type(d->disposition);
-			d->name = import_body_port(global_ids[count++], type);
+			d->name = import_body_port(
+					global_ids[count++], type, &fds);
 			d->disposition = type;
 			cursor += sizeof(*d);
 		} else if (descriptor->type == MACH_MSG_OOL_DESCRIPTOR
@@ -1046,7 +1122,8 @@ import_body_ports(mach_msg_header_t *header, const uint64_t *global_ids,
 					= (mach_msg_guarded_port_descriptor64_t *)
 							cursor;
 			mach_msg_type_name_t type = received_type(d->disposition);
-			d->name = import_body_port(global_ids[count++], type);
+			d->name = import_body_port(
+					global_ids[count++], type, &fds);
 			d->disposition = type;
 			cursor += sizeof(*d);
 		}
@@ -1054,10 +1131,13 @@ import_body_ports(mach_msg_header_t *header, const uint64_t *global_ids,
 }
 
 static mach_port_name_t
-import_body_port(uint64_t global_id, mach_msg_type_name_t type)
+import_body_port(uint64_t global_id, mach_msg_type_name_t type, const int **fds)
 {
 	if (global_id == 0) {
 		return MACH_PORT_NULL;
+	}
+	if (global_id == fileport_global_id) {
+		return import_fileport(*(*fds)++);
 	}
 
 	if (type == MACH_MSG_TYPE_PORT_RECEIVE && global_id != dead_global_id) {
@@ -1067,6 +1147,24 @@ import_body_port(uint64_t global_id, mach_msg_type_name_t type)
 		return entry->port->name;
 	}
 	return import_remote_send(global_id, type);
+}
+
+static mach_port_name_t
+import_fileport(int fd)
+{
+	int own = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+	if (own == -1) {
+		return MACH_PORT_NULL;
+	}
+
+	int *kobject = malloc(sizeof(*kobject));
+	*kobject = own;
+	struct ipc_port *port = port_alloc(IPC_KOBJECT_FILEPORT);
+	port->kobject = kobject;
+	struct ipc_entry *entry = entry_alloc(port);
+	entry->type = MACH_PORT_TYPE_SEND;
+	entry->urefs = 1;
+	return port->name;
 }
 
 mach_port_name_t

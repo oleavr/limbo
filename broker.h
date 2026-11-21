@@ -90,8 +90,9 @@ struct broker_wire_frame {
 	char payload[];
 };
 
-struct broker_wire_frame *broker_wire_new(
-		uint32_t type, const struct iovec *parts, int part_count);
+struct broker_wire_frame *broker_wire_new(uint32_t type,
+		const struct iovec *parts, int part_count, const int *fds,
+		size_t fd_count);
 int broker_wire_send(int fd, const struct broker_wire_frame *frame, int flags);
 int broker_wire_receive(int fd, struct broker_wire_frame **received);
 bool broker_wire_read(const struct broker_wire_frame *frame, uint32_t offset,
