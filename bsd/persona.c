@@ -231,10 +231,14 @@ persona_syscall(uint32_t operation, uint32_t flags, void *info, void *id,
 	(void)flags;
 	switch (operation) {
 	case PERSONA_OP_GET:
+		return _ESRCH;
 	case PERSONA_OP_PIDINFO:
+		if (*(int32_t *)id != getpid() && !may_read()) {
+			return _EPERM;
+		}
+		return _ESRCH;
 	case PERSONA_OP_PIDINFO_AUDIT_TOKEN:
-
-		if (operation != PERSONA_OP_GET && !may_read()) {
+		if (!may_read()) {
 			return _EPERM;
 		}
 		return _ESRCH;

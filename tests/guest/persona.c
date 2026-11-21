@@ -29,6 +29,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "check.h"
@@ -51,9 +52,14 @@ int kpersona_get(uint32_t *id);
 int kpersona_info(uint32_t id, struct kpersona_info *info);
 int kpersona_find(const char *name, uint32_t uid, uint32_t *ids, size_t *count);
 int kpersona_find_by_type(int type, uint32_t *ids, size_t *count);
+int kpersona_pidinfo(pid_t pid, struct kpersona_info *info);
 
 #define TEST_ID   4242
 #define TEST_TYPE 7
+#define USER      501
+#define SKIP      77
+
+static void check_not_root(void);
 
 int
 main(void)
@@ -63,10 +69,25 @@ main(void)
 	CHECK(kpersona_get(&id) == -1 && errno == ESRCH);
 
 	if (geteuid() != 0) {
-		struct kpersona_info info = {.persona_info_version = 2};
-		CHECK(kpersona_info(99, &info) == -1 && errno == EPERM);
+		check_not_root();
 		printf("persona: ok (not root)\n");
 		return 0;
+	}
+	pid_t child = fork();
+	CHECK(child != -1);
+	if (child == 0) {
+		if (setgid(USER) != 0 || setuid(USER) != 0) {
+			_exit(SKIP);
+		}
+		check_not_root();
+		_exit(0);
+	}
+	int status;
+	CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status));
+	if (WEXITSTATUS(status) == SKIP) {
+		printf("skipping what a user is refused: no user %d\n", USER);
+	} else {
+		CHECK(WEXITSTATUS(status) == 0);
 	}
 
 	struct kpersona_info info = {
@@ -96,4 +117,13 @@ main(void)
 	CHECK(kpersona_info(TEST_ID, &read) == -1 && errno == ESRCH);
 	printf("persona: ok\n");
 	return 0;
+}
+
+static void
+check_not_root(void)
+{
+	struct kpersona_info info = {.persona_info_version = 2};
+	CHECK(kpersona_info(99, &info) == -1 && errno == EPERM);
+	CHECK(kpersona_pidinfo(getpid(), &info) == -1 && errno == ESRCH);
+	CHECK(kpersona_pidinfo(1, &info) == -1 && errno == EPERM);
 }
