@@ -35,12 +35,14 @@
 #include <sys/acl.h>
 #include <sys/attr.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <sys/xattr.h>
 #include <unistd.h>
 
 #include "check.h"
 
 #define USER 501
+#define SKIP 77
 
 #define FILESEC_MAGIC 0x012cc16d
 #define FILESEC_NOACL UINT32_MAX
@@ -69,10 +71,14 @@ struct filesec {
 static void clean_up(void);
 static int remove_entry(const char *path, const struct stat *st, int type,
 		struct FTW *ftw);
+static void check_as_another(void (*body)(void));
+static void opens_as_itself(void);
 static void check_kept(void);
 static void check_listed(void);
 static void check_hidden(void);
 static void check_inherited(void);
+static void check_opened_with(void);
+static filesec_t filesec_of(mode_t mode, acl_t acl);
 static acl_t list_of(int count, const uid_t *users, const acl_perm_t *perms,
 		const int *flags);
 static void user_guid(uid_t user, uint8_t guid[16]);
@@ -89,6 +95,7 @@ static int write_filesec(
 
 static char folder[] = "/tmp/limbo-access-XXXXXX";
 static pid_t owner;
+static bool skipped;
 
 int
 main(void)
@@ -98,15 +105,19 @@ main(void)
 	CHECK(atexit(clean_up) == 0);
 	CHECK(chmod(folder, 0755) == 0);
 	CHECK(chdir(folder) == 0);
+	CHECK(mkdir("shared", 0777) == 0);
+	CHECK(chmod("shared", 0777) == 0);
 
 	check_kept();
 	check_listed();
 	check_hidden();
 	check_inherited();
+	check_opened_with();
 
+	CHECK(rmdir("shared") == 0);
 	CHECK(chdir("/") == 0);
 	CHECK(rmdir(folder) == 0);
-	return 0;
+	return skipped ? SKIP : 0;
 }
 
 static void
@@ -121,6 +132,64 @@ static int
 remove_entry(const char *path, const struct stat *st, int type, struct FTW *ftw)
 {
 	return remove(path);
+}
+
+static void
+check_as_another(void (*body)(void))
+{
+	if (geteuid() != 0) {
+		body();
+		return;
+	}
+	pid_t child = fork();
+	CHECK(child != -1);
+	if (child == 0) {
+		if (setgid(USER) != 0 || setuid(USER) != 0
+				|| getuid() != USER) {
+			_exit(SKIP);
+		}
+		body();
+		_exit(0);
+	}
+	int status;
+	CHECK(waitpid(child, &status, 0) == child);
+	CHECK(WIFEXITED(status));
+	if (WEXITSTATUS(status) == SKIP) {
+		printf("skipping what another user is refused: no user %d\n",
+				USER);
+		skipped = true;
+	} else {
+		CHECK(WEXITSTATUS(status) == 0);
+	}
+}
+
+static void
+opens_as_itself(void)
+{
+	uid_t users[] = {USER + 1};
+	acl_perm_t perms[] = {ACL_READ_DATA};
+	int flags[] = {0};
+	acl_t one = list_of(1, users, perms, flags);
+	filesec_t another = filesec_of(0640, one);
+	uid_t root = 0;
+	CHECK(filesec_set_property(another, FILESEC_OWNER, &root) == 0);
+	errno = 0;
+	CHECK(openx_np("shared/given", O_CREAT | O_WRONLY, another) == -1);
+	CHECK(errno == EPERM);
+	CHECK(access("shared/given", F_OK) == -1);
+
+	filesec_t unwritable = filesec_of(0444, one);
+	int fd = openx_np("shared/listed", O_CREAT | O_WRONLY, unwritable);
+	if (fd == -1) {
+		CHECK(access("shared/listed", F_OK) == -1);
+	} else {
+		CHECK(entries("shared/listed") == 1);
+		CHECK(close(fd) == 0);
+		CHECK(unlink("shared/listed") == 0);
+	}
+	filesec_free(unwritable);
+	filesec_free(another);
+	acl_free(one);
 }
 
 static void
@@ -350,6 +419,69 @@ check_inherited(void)
 	CHECK(unlink("parent/exclusive") == 0);
 	CHECK(unlink("parent/file") == 0);
 	CHECK(rmdir("parent") == 0);
+}
+
+static void
+check_opened_with(void)
+{
+	uid_t users[] = {USER, USER + 1};
+	acl_perm_t perms[] = {ACL_READ_DATA, ACL_WRITE_DATA};
+	int flags[] = {0, FILE_INHERIT};
+	acl_t one = list_of(1, users, perms, flags);
+	acl_t two = list_of(2, users, perms, flags);
+	filesec_t with_one = filesec_of(0640, one);
+	filesec_t with_two = filesec_of(0600, two);
+
+	int fd = openx_np("opened", O_CREAT | O_WRONLY | O_EXCL, with_one);
+	CHECK(fd != -1 && close(fd) == 0);
+	CHECK(entries("opened") == 1);
+	struct stat st;
+	CHECK(stat("opened", &st) == 0 && (st.st_mode & 0777) == 0640);
+	fd = openx_np("opened", O_CREAT | O_WRONLY, with_two);
+	CHECK(fd != -1 && close(fd) == 0);
+	CHECK(entries("opened") == 1);
+	CHECK(stat("opened", &st) == 0 && (st.st_mode & 0777) == 0640);
+
+	CHECK(mkdir("giving", 0755) == 0);
+	CHECK(acl_set_file("giving", ACL_TYPE_EXTENDED, two) == 0);
+	fd = openx_np("giving/file", O_CREAT | O_WRONLY, with_one);
+	CHECK(fd != -1 && close(fd) == 0);
+	CHECK(entries("giving/file") == 2);
+	struct entry found;
+	CHECK(entry_for("giving/file", USER, &found));
+	CHECK(found.flags == ACL_EXTENDED_ALLOW);
+	CHECK(entry_for("giving/file", USER + 1, &found));
+	CHECK(found.flags == (ACL_EXTENDED_ALLOW | INHERITED));
+
+	if (geteuid() == 0) {
+		uid_t given = USER;
+		CHECK(filesec_set_property(with_one, FILESEC_OWNER, &given)
+				== 0);
+		fd = openx_np("given", O_CREAT | O_WRONLY | O_EXCL, with_one);
+		CHECK(fd != -1 && close(fd) == 0);
+		CHECK(stat("given", &st) == 0 && st.st_uid == USER);
+		CHECK(entries("given") == 1);
+		CHECK(unlink("given") == 0);
+	}
+	check_as_another(opens_as_itself);
+
+	CHECK(unlink("giving/file") == 0);
+	CHECK(rmdir("giving") == 0);
+	CHECK(unlink("opened") == 0);
+	filesec_free(with_two);
+	filesec_free(with_one);
+	acl_free(two);
+	acl_free(one);
+}
+
+static filesec_t
+filesec_of(mode_t mode, acl_t acl)
+{
+	filesec_t filesec = filesec_init();
+	CHECK(filesec != NULL);
+	CHECK(filesec_set_property(filesec, FILESEC_MODE, &mode) == 0);
+	CHECK(filesec_set_property(filesec, FILESEC_ACL, &acl) == 0);
+	return filesec;
 }
 
 static acl_t

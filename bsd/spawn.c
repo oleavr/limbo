@@ -502,7 +502,7 @@ apply_file_actions(
 							action->open.oflag,
 							buffer),
 					open_flags(action->open.oflag),
-					action->open.mode);
+					action->open.mode, NULL, NULL);
 			if (fd == -1) {
 				return err_map(errno);
 			}

@@ -276,6 +276,9 @@ static int open_follow(int flags);
 static int fpathconf_value(int fd, int name);
 static short poll_events_to_linux(short events);
 static short poll_events_from_linux(short events);
+static int initial_list(user_addr_t xsecurity, struct acl_list *list,
+		const struct acl_list **initial);
+static uid_t kept_or(void *id);
 static struct timeval *convert_timevals(
 		const void *tptr, struct timeval *times);
 static unsigned int rename_flags(uint32_t flags);
@@ -314,7 +317,7 @@ sys_open(user_addr_t path, int flags, int mode)
 	char buffer[PATH_MAX];
 	return errno_map(acl_openat(AT_FDCWD,
 			open_path(AT_FDCWD, path, flags, buffer),
-			open_flags(flags), mode));
+			open_flags(flags), mode, NULL, NULL));
 }
 
 const char *
@@ -2826,7 +2829,50 @@ int
 sys_open_extended(user_addr_t path, int flags, void *uid, void *gid, int mode,
 		user_addr_t xsecurity)
 {
-	unimplemented();
+	struct acl_list list;
+	const struct acl_list *initial;
+	if (initial_list(xsecurity, &list, &initial) == -1) {
+		return _EINVAL;
+	}
+	char buffer[PATH_MAX];
+	bool created;
+	const char *host_path = open_path(AT_FDCWD, path, flags, buffer);
+	int fd = acl_openat(AT_FDCWD, host_path, open_flags(flags), mode,
+			initial, &created);
+	if (fd == -1) {
+		return err_map(errno);
+	}
+	if (created && fchown(fd, kept_or(uid), kept_or(gid)) == -1) {
+		int error = errno;
+		unlink(host_path);
+		close(fd);
+		return err_map(error);
+	}
+	return fd;
+}
+
+static int
+initial_list(user_addr_t xsecurity, struct acl_list *list,
+		const struct acl_list **initial)
+{
+	*initial = NULL;
+	if (xsecurity == NULL) {
+		return 0;
+	}
+	if (acl_from_filesec(xsecurity, list) == -1) {
+		return -1;
+	}
+	if (list->count != KAUTH_FILESEC_NOACL) {
+		*initial = list;
+	}
+	return 0;
+}
+
+static uid_t
+kept_or(void *id)
+{
+	uid_t value = (uid_t)(uintptr_t)id;
+	return value == KAUTH_UID_NONE ? (uid_t)-1 : value;
 }
 
 int
@@ -3796,7 +3842,7 @@ sys_openat(int fd, user_addr_t path, int flags, int mode)
 	char buffer[PATH_MAX];
 	return errno_map(acl_openat(at_fd(fd),
 			open_path(at_fd(fd), path, flags, buffer),
-			open_flags(flags), mode));
+			open_flags(flags), mode, NULL, NULL));
 }
 
 int
