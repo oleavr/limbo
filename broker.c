@@ -49,6 +49,7 @@ struct connection {
 	uint32_t guest_id;
 	struct broker_wire_frame *pending;
 	struct broker_wire_frame *last_pending;
+	struct broker_wire_ahead ahead;
 };
 
 struct service {
@@ -74,7 +75,7 @@ static void send_frame(struct connection *conn, uint32_t type,
 static void queue_frame(
 		struct connection *conn, struct broker_wire_frame *frame);
 static void send_pending(struct connection *conn);
-static bool send_data(int fd, const struct broker_wire_frame *frame);
+static bool send_data(int fd, struct broker_wire_frame *frame);
 
 static struct connection *connections;
 static size_t connection_count;
@@ -157,7 +158,7 @@ handle_guest(int fd)
 	struct connection *conn = &connections[index];
 
 	struct broker_wire_frame *frame;
-	int received = broker_wire_receive(fd, &frame);
+	int received = broker_wire_receive(fd, &conn->ahead, &frame);
 	if (received == -1) {
 		remove_connection(index);
 		return;
@@ -295,6 +296,7 @@ remove_connection(size_t index)
 		connections[index].pending = frame->next;
 		broker_wire_free(frame);
 	}
+	broker_wire_forget(&connections[index].ahead);
 	close(connections[index].fd);
 	connections[index] = connections[--connection_count];
 }
@@ -337,7 +339,7 @@ send_pending(struct connection *conn)
 }
 
 static bool
-send_data(int fd, const struct broker_wire_frame *frame)
+send_data(int fd, struct broker_wire_frame *frame)
 {
 	int error = broker_wire_send(fd, frame, MSG_DONTWAIT);
 	return error != EAGAIN && error != EWOULDBLOCK;

@@ -40,6 +40,7 @@
 #define BROKER_FRAME_MAX    (1 << 20)
 #define BROKER_INLINE_MAX   (64 * 1024)
 #define BROKER_DATAGRAM_FDS 253
+#define BROKER_FDS_MAX      1024
 #define BROKER_FRAME_OOL    0x80000000u
 
 enum broker_frame_type {
@@ -50,6 +51,7 @@ enum broker_frame_type {
 	BROKER_LOOKUP_REPLY,
 	BROKER_SEND,
 	BROKER_DELIVER,
+	BROKER_FDS,
 };
 
 struct broker_frame {
@@ -86,15 +88,24 @@ struct broker_wire_frame {
 	uint32_t length;
 	uint32_t inline_length;
 	size_t fd_count;
+	size_t fds_sent;
 	int *fds;
 	char payload[];
+};
+
+struct broker_wire_ahead {
+	int *fds;
+	size_t count;
+	bool lost;
 };
 
 struct broker_wire_frame *broker_wire_new(uint32_t type,
 		const struct iovec *parts, int part_count, const int *fds,
 		size_t fd_count);
-int broker_wire_send(int fd, const struct broker_wire_frame *frame, int flags);
-int broker_wire_receive(int fd, struct broker_wire_frame **received);
+int broker_wire_send(int fd, struct broker_wire_frame *frame, int flags);
+int broker_wire_receive(int fd, struct broker_wire_ahead *ahead,
+		struct broker_wire_frame **received);
+void broker_wire_forget(struct broker_wire_ahead *ahead);
 bool broker_wire_read(const struct broker_wire_frame *frame, uint32_t offset,
 		void *buffer, uint32_t length);
 void broker_wire_free(struct broker_wire_frame *frame);

@@ -57,6 +57,7 @@ int fileport_makeport(int fd, mach_port_t *port);
 int fileport_makefd(mach_port_t port);
 
 #define LARGEST_MESSAGE (2u << 20)
+#define MANY_FILEPORTS  300
 
 typedef struct {
 	mach_msg_header_t header;
@@ -88,6 +89,7 @@ static void check_out_of_line_copies(void);
 static void check_large_messages(void);
 static void check_large_message(mach_msg_size_t size);
 static void check_fileports(void);
+static void check_many_fileports(void);
 static void check_port_sets(void);
 static void check_receive_on_destroyed(void);
 static mach_msg_return_t receive_on_destroyed(mach_port_right_t right);
@@ -164,6 +166,7 @@ main(void)
 	check_out_of_line_copies();
 	check_large_messages();
 	check_fileports();
+	check_many_fileports();
 	check_port_sets();
 	check_receive_on_destroyed();
 	check_queued_rights_destroyed();
@@ -659,6 +662,67 @@ check_fileports(void)
 	CHECK(mach_port_mod_refs(mach_task_self(), port,
 			      MACH_PORT_RIGHT_RECEIVE, -1)
 			== KERN_SUCCESS);
+}
+
+static void
+check_many_fileports(void)
+{
+	struct rlimit files;
+	CHECK(getrlimit(RLIMIT_NOFILE, &files) == 0);
+	struct rlimit more = {.rlim_cur = 1024, .rlim_max = files.rlim_max};
+	CHECK(setrlimit(RLIMIT_NOFILE, &more) == 0);
+
+	static struct {
+		mach_msg_header_t header;
+		mach_msg_body_t body;
+		mach_msg_port_descriptor_t ports[MANY_FILEPORTS];
+		mach_msg_trailer_t trailer;
+	} message;
+	mach_port_t port = allocate_port();
+	message.header = (mach_msg_header_t){
+			.msgh_bits = MACH_MSGH_BITS_SET(MACH_MSG_TYPE_MAKE_SEND,
+					0, 0, MACH_MSGH_BITS_COMPLEX),
+			.msgh_size = sizeof(message) - sizeof(message.trailer),
+			.msgh_remote_port = port,
+	};
+	message.body.msgh_descriptor_count = MANY_FILEPORTS;
+	char path[] = "/tmp/limbo-fileports-XXXXXX";
+	int first = mkstemp(path);
+	CHECK(first != -1);
+	for (int i = 0; i != MANY_FILEPORTS; i++) {
+		int fd = open(path, O_RDONLY);
+		CHECK(fd != -1 && lseek(fd, i, SEEK_SET) == i);
+		mach_port_t fileport;
+		CHECK(fileport_makeport(fd, &fileport) == 0);
+		CHECK(close(fd) == 0);
+		message.ports[i] = (mach_msg_port_descriptor_t){
+				.name = fileport,
+				.disposition = MACH_MSG_TYPE_MOVE_SEND,
+				.type = MACH_MSG_PORT_DESCRIPTOR,
+		};
+	}
+	CHECK(unlink(path) == 0 && close(first) == 0);
+
+	CHECK(mach_msg(&message.header, MACH_SEND_MSG, message.header.msgh_size,
+			      0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+			      MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	CHECK(mach_msg(&message.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof(message), port, 1000, MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	for (int i = 0; i != MANY_FILEPORTS; i++) {
+		int fd = fileport_makefd(message.ports[i].name);
+		CHECK(fd != -1 && lseek(fd, 0, SEEK_CUR) == i);
+		CHECK(close(fd) == 0);
+		CHECK(mach_port_deallocate(
+				      mach_task_self(), message.ports[i].name)
+				== KERN_SUCCESS);
+	}
+
+	CHECK(mach_port_mod_refs(mach_task_self(), port,
+			      MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+	CHECK(setrlimit(RLIMIT_NOFILE, &files) == 0);
 }
 
 static void
