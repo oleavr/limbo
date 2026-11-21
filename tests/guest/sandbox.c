@@ -98,6 +98,7 @@ static void denied_renaming(void);
 static void denied_truncating(void);
 static void denied_mode(void);
 static void denied_owner(void);
+static void denied_flags(void);
 static void in_denied_folder(void (*body)(void));
 static void in_sandbox(const char *profile, void (*body)(void));
 static int remove_entry(const char *path, const struct stat *st, int type,
@@ -265,6 +266,7 @@ check_enforced(void)
 	in_denied_folder(denied_truncating);
 	in_sandbox(DENY("file-write-mode"), denied_mode);
 	in_sandbox(DENY("file-write-owner"), denied_owner);
+	in_sandbox(DENY("file-write-flags"), denied_flags);
 }
 
 static void
@@ -546,6 +548,22 @@ denied_owner(void)
 	filesec_free(filesec);
 
 	CHECK(chown(ALLOWED, uid, gid) == 0);
+	CHECK(chmod(DENIED "/existing", 0600) == 0);
+}
+
+static void
+denied_flags(void)
+{
+	errno = 0;
+	CHECK(chflags(DENIED "/existing", UF_HIDDEN) == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(fchflags(denied_fd, UF_HIDDEN) == -1);
+	CHECK(errno == EPERM);
+	struct stat st;
+	CHECK(stat(DENIED "/existing", &st) == 0 && st.st_flags == 0);
+
+	CHECK(chflags(ALLOWED, UF_HIDDEN) == 0);
 	CHECK(chmod(DENIED "/existing", 0600) == 0);
 }
 
