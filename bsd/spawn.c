@@ -44,6 +44,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "fs/acl.h"
 #include "handler.h"
 #include "signo.h"
 #include "sysroot.h"
@@ -496,8 +497,10 @@ apply_file_actions(
 		int fd;
 		switch (action->type) {
 		case PSFA_OPEN:
-			fd = open(open_path(AT_FDCWD, action->open.path,
-						  action->open.oflag, buffer),
+			fd = acl_openat(AT_FDCWD,
+					open_path(AT_FDCWD, action->open.path,
+							action->open.oflag,
+							buffer),
 					open_flags(action->open.oflag),
 					action->open.mode);
 			if (fd == -1) {

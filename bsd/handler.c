@@ -312,7 +312,8 @@ sys_open(user_addr_t path, int flags, int mode)
 		return fsevents_open(flags & _O_CLOEXEC);
 	}
 	char buffer[PATH_MAX];
-	return errno_map(open(open_path(AT_FDCWD, path, flags, buffer),
+	return errno_map(acl_openat(AT_FDCWD,
+			open_path(AT_FDCWD, path, flags, buffer),
 			open_flags(flags), mode));
 }
 
@@ -3793,7 +3794,7 @@ sys_openat(int fd, user_addr_t path, int flags, int mode)
 		return fsevents_open(flags & _O_CLOEXEC);
 	}
 	char buffer[PATH_MAX];
-	return errno_map(openat(at_fd(fd),
+	return errno_map(acl_openat(at_fd(fd),
 			open_path(at_fd(fd), path, flags, buffer),
 			open_flags(flags), mode));
 }

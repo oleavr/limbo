@@ -32,6 +32,7 @@
 #include "acl.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -53,6 +54,13 @@ _Static_assert(sizeof(struct filesec_header) == ACL_FILESEC_HEADER_SIZE,
 static int object_open(int dirfd, const char *host_path, int at_flags);
 static void object_path(int fd, char *buffer, size_t size);
 static bool may_set(const struct stat *s);
+static bool parent_gives(
+		int dirfd, const char *host_path, struct acl_list *parent);
+static void parent_path(
+		int dirfd, const char *host_path, char *buffer, size_t size);
+static int open_or_make(int dirfd, const char *host_path, int flags,
+		mode_t mode, bool *made);
+static void inherit(int fd, const struct acl_list *parent);
 
 int
 acl_from_filesec(const void *xsecurity, struct acl_list *list)
@@ -130,6 +138,92 @@ may_set(const struct stat *s)
 {
 	uid_t me = (uid_t)setfsuid((uid_t)-1);
 	return me == 0 || me == s->st_uid;
+}
+
+int
+acl_openat(int dirfd, const char *host_path, int flags, mode_t mode)
+{
+	struct acl_list parent;
+	if (!(flags & O_CREAT) || !parent_gives(dirfd, host_path, &parent)) {
+		return openat(dirfd, host_path, flags, mode);
+	}
+	bool made;
+	int fd = open_or_make(dirfd, host_path, flags, mode, &made);
+	if (made) {
+		inherit(fd, &parent);
+	}
+	return fd;
+}
+
+static bool
+parent_gives(int dirfd, const char *host_path, struct acl_list *parent)
+{
+	char path[PATH_MAX + 48];
+	parent_path(dirfd, host_path, path, sizeof(path));
+	acl_record_read(path, parent);
+	return acl_inheritable(parent);
+}
+
+static void
+parent_path(int dirfd, const char *host_path, char *buffer, size_t size)
+{
+	size_t end = strlen(host_path);
+	while (end > 1 && host_path[end - 1] == '/') {
+		end--;
+	}
+	while (end > 0 && host_path[end - 1] != '/') {
+		end--;
+	}
+	while (end > 1 && host_path[end - 1] == '/') {
+		end--;
+	}
+	if (end > 0 && (host_path[0] == '/' || dirfd == AT_FDCWD)) {
+		snprintf(buffer, size, "%.*s", (int)end, host_path);
+	} else if (end > 0) {
+		snprintf(buffer, size, "/proc/thread-self/fd/%d/%.*s", dirfd,
+				(int)end, host_path);
+	} else if (dirfd == AT_FDCWD) {
+		snprintf(buffer, size, ".");
+	} else {
+		object_path(dirfd, buffer, size);
+	}
+}
+
+static int
+open_or_make(int dirfd, const char *host_path, int flags, mode_t mode,
+		bool *made)
+{
+	*made = false;
+	int fd = -1;
+	for (int attempt = 0; attempt < 2 && fd == -1; attempt++) {
+		fd = openat(dirfd, host_path, flags | O_EXCL, mode);
+		if (fd != -1) {
+			*made = true;
+		} else if (errno == EEXIST && !(flags & O_EXCL)) {
+			fd = openat(dirfd, host_path, flags & ~O_CREAT, mode);
+			if (fd == -1 && errno != ENOENT) {
+				return -1;
+			}
+		} else {
+			return -1;
+		}
+	}
+	return fd != -1 ? fd : openat(dirfd, host_path, flags, mode);
+}
+
+static void
+inherit(int fd, const struct acl_list *parent)
+{
+	char path[48];
+	object_path(fd, path, sizeof(path));
+	struct stat s;
+	fstat(fd, &s);
+	struct acl_list list;
+	if (!S_ISLNK(s.st_mode)
+			&& acl_inherit(parent, NULL, S_ISDIR(s.st_mode),
+					&list)) {
+		acl_store(path, &list);
+	}
 }
 
 size_t

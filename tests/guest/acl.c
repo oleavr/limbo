@@ -45,6 +45,12 @@
 #define FILESEC_MAGIC 0x012cc16d
 #define FILESEC_NOACL UINT32_MAX
 
+#define INHERITED         (1 << 4)
+#define FILE_INHERIT      (1 << 5)
+#define DIRECTORY_INHERIT (1 << 6)
+#define LIMIT_INHERIT     (1 << 7)
+#define ONLY_INHERIT      (1 << 8)
+
 struct entry {
 	uint8_t applicable[16];
 	uint32_t flags;
@@ -66,6 +72,7 @@ static int remove_entry(const char *path, const struct stat *st, int type,
 static void check_kept(void);
 static void check_listed(void);
 static void check_hidden(void);
+static void check_inherited(void);
 static acl_t list_of(int count, const uid_t *users, const acl_perm_t *perms,
 		const int *flags);
 static void user_guid(uid_t user, uint8_t guid[16]);
@@ -95,6 +102,7 @@ main(void)
 	check_kept();
 	check_listed();
 	check_hidden();
+	check_inherited();
 
 	CHECK(chdir("/") == 0);
 	CHECK(rmdir(folder) == 0);
@@ -259,6 +267,63 @@ check_hidden(void)
 	}
 	CHECK(entries("hidden") == 1);
 	CHECK(unlink("hidden") == 0);
+}
+
+static void
+check_inherited(void)
+{
+	CHECK(mkdir("parent", 0755) == 0);
+	uid_t users[] = {USER, USER + 1, USER + 2};
+	acl_perm_t perms[] = {ACL_READ_DATA | ACL_WRITE_DATA | ACL_EXECUTE,
+			ACL_READ_DATA, ACL_READ_DATA};
+	int flags[] = {FILE_INHERIT | DIRECTORY_INHERIT,
+			DIRECTORY_INHERIT | LIMIT_INHERIT,
+			FILE_INHERIT | ONLY_INHERIT};
+	set_list("parent", 3, users, perms, flags);
+	CHECK(entries("parent") == 3);
+
+	struct entry found;
+	int fd = open("parent/file", O_CREAT | O_WRONLY, 0644);
+	CHECK(fd != -1 && close(fd) == 0);
+	CHECK(entries("parent/file") == 2);
+	CHECK(entry_for("parent/file", USER, &found));
+	CHECK(found.flags == (ACL_EXTENDED_ALLOW | INHERITED));
+	CHECK(found.rights == perms[0]);
+	CHECK(entry_for("parent/file", USER + 2, &found));
+	CHECK(found.flags == (ACL_EXTENDED_ALLOW | INHERITED));
+	CHECK(!entry_for("parent/file", USER + 1, &found));
+	struct stat st;
+	CHECK(stat("parent/file", &st) == 0 && (st.st_mode & 0777) == 0644);
+
+	remove_list("parent/file");
+	fd = open("parent/file", O_CREAT | O_WRONLY, 0644);
+	CHECK(fd != -1 && close(fd) == 0);
+	CHECK(entries("parent/file") == -1);
+
+	fd = open("parent/exclusive", O_CREAT | O_EXCL | O_WRONLY, 0600);
+	CHECK(fd != -1 && close(fd) == 0);
+	CHECK(entries("parent/exclusive") == 2);
+	CHECK(open("parent/exclusive", O_CREAT | O_EXCL | O_WRONLY, 0600)
+			== -1);
+	CHECK(errno == EEXIST);
+
+	CHECK(symlink("parent/through", "dangling") == 0);
+	fd = open("dangling", O_CREAT | O_WRONLY, 0644);
+	CHECK(fd != -1 && close(fd) == 0);
+	CHECK(entries("parent/through") == 2);
+	CHECK(unlink("parent/through") == 0);
+	CHECK(unlink("dangling") == 0);
+
+	CHECK(mkdir("plain", 0755) == 0);
+	fd = open("plain/file", O_CREAT | O_WRONLY, 0644);
+	CHECK(fd != -1 && close(fd) == 0);
+	CHECK(entries("plain/file") == -1);
+
+	CHECK(unlink("plain/file") == 0);
+	CHECK(rmdir("plain") == 0);
+	CHECK(unlink("parent/exclusive") == 0);
+	CHECK(unlink("parent/file") == 0);
+	CHECK(rmdir("parent") == 0);
 }
 
 static acl_t

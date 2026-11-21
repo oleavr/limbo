@@ -27,6 +27,7 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <sys/stat.h>
 
@@ -35,6 +36,17 @@
 #define KAUTH_FILESEC_MAGIC   0x012cc16d
 #define KAUTH_FILESEC_NOACL   UINT32_MAX
 #define KAUTH_ACL_MAX_ENTRIES 128
+
+#define KAUTH_ACL_NO_INHERIT (1 << 17)
+
+#define KAUTH_ACE_INHERITED         (1 << 4)
+#define KAUTH_ACE_FILE_INHERIT      (1 << 5)
+#define KAUTH_ACE_DIRECTORY_INHERIT (1 << 6)
+#define KAUTH_ACE_LIMIT_INHERIT     (1 << 7)
+#define KAUTH_ACE_ONLY_INHERIT      (1 << 8)
+#define KAUTH_ACE_INHERIT_CONTROL_FLAGS                                        \
+	(KAUTH_ACE_FILE_INHERIT | KAUTH_ACE_DIRECTORY_INHERIT                  \
+			| KAUTH_ACE_LIMIT_INHERIT | KAUTH_ACE_ONLY_INHERIT)
 
 struct kauth_ace {
 	uint8_t applicable[16];
@@ -50,3 +62,6 @@ struct acl_list {
 
 void acl_record_read(const char *path, struct acl_list *list);
 int acl_store(const char *path, const struct acl_list *list);
+bool acl_inheritable(const struct acl_list *list);
+bool acl_inherit(const struct acl_list *parent, const struct acl_list *initial,
+		bool directory, struct acl_list *list);

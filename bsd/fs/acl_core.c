@@ -74,3 +74,52 @@ acl_store(const char *path, const struct acl_list *list)
 	}
 	return setxattr(path, ACL_XATTR, list, list_size(list), 0);
 }
+
+bool
+acl_inheritable(const struct acl_list *list)
+{
+	uint32_t inheritable
+			= KAUTH_ACE_FILE_INHERIT | KAUTH_ACE_DIRECTORY_INHERIT;
+	for (uint32_t i = 0;
+			list->count != KAUTH_FILESEC_NOACL && i < list->count;
+			i++) {
+		if (list->ace[i].flags & inheritable) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool
+acl_inherit(const struct acl_list *parent, const struct acl_list *initial,
+		bool directory, struct acl_list *list)
+{
+	list->count = 0;
+	list->flags = initial != NULL ? initial->flags : 0;
+	for (uint32_t i = 0; initial != NULL && i < initial->count; i++) {
+		if (!(initial->ace[i].flags & KAUTH_ACE_INHERITED)) {
+			list->ace[list->count++] = initial->ace[i];
+		}
+	}
+	bool inherits = parent->count != KAUTH_FILESEC_NOACL
+			&& !(list->flags & KAUTH_ACL_NO_INHERIT);
+	uint32_t inherited = directory ? KAUTH_ACE_DIRECTORY_INHERIT
+				       : KAUTH_ACE_FILE_INHERIT;
+	for (uint32_t i = 0; inherits && i < parent->count
+			&& list->count < KAUTH_ACL_MAX_ENTRIES;
+			i++) {
+		struct kauth_ace ace = parent->ace[i];
+		if (!(ace.flags & inherited)) {
+			continue;
+		}
+		bool passes_on = directory
+				&& !(ace.flags & KAUTH_ACE_LIMIT_INHERIT);
+		ace.flags |= KAUTH_ACE_INHERITED;
+		ace.flags &= ~KAUTH_ACE_ONLY_INHERIT;
+		if (!passes_on) {
+			ace.flags &= ~KAUTH_ACE_INHERIT_CONTROL_FLAGS;
+		}
+		list->ace[list->count++] = ace;
+	}
+	return initial != NULL || list->count > 0;
+}
