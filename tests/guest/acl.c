@@ -43,6 +43,7 @@
 #define USER 501
 
 #define FILESEC_MAGIC 0x012cc16d
+#define FILESEC_NOACL UINT32_MAX
 
 struct entry {
 	uint8_t applicable[16];
@@ -76,6 +77,8 @@ static int entries_of(acl_t acl);
 static bool allows(const char *path, uid_t user, acl_perm_t perm);
 static bool read_filesec(const char *path, struct filesec *filesec);
 static bool entry_for(const char *path, uid_t user, struct entry *found);
+static int write_filesec(
+		const char *path, const struct filesec *filesec, size_t size);
 
 static char folder[] = "/tmp/limbo-access-XXXXXX";
 static pid_t owner;
@@ -200,6 +203,28 @@ check_listed(void)
 
 	remove_list("listed");
 	CHECK(!read_filesec("listed", &filesec));
+
+	struct filesec wanted = {.magic = FILESEC_MAGIC, .count = 1};
+	user_guid(USER, wanted.entry[0].applicable);
+	wanted.entry[0].flags = ACL_EXTENDED_ALLOW;
+	wanted.entry[0].rights = ACL_READ_DATA;
+	size_t size = offsetof(struct filesec, entry) + sizeof(struct entry);
+	CHECK(write_filesec("listed", &wanted, size) == 0);
+	CHECK(entries("listed") == 1);
+	CHECK(allows("listed", USER, ACL_READ_DATA));
+	errno = 0;
+	CHECK(write_filesec("listed", &wanted, size - 1) == -1);
+	CHECK(errno == EINVAL);
+	wanted.magic = 0;
+	errno = 0;
+	CHECK(write_filesec("listed", &wanted, size) == -1);
+	CHECK(errno == EINVAL);
+	CHECK(entries("listed") == 1);
+	wanted.magic = FILESEC_MAGIC;
+	wanted.count = FILESEC_NOACL;
+	CHECK(write_filesec("listed", &wanted, offsetof(struct filesec, entry))
+			== 0);
+	CHECK(entries("listed") == -1);
 	CHECK(unlink("listed") == 0);
 }
 
@@ -400,4 +425,21 @@ entry_for(const char *path, uid_t user, struct entry *found)
 		}
 	}
 	return false;
+}
+
+static int
+write_filesec(const char *path, const struct filesec *filesec, size_t size)
+{
+	struct {
+		attrreference_t reference;
+		struct filesec filesec;
+	} __attribute__((packed)) buffer;
+	buffer.reference.attr_dataoffset = sizeof(buffer.reference);
+	buffer.reference.attr_length = size;
+	buffer.filesec = *filesec;
+	struct attrlist request = {
+			.bitmapcount = ATTR_BIT_MAP_COUNT,
+			.commonattr = ATTR_CMN_EXTENDED_SECURITY,
+	};
+	return setattrlist(path, &request, &buffer, sizeof(buffer), 0);
 }
