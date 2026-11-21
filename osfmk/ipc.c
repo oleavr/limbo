@@ -78,6 +78,7 @@ struct ipc_port {
 	mach_port_seqno_t seqno;
 	mach_port_mscount_t mscount;
 	mach_port_urefs_t kernel_sorights;
+	struct ipc_port *no_senders_notify;
 	mach_port_context_t context;
 	uint64_t global_id;
 	bool remote;
@@ -108,6 +109,7 @@ struct pending_notice {
 	mach_msg_id_t id;
 	struct ipc_port *notify;
 	mach_port_name_t name;
+	mach_port_mscount_t mscount;
 };
 
 struct remote_header {
@@ -237,6 +239,8 @@ static void flush_notices(void);
 static void notify_port_deleted(struct ipc_port *notify, mach_port_name_t name);
 static void notify_send_possible(
 		struct ipc_port *notify, mach_port_name_t name);
+static void notify_no_senders(
+		struct ipc_port *notify, mach_port_mscount_t mscount);
 static void notify_send_once(struct ipc_port *port);
 static void notify_dead_name(struct ipc_port *notify, mach_port_name_t name);
 static void deliver_notification(
@@ -244,6 +248,9 @@ static void deliver_notification(
 static kern_return_t request_notification(mach_port_name_t name,
 		mach_msg_id_t id, mach_port_mscount_t sync,
 		mach_port_name_t notify, mach_port_name_t *previous);
+static kern_return_t request_no_senders(mach_port_name_t name,
+		mach_port_mscount_t sync, mach_port_name_t notify,
+		struct ipc_port **replaced);
 static kern_return_t request_dead_name(mach_port_name_t name, mach_msg_id_t id,
 		mach_port_mscount_t sync, mach_port_name_t notify,
 		struct ipc_port **replaced);
@@ -255,7 +262,10 @@ static struct ipc_entry *lookup(mach_port_name_t name);
 static struct ipc_port *port_alloc(ipc_kobject_type_t kotype);
 static struct ipc_entry *entry_alloc(struct ipc_port *port);
 static void entry_release_if_unused(struct ipc_entry *entry);
+static void destroy_requests(struct ipc_port *port);
+static void destroy_send_once(struct ipc_port **right);
 static void port_free_if_unheld(struct ipc_port *port);
+static void queue_no_senders_notification(struct ipc_entry *entry);
 static struct ipc_port *cancel_dead_name_request(mach_port_name_t name);
 static struct ipc_port *hold_send_once(mach_port_name_t name);
 static mach_port_name_t send_once_name(struct ipc_port *port);
@@ -1628,6 +1638,7 @@ ipc_port_deallocate(mach_port_name_t name)
 		if (--entry->urefs == 0) {
 			entry->type &= ~(MACH_PORT_TYPE_SEND
 					| MACH_PORT_TYPE_DEAD_NAME);
+			queue_no_senders_notification(entry);
 		}
 	} else if (entry->type & MACH_PORT_TYPE_SEND_ONCE) {
 		if (--entry->sorights == 0) {
@@ -1679,6 +1690,7 @@ ipc_port_mod_refs(mach_port_name_t name, mach_port_right_t right,
 		entry->urefs += delta;
 		if (entry->urefs == 0) {
 			entry->type &= ~type;
+			queue_no_senders_notification(entry);
 		}
 	} break;
 	case MACH_PORT_RIGHT_SEND_ONCE:
@@ -1742,6 +1754,9 @@ flush_notices(void)
 		case MACH_NOTIFY_SEND_POSSIBLE:
 			notify_send_possible(notice->notify, notice->name);
 			break;
+		case MACH_NOTIFY_NO_SENDERS:
+			notify_no_senders(notice->notify, notice->mscount);
+			break;
 		case MACH_NOTIFY_SEND_ONCE:
 			notify_send_once(notice->notify);
 			break;
@@ -1779,6 +1794,21 @@ notify_send_possible(struct ipc_port *notify, mach_port_name_t name)
 		},
 		.NDR = NDR_record,
 		.not_port = name,
+	};
+	deliver_notification(notify, &notification.not_header);
+}
+
+static void
+notify_no_senders(struct ipc_port *notify, mach_port_mscount_t mscount)
+{
+	mach_no_senders_notification_t notification = {
+		.not_header = {
+			.msgh_size = sizeof(notification)
+					- sizeof(notification.trailer),
+			.msgh_id = MACH_NOTIFY_NO_SENDERS,
+		},
+		.NDR = NDR_record,
+		.not_count = mscount,
 	};
 	deliver_notification(notify, &notification.not_header);
 }
@@ -2199,6 +2229,9 @@ request_notification(mach_port_name_t name, mach_msg_id_t id,
 	struct ipc_port *replaced = NULL;
 	kern_return_t kr = KERN_SUCCESS;
 	switch (id) {
+	case MACH_NOTIFY_NO_SENDERS:
+		kr = request_no_senders(name, sync, notify, &replaced);
+		break;
 	case MACH_NOTIFY_SEND_POSSIBLE:
 	case MACH_NOTIFY_DEAD_NAME:
 		kr = request_dead_name(name, id, sync, notify, &replaced);
@@ -2214,6 +2247,29 @@ request_notification(mach_port_name_t name, mach_msg_id_t id,
 		return kr;
 	}
 	*previous = send_once_name(replaced);
+	return KERN_SUCCESS;
+}
+
+static kern_return_t
+request_no_senders(mach_port_name_t name, mach_port_mscount_t sync,
+		mach_port_name_t notify, struct ipc_port **replaced)
+{
+	struct ipc_entry *entry = lookup(name);
+	if (entry == NULL) {
+		return KERN_INVALID_NAME;
+	}
+	if (!(entry->type & MACH_PORT_TYPE_RECEIVE)) {
+		return KERN_INVALID_RIGHT;
+	}
+
+	struct ipc_port *port = entry->port;
+	*replaced = port->no_senders_notify;
+	port->no_senders_notify = notify != MACH_PORT_NULL
+			? hold_send_once(notify)
+			: NULL;
+	if (sync <= port->mscount) {
+		queue_no_senders_notification(entry);
+	}
 	return KERN_SUCCESS;
 }
 
@@ -2272,6 +2328,7 @@ destroy_receive_right(struct ipc_entry *entry)
 	struct ipc_kmsg *queued = port->messages;
 	port->messages = NULL;
 	port_leave_all_sets(port);
+	destroy_requests(port);
 
 	entry->type &= ~MACH_PORT_TYPE_RECEIVE;
 	if (entry->type & (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE)) {
@@ -2372,6 +2429,7 @@ destroy_right(mach_port_name_t name, mach_msg_type_name_t type)
 		if (--entry->urefs == 0) {
 			entry->type &= ~(MACH_PORT_TYPE_SEND
 					| MACH_PORT_TYPE_DEAD_NAME);
+			queue_no_senders_notification(entry);
 		}
 		break;
 	case MACH_MSG_TYPE_PORT_SEND_ONCE:
@@ -2464,6 +2522,7 @@ entry_release_if_unused(struct ipc_entry *entry)
 	}
 	if (port->kotype == IPC_KOBJECT_NONE) {
 		port_leave_all_sets(port);
+		destroy_requests(port);
 		port_free_if_unheld(port);
 	} else if (port->kotype == IPC_KOBJECT_FILEPORT) {
 		close(*(int *)port->kobject);
@@ -2477,11 +2536,49 @@ entry_release_if_unused(struct ipc_entry *entry)
 }
 
 static void
+destroy_requests(struct ipc_port *port)
+{
+	destroy_send_once(&port->no_senders_notify);
+}
+
+static void
+destroy_send_once(struct ipc_port **right)
+{
+	if (*right == NULL) {
+		return;
+	}
+
+	queue_notice((struct pending_notice){
+			.id = MACH_NOTIFY_SEND_ONCE,
+			.notify = *right,
+	});
+	*right = NULL;
+}
+
+static void
 port_free_if_unheld(struct ipc_port *port)
 {
 	if (port->name == MACH_PORT_NULL && port->kernel_sorights == 0) {
 		free(port);
 	}
+}
+
+static void
+queue_no_senders_notification(struct ipc_entry *entry)
+{
+	struct ipc_port *port = entry->port;
+	if (!(entry->type & MACH_PORT_TYPE_RECEIVE)
+			|| (entry->type & MACH_PORT_TYPE_SEND)
+			|| port->no_senders_notify == NULL) {
+		return;
+	}
+
+	queue_notice((struct pending_notice){
+			.id = MACH_NOTIFY_NO_SENDERS,
+			.notify = port->no_senders_notify,
+			.mscount = port->mscount,
+	});
+	port->no_senders_notify = NULL;
 }
 
 static struct ipc_port *
