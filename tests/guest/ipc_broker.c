@@ -43,6 +43,7 @@
 
 #define PORT_COUNT   32
 #define FDS_SEEN     256
+#define SETTLE_USEC  200000
 #define OVERSIZED    (2u << 20)
 #define GUARD_TICKS  1000
 #define REAP_TICKS   100
@@ -97,6 +98,7 @@ typedef struct {
 } raw_message_t;
 
 static const char SERVICE_NAME[] = "com.limbo.test.ipc";
+static const char LOST_NAME[] = "com.limbo.test.ipc.lost";
 static const char *program;
 static const char PEER_NAME[] = "com.limbo.test.ipc.peer";
 static const mach_msg_id_t CHECK_IN = 402;
@@ -683,6 +685,37 @@ stop(pid_t pid)
 }
 
 static void
+lose_connection(void)
+{
+	bool open_before[FDS_SEEN];
+	for (int fd = 0; fd != FDS_SEEN; fd++) {
+		open_before[fd] = fcntl(fd, F_GETFD) != -1;
+	}
+	CHECK(bootstrap_call(LOOK_UP, LOST_NAME) != MACH_PORT_NULL);
+	int violated = 0;
+	for (int fd = 0; fd != FDS_SEEN; fd++) {
+		if (!open_before[fd] && fcntl(fd, F_GETFD) != -1) {
+			violated += write(fd, "", 1) == 1;
+		}
+	}
+	CHECK(violated == 1);
+	usleep(SETTLE_USEC);
+	CHECK(bootstrap_call(LOOK_UP, LOST_NAME) == MACH_PORT_NULL);
+}
+
+static void
+check_lost_connection(void)
+{
+	CHECK(bootstrap_call(CHECK_IN, LOST_NAME) != MACH_PORT_NULL);
+	pid_t child = start(lose_connection);
+	pid_t guardian = guard(child);
+	int status = reap(child);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	kill(guardian, SIGKILL);
+	reap(guardian);
+}
+
+static void
 check_exec(void)
 {
 	pid_t child = start(connect_and_exec);
@@ -935,6 +968,7 @@ main(int argc, char *argv[])
 	}
 	program = argv[0];
 	check_exec();
+	check_lost_connection();
 
 	pid_t pid = fork();
 	CHECK(pid >= 0);
