@@ -47,6 +47,7 @@
 
 #include "acl.h"
 #include "at.h"
+#include "bsd/gid.h"
 #include "bsd/mac.h"
 #include "bsd/xnu-errno.h"
 #include "bsd_flags.h"
@@ -479,7 +480,7 @@ pack_attributes(int fd, bool data, const struct __darwin_attrlist *alistp,
 	}
 
 	if (returned.commonattr & ATTR_CMN_GRPID) {
-		offset = pack_u32(buffer, offset, s.st_gid);
+		offset = pack_u32(buffer, offset, gid_from_linux(s.st_gid));
 		commonattr &= ~ATTR_CMN_GRPID;
 	}
 
@@ -542,7 +543,7 @@ pack_attributes(int fd, bool data, const struct __darwin_attrlist *alistp,
 		static const uint8_t prefix[12] = {0xab, 0xcd, 0xef, 0xab, 0xcd,
 				0xef, 0xab, 0xcd, 0xef, 0xab, 0xcd, 0xef};
 		memcpy(buffer + offset, prefix, sizeof(prefix));
-		uint32_t id = htonl(s.st_gid);
+		uint32_t id = htonl(gid_from_linux(s.st_gid));
 		memcpy(buffer + offset + sizeof(prefix), &id, sizeof(id));
 		offset += 16;
 		commonattr &= ~ATTR_CMN_GRPUUID;

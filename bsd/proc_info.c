@@ -42,6 +42,7 @@
 #include "codesign.h"
 #include "commpage.h"
 #include "fs/device.h"
+#include "gid.h"
 #include "handler.h"
 #include "kevent.h"
 #include "kmsg.h"
@@ -1059,7 +1060,7 @@ fill_vnode_info(const char *file, const struct stat *st,
 	vst->vst_nlink = st->st_nlink;
 	vst->vst_ino = sysroot_file_id(st->st_dev, st->st_ino);
 	vst->vst_uid = st->st_uid;
-	vst->vst_gid = st->st_gid;
+	vst->vst_gid = gid_from_linux(st->st_gid);
 	vst->vst_atime = st->st_atim.tv_sec;
 	vst->vst_atimensec = st->st_atim.tv_nsec;
 	vst->vst_mtime = st->st_mtim.tv_sec;
