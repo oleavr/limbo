@@ -158,6 +158,8 @@ static const mach_msg_id_t SEND_LAST_ID = 7922;
 static const mach_msg_id_t FAIL_REPLY_ID = 7923;
 static const mach_msg_id_t FORWARD_REPLY_ID = 7924;
 static const mach_msg_id_t HOLD_BODY_ID = 7925;
+static const mach_msg_id_t STARVE_ID = 7926;
+static const mach_msg_id_t FEED_ID = 7927;
 static const char FROM_SENDER[] = "from the sender";
 static const char FROM_RECEIVER[] = "from the receiver";
 
@@ -792,6 +794,8 @@ serve_peer(void)
 	mach_port_t held_reply = MACH_PORT_NULL;
 	mach_port_t doomed = MACH_PORT_NULL;
 	mach_port_t watch = MACH_PORT_NULL;
+	struct rlimit files;
+	struct rlimit none = {0};
 	mach_port_name_t seen;
 	for (;;) {
 		static union {
@@ -889,6 +893,12 @@ serve_peer(void)
 			answer(&message.Head, 1);
 		} else if (message.Head.msgh_id == HOLD_BODY_ID) {
 			held_reply = message.carrier.port.name;
+		} else if (message.Head.msgh_id == STARVE_ID) {
+			CHECK(getrlimit(RLIMIT_NOFILE, &files) == 0);
+			none.rlim_max = files.rlim_max;
+			answer(&message.Head, setrlimit(RLIMIT_NOFILE, &none));
+		} else if (message.Head.msgh_id == FEED_ID) {
+			answer(&message.Head, setrlimit(RLIMIT_NOFILE, &files));
 		} else if (message.Head.msgh_id == LARGE_ID) {
 			answer(&message.Head,
 					patterned(message.bytes,
@@ -1900,6 +1910,18 @@ check_failed_send(mach_port_t to)
 			== MACH_MSG_SUCCESS);
 	destroy_port(reply);
 	destroy_port(port);
+
+	CHECK(ask_for(to, STARVE_ID) == 0);
+	int read_end;
+	carrier_t carrier = carrier_of(
+			to, FILEPORT_ID, fileport_of_pipe(&read_end));
+	reply = post(&carrier.Head);
+	CHECK(receive_notification(
+			      reply, MACH_NOTIFY_SEND_ONCE, ANSWER_MS, &unused)
+			== MACH_MSG_SUCCESS);
+	destroy_port(reply);
+	CHECK(close(read_end) == 0);
+	CHECK(ask_for(to, FEED_ID) == 0);
 
 	reply = post_for(to, HOLD_REPLY_ID);
 	CHECK(ask_for(to, FAIL_REPLY_ID) == MACH_SEND_NO_BUFFER);

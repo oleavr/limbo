@@ -96,6 +96,7 @@ struct broker_wire_frame {
 	uint32_t inline_length;
 	size_t fd_count;
 	size_t fds_sent;
+	bool lost;
 	int *fds;
 	char payload[];
 };

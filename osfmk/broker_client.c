@@ -49,6 +49,8 @@ static void *read_until_end(void *user);
 static void *read_frames(void *user);
 static void dispatch_frame(const struct broker_frame *header,
 		const void *payload, const int *fds, size_t fd_count);
+static void discard_frame(
+		const struct broker_frame *header, const void *payload);
 static uint32_t least_length(uint32_t type);
 static void expect_reply(void);
 static struct broker_lookup_reply await_reply(void);
@@ -208,6 +210,11 @@ read_frames(void *user)
 				.type = frame->type & ~BROKER_FRAME_OOL,
 				.length = frame->length,
 		};
+		if (frame->lost) {
+			discard_frame(&header, frame->payload);
+			broker_wire_free(frame);
+			continue;
+		}
 		if (!(frame->type & BROKER_FRAME_OOL)) {
 			dispatch_frame(&header, frame->payload, frame->fds,
 					frame->fd_count);
@@ -260,6 +267,18 @@ dispatch_frame(const struct broker_frame *header, const void *payload,
 		}
 		break;
 	}
+	}
+}
+
+static void
+discard_frame(const struct broker_frame *header, const void *payload)
+{
+	const struct broker_send *send = payload;
+	if (header->type == BROKER_DELIVER && header->length >= sizeof(*send)
+			&& send->blob_length
+					<= header->length - sizeof(*send)) {
+		ipc_remote_lost(send->dest_global_id, send + 1,
+				send->blob_length);
 	}
 }
 

@@ -304,10 +304,16 @@ broker_wire_receive(int fd, struct broker_wire_ahead *ahead,
 		free(frame);
 		return 0;
 	}
-	if (ahead->lost) {
+	if (ahead->lost && out_of_line) {
 		ahead->lost = false;
 		broker_wire_free(frame);
 		return 0;
+	}
+	if (ahead->lost) {
+		close_fds(frame->fds, frame->fd_count);
+		frame->fd_count = 0;
+		frame->lost = true;
+		ahead->lost = false;
 	}
 
 	frame->type = header.type;
