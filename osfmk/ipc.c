@@ -270,9 +270,9 @@ static mach_port_name_t import_memory_entry(int fd, const uint8_t *record);
 static struct ipc_entry *adopt_object(ipc_kobject_type_t kotype, void *kobject);
 static void count_rights(const mach_msg_header_t *header, mach_msg_bits_t bits,
 		uint64_t reply_global_id, const uint64_t *global_ids,
-		uint32_t dest_guest_id);
+		uint32_t dest_guest_id, bool sent);
 static void count_right(mach_port_name_t name, mach_msg_type_name_t type,
-		uint64_t global_id, uint32_t dest_guest_id);
+		uint64_t global_id, uint32_t dest_guest_id, bool sent);
 static void count_sender_guest(
 		struct ipc_port *port, uint32_t guest_id, uint64_t count);
 static void release_grants(
@@ -772,7 +772,7 @@ remote_send(mach_msg_header_t *header, mach_msg_size_t size, ipc_side_t sender,
 	};
 
 	count_rights(header, bits, rh.reply_global_id, global_ids,
-			broker_guest_of(dest_global_id));
+			broker_guest_of(dest_global_id), true);
 
 	uint32_t ids_length = descriptor_count * sizeof(global_ids[0]);
 	uint32_t blob_length = sizeof(rh) + size + ids_length + data_length;
@@ -780,7 +780,6 @@ remote_send(mach_msg_header_t *header, mach_msg_size_t size, ipc_side_t sender,
 	memcpy(blob, &rh, sizeof(rh));
 	memcpy(blob + sizeof(rh), header, size);
 	memcpy(blob + sizeof(rh) + size, global_ids, ids_length);
-	free(global_ids);
 	memcpy(blob + sizeof(rh) + size + ids_length, data, data_length);
 	free(data);
 
@@ -794,6 +793,14 @@ remote_send(mach_msg_header_t *header, mach_msg_size_t size, ipc_side_t sender,
 		mr = broker_client_send(dest_global_id, blob, blob_length,
 				fds.fds, fds.count);
 	}
+	if (mr != MACH_MSG_SUCCESS) {
+		pthread_mutex_lock(&lock);
+		count_rights(header, bits, rh.reply_global_id, global_ids,
+				broker_guest_of(dest_global_id), false);
+		pthread_mutex_unlock(&lock);
+		flush_notices();
+	}
+	free(global_ids);
 	free(fds.fds);
 	free(blob);
 	return mr;
@@ -955,11 +962,11 @@ close_fds(const struct remote_fds *fds)
 static void
 count_rights(const mach_msg_header_t *header, mach_msg_bits_t bits,
 		uint64_t reply_global_id, const uint64_t *global_ids,
-		uint32_t dest_guest_id)
+		uint32_t dest_guest_id, bool sent)
 {
 	count_right(header->msgh_local_port,
 			received_type(MACH_MSGH_BITS_LOCAL(bits)),
-			reply_global_id, dest_guest_id);
+			reply_global_id, dest_guest_id, sent);
 	if (!(bits & MACH_MSGH_BITS_COMPLEX)) {
 		return;
 	}
@@ -975,7 +982,8 @@ count_rights(const mach_msg_header_t *header, mach_msg_bits_t bits,
 					= (const mach_msg_port_descriptor_t *)
 							cursor;
 			count_right(d->name, d->disposition,
-					global_ids[count++], dest_guest_id);
+					global_ids[count++], dest_guest_id,
+					sent);
 			cursor += sizeof(*d);
 		} else if (descriptor->type == MACH_MSG_OOL_DESCRIPTOR
 				|| descriptor->type
@@ -987,7 +995,8 @@ count_rights(const mach_msg_header_t *header, mach_msg_bits_t bits,
 									*)
 							cursor;
 			count_right(d->name, d->disposition,
-					global_ids[count++], dest_guest_id);
+					global_ids[count++], dest_guest_id,
+					sent);
 			cursor += sizeof(*d);
 		}
 	}
@@ -995,26 +1004,32 @@ count_rights(const mach_msg_header_t *header, mach_msg_bits_t bits,
 
 static void
 count_right(mach_port_name_t name, mach_msg_type_name_t type,
-		uint64_t global_id, uint32_t dest_guest_id)
+		uint64_t global_id, uint32_t dest_guest_id, bool sent)
 {
 	struct ipc_entry *entry = lookup(name);
-	if (entry == NULL || entry->port->global_id != global_id) {
-		return;
-	}
-
-	if (type == MACH_MSG_TYPE_PORT_SEND
-			&& (entry->type & MACH_PORT_TYPE_RECEIVE)) {
+	bool owned = entry != NULL && entry->port->global_id == global_id
+			&& (entry->type & MACH_PORT_TYPE_RECEIVE);
+	uint32_t owner = broker_guest_of(global_id);
+	bool elsewhere = global_id != 0 && owner != UINT32_MAX
+			&& owner != broker_client_guest_id()
+			&& owner != dest_guest_id;
+	if (owned && type == MACH_MSG_TYPE_PORT_SEND && sent) {
 		count_sender_guest(entry->port, dest_guest_id, 1);
-	} else if (type == MACH_MSG_TYPE_PORT_SEND_ONCE
-			&& (entry->type & MACH_PORT_TYPE_RECEIVE)) {
+	} else if (owned && type == MACH_MSG_TYPE_PORT_SEND) {
+		release_grants(entry, dest_guest_id, 1);
+	} else if (owned && type == MACH_MSG_TYPE_PORT_SEND_ONCE && sent) {
 		remember_send_once(name, dest_guest_id);
-	} else if (type == MACH_MSG_TYPE_PORT_SEND && entry->port->remote
-			&& broker_guest_of(global_id) != dest_guest_id) {
+	} else if (owned && type == MACH_MSG_TYPE_PORT_SEND_ONCE) {
+		queue_send_once_notifications(entry,
+				forget_send_onces(name, dest_guest_id, 1));
+	} else if (elsewhere && type == MACH_MSG_TYPE_PORT_SEND) {
 		queue_notice((struct pending_notice){
 				.global_id = global_id,
 				.notice = {
-						.kind = REMOTE_NOTICE_ADD,
+						.kind = sent ? REMOTE_NOTICE_ADD
+							     : REMOTE_NOTICE_RELEASE,
 						.guest_id = dest_guest_id,
+						.count = 1,
 				},
 		});
 	}

@@ -1538,6 +1538,37 @@ check_sender_counts(void)
 	destroy_port(port);
 }
 
+static void
+check_failed_send(mach_port_t to)
+{
+	mach_port_t port;
+	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
+	mach_port_t reply;
+	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &reply);
+	static union {
+		carrier_t carrier;
+		char bytes[OVERSIZED];
+	} message;
+	message.carrier = carrier_of(to, KEEP_ID, port);
+	message.carrier.Head.msgh_bits
+			|= MACH_MSGH_BITS(0, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+	message.carrier.Head.msgh_local_port = reply;
+	message.carrier.Head.msgh_size = sizeof(message);
+	message.carrier.port.disposition = MACH_MSG_TYPE_MAKE_SEND;
+	kern_return_t kr = mach_msg(&message.carrier.Head, MACH_SEND_MSG,
+			sizeof(message), 0, MACH_PORT_NULL,
+			MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	CHECK(kr == MACH_SEND_TOO_LARGE);
+
+	CHECK(!has_senders(port));
+	mach_port_name_t unused;
+	CHECK(receive_notification(
+			      reply, MACH_NOTIFY_SEND_ONCE, ANSWER_MS, &unused)
+			== MACH_MSG_SUCCESS);
+	destroy_port(reply);
+	destroy_port(port);
+}
+
 static mach_port_t
 post_for(mach_port_t port, mach_msg_id_t id)
 {
@@ -1564,6 +1595,7 @@ check_send_once_rights(void)
 			== MACH_MSG_SUCCESS);
 	destroy_port(reply);
 
+	check_failed_send(holder.port);
 	CHECK(ask_for(holder.port, CHECK_IN_ID) == 1);
 	mach_port_t doomed = look_up(DOOMED_NAME);
 	CHECK(ask_for(holder.port, DESTROY_ID) == KERN_SUCCESS);
