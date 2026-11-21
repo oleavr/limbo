@@ -33,6 +33,7 @@
 #include <limits.h>
 #include <mach-o/dyld.h>
 #include <spawn.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -92,6 +93,7 @@ static void enter(void);
 static void check_missing(void);
 static void check_profile(void);
 static void ask_profile(void);
+static int write_denied(void);
 static void check_enforced(void);
 static void denied_opening(void);
 static void denied_creating(void);
@@ -108,6 +110,8 @@ static void denied_attributes(void);
 static void allowed_attributes(void);
 static void denied_finder_info(void);
 static void denied_attribute_flags(void);
+static void check_kept(void);
+static void start_programs(void);
 static void in_denied_folder(void (*body)(void));
 static void in_sandbox(const char *profile, void (*body)(void));
 static int remove_entry(const char *path, const struct stat *st, int type,
@@ -125,7 +129,8 @@ int
 main(int argc, char *argv[])
 {
 	if (argc == 2) {
-		return 1;
+		return strcmp(argv[1], "write-denied") == 0 ? write_denied()
+							    : 1;
 	}
 	int lock = open(LOCK, O_RDONLY | O_CREAT, 0644);
 	CHECK(lock >= 0);
@@ -137,6 +142,7 @@ main(int argc, char *argv[])
 	check_missing();
 	check_profile();
 	check_enforced();
+	check_kept();
 
 	char *token = sandbox_extension_issue_file(
 			APP_SANDBOX_READ_WRITE, "/tmp", 0);
@@ -171,6 +177,15 @@ main(int argc, char *argv[])
 			== 0);
 	CHECK(bootarg_state == 0);
 	return 0;
+}
+
+static int
+write_denied(void)
+{
+	errno = 0;
+	int fd = open(DENIED "/started", O_WRONLY | O_CREAT, 0644);
+	bool denied = fd == -1 && errno == EPERM;
+	return (denied && sandbox_check(getpid(), NULL, 0) == 1) ? 0 : 1;
 }
 
 static void
@@ -726,6 +741,34 @@ denied_attribute_flags(void)
 	CHECK(fsetattrlist(denied_fd, &flags, &value, sizeof(value), 0) == -1);
 	CHECK(errno == EPERM);
 	CHECK(setattrlist(ALLOWED, &flags, &value, sizeof(value), 0) == 0);
+}
+
+static void
+check_kept(void)
+{
+	in_denied_folder(start_programs);
+}
+
+static void
+start_programs(void)
+{
+	extern char **environ;
+	char self[PATH_MAX];
+	uint32_t size = sizeof(self);
+	CHECK(_NSGetExecutablePath(self, &size) == 0);
+	char *argv[] = {self, "write-denied", NULL};
+	char *forged[] = {"LIMBO_SANDBOX=", NULL};
+	char **environments[] = {environ, forged};
+	for (int i = 0; i != 2; i++) {
+		pid_t pid;
+		CHECK(posix_spawn(&pid, self, NULL, NULL, argv, environments[i])
+				== 0);
+		int status;
+		CHECK(waitpid(pid, &status, 0) == pid);
+		CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	}
+	execv(self, argv);
+	CHECK(false);
 }
 
 static void

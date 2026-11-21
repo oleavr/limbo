@@ -53,6 +53,7 @@ guest_tests = [
   'route.c',
   'rwlock.c',
   'sandbox.c',
+  'sandbox_kept.c',
   'semaphore.c',
   'signals.c',
   'sockets.c',

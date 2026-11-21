@@ -32,6 +32,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -154,6 +155,11 @@ quarantine_handle_syscall(int call)
 #define SANDBOX_EXTENSION_FILE       0
 #define SANDBOX_EXTENSION_TOKEN_SIZE 0x3ff0
 #define SANDBOX_FILTER_PATH          1
+#define SANDBOX_PROFILES             "/private/var/run/limbo-sandbox"
+#define SANDBOX_PROFILES_MODE        01777
+#define SANDBOX_PROFILE_MODE         0644
+#define SANDBOX_PROFILE_SIZE_MAX     (1 << 24)
+#define SANDBOX_DIGEST_HEX_LENGTH    (2 * SHA256_DIGEST_LENGTH)
 
 struct sandbox_check_args {
 	uint64_t *result;
@@ -174,6 +180,104 @@ struct sandbox_set_profile_args {
 static bool sandboxed;
 static struct sandbox_profile profile;
 
+static void
+kept_profile_path(const char *digest, char *host)
+{
+	char path[PATH_MAX], buffer[PATH_MAX];
+	snprintf(path, sizeof(path), SANDBOX_PROFILES "/%s.sb", digest);
+	snprintf(host, PATH_MAX, "%s", sysroot_host_path(path, 0, buffer));
+}
+
+static void
+digest_of(const void *data, size_t size, char *hex)
+{
+	uint8_t digest[SHA256_DIGEST_LENGTH];
+	sha256(data, size, digest);
+	for (int i = 0; i != SHA256_DIGEST_LENGTH; i++) {
+		sprintf(hex + 2 * i, "%02x", digest[i]);
+	}
+}
+
+static void *
+kept_profile(const char *digest, size_t *size)
+{
+	char path[PATH_MAX], hex[SANDBOX_DIGEST_HEX_LENGTH + 1] = "";
+	kept_profile_path(digest, path);
+	int fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+	if (fd == -1) {
+		return NULL;
+	}
+	struct stat st;
+	void *data = NULL;
+	if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode)
+			&& st.st_size <= SANDBOX_PROFILE_SIZE_MAX) {
+		*size = (size_t)st.st_size;
+		data = malloc(*size);
+		if (read(fd, data, *size) == st.st_size) {
+			digest_of(data, *size, hex);
+		}
+		if (strcmp(hex, digest) != 0) {
+			free(data);
+			data = NULL;
+		}
+	}
+	close(fd);
+	return data;
+}
+
+static bool
+keep_profile(const void *data, size_t size)
+{
+	char hex[SANDBOX_DIGEST_HEX_LENGTH + 1];
+	digest_of(data, size, hex);
+	char folder[PATH_MAX], path[PATH_MAX];
+	char temporary[PATH_MAX + sizeof(".XXXXXX")];
+	const char *host = sysroot_host_path(SANDBOX_PROFILES, 0, folder);
+	if (mkdir(host, SANDBOX_PROFILES_MODE) == 0) {
+		chmod(host, SANDBOX_PROFILES_MODE);
+	}
+	size_t kept_size;
+	void *kept = kept_profile(hex, &kept_size);
+	free(kept);
+	if (kept == NULL) {
+		kept_profile_path(hex, path);
+		snprintf(temporary, sizeof(temporary), "%s.XXXXXX", path);
+		int fd = mkstemp(temporary);
+		if (fd == -1) {
+			return false;
+		}
+		bool written = write(fd, data, size) == (ssize_t)size
+				&& fchmod(fd, SANDBOX_PROFILE_MODE) == 0;
+		close(fd);
+		if (!written || rename(temporary, path) != 0) {
+			unlink(temporary);
+			return false;
+		}
+	}
+	return setenv("LIMBO_SANDBOX", hex, 1) == 0;
+}
+
+int
+mac_sandbox_init(void)
+{
+	const char *digest = getenv("LIMBO_SANDBOX");
+	if (digest == NULL) {
+		return 0;
+	}
+	size_t size;
+	void *data = strlen(digest) == SANDBOX_DIGEST_HEX_LENGTH
+			? kept_profile(digest, &size)
+			: NULL;
+	if (data == NULL) {
+		fprintf(stderr, "limbo: no sandbox profile %s\n", digest);
+		return 1;
+	}
+	sandboxed = true;
+	sandbox_profile_parse(&profile, data, size);
+	free(data);
+	return 0;
+}
+
 static int
 sandbox_set_profile(const struct sandbox_set_profile_args *args)
 {
@@ -183,10 +287,15 @@ sandbox_set_profile(const struct sandbox_set_profile_args *args)
 						== 0;
 		return same ? 0 : _EPERM;
 	}
-	sandboxed = true;
-	if (args->data != NULL) {
-		sandbox_profile_parse(&profile, args->data, args->size);
+	if (args->data != NULL
+			&& sandbox_profile_parse(
+					&profile, args->data, args->size)
+			&& profile.enforced != 0
+			&& !keep_profile(args->data, args->size)) {
+		sandbox_profile_free(&profile);
+		return _EPERM;
 	}
+	sandboxed = true;
 	return 0;
 }
 

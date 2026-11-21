@@ -44,6 +44,7 @@
 #include <ucontext.h>
 #include <unistd.h>
 
+#include "bsd/mac.h"
 #include "commpage.h"
 #include "linker.h"
 #include "osfmk/mach_vm.h"
@@ -167,7 +168,7 @@ run(int argc, char *argv[], char *envp[])
 #ifdef __arm64__
 	reserve_high_address_space();
 #endif
-	if (sysroot_open() || syscall_handler_install()) {
+	if (sysroot_open() || syscall_handler_install() || mac_sandbox_init()) {
 		goto error;
 	}
 	const char *named = getenv("LIMBO_EXEC_PATH");
