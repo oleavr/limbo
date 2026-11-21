@@ -40,6 +40,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -127,6 +128,7 @@ static void *signal_semaphore(void *arg);
 static void check_time(void);
 static void check_timers(void);
 static void check_memory_entries(void);
+static void check_memory_entries_freed(void);
 static void check_remaps(void);
 static void check_mincore(void);
 static void check_madvise_zero(void);
@@ -2137,6 +2139,30 @@ check_memory_entries(void)
 	check_shared_range_entries();
 	check_shared_range_kept();
 	check_shared_anonymous_entry();
+	check_memory_entries_freed();
+}
+
+static void
+check_memory_entries_freed(void)
+{
+	struct rlimit files;
+	CHECK(getrlimit(RLIMIT_NOFILE, &files) == 0);
+	struct rlimit few = {.rlim_cur = 256, .rlim_max = files.rlim_max};
+	CHECK(setrlimit(RLIMIT_NOFILE, &few) == 0);
+
+	for (int i = 0; i != 1000; i++) {
+		memory_object_size_t size = vm_page_size;
+		mach_port_t entry = MACH_PORT_NULL;
+		CHECK(mach_make_memory_entry_64(mach_task_self(), &size, 0,
+				      MAP_MEM_NAMED_CREATE | VM_PROT_READ
+						      | VM_PROT_WRITE,
+				      &entry, MACH_PORT_NULL)
+				== KERN_SUCCESS);
+		CHECK(mach_port_deallocate(mach_task_self(), entry)
+				== KERN_SUCCESS);
+	}
+
+	CHECK(setrlimit(RLIMIT_NOFILE, &files) == 0);
 }
 
 /*
