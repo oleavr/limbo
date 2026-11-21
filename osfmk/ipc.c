@@ -116,6 +116,7 @@ enum remote_notice_kind {
 	REMOTE_NOTICE_RELEASE,
 	REMOTE_NOTICE_ADD,
 	REMOTE_NOTICE_DEAD,
+	REMOTE_NOTICE_SEND_ONCE,
 };
 
 struct remote_notice {
@@ -141,6 +142,13 @@ struct remote_header {
 	uint64_t reply_global_id;
 	pid_t sender_pid;
 	uint32_t descriptor_count;
+	uint32_t sender_guest_id;
+};
+
+struct remote_send_once {
+	struct remote_send_once *next;
+	mach_port_name_t port;
+	uint32_t guest_id;
 };
 
 struct remote_fds {
@@ -204,6 +212,7 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t notice_order = PTHREAD_MUTEX_INITIALIZER;
 static struct arrival_waiter *arrival_waiters;
 static struct dead_name_request *dead_name_requests;
+static struct remote_send_once *remote_send_onces;
 static struct pending_notice *pending_notices;
 static struct pending_notice **pending_notices_tail = &pending_notices;
 static struct ipc_entry *entries;
@@ -247,11 +256,11 @@ static bool remote_port_fits(uint64_t global_id,
 static bool remote_right_fits(
 		uint64_t global_id, mach_msg_type_name_t disposition);
 static void import_body_ports(mach_msg_header_t *header,
-		const uint64_t *global_ids, const uint8_t *data,
-		const int *fds);
+		const uint64_t *global_ids, const uint8_t *data, const int *fds,
+		uint32_t sender_guest_id);
 static mach_port_name_t import_body_port(uint64_t global_id,
 		mach_msg_type_name_t type, const int **fds,
-		const uint8_t **data);
+		const uint8_t **data, uint32_t sender_guest_id);
 static mach_port_name_t import_fileport(int fd);
 static void turn_dead(struct ipc_entry *entry);
 static void remember_gone(uint32_t guest_id);
@@ -270,13 +279,17 @@ static void release_grants(
 		struct ipc_entry *entry, uint32_t guest_id, uint64_t count);
 static void give_back_grants(struct ipc_port *port);
 static void tell_holders_dead(struct ipc_port *port);
+
+static void remember_send_once(mach_port_name_t port, uint32_t guest_id);
+static uint32_t forget_send_onces(
+		mach_port_name_t port, uint32_t guest_id, uint64_t count);
 static void receive_notice(
 		uint64_t dest_global_id, const struct remote_notice *notice);
 static void send_remote_notice(const struct pending_notice *notice);
 static uint64_t export_local_port(mach_port_name_t name);
 static struct ipc_port *port_for_global_id(uint64_t global_id);
-static mach_port_name_t import_remote_send(
-		uint64_t global_id, mach_msg_type_name_t type, bool counted);
+static mach_port_name_t import_remote_send(uint64_t global_id,
+		mach_msg_type_name_t type, uint32_t sender_guest_id);
 
 static void kill_kobject_port(struct ipc_entry *entry);
 static mach_port_name_t kobject_send_right(ipc_kobject_type_t type);
@@ -744,14 +757,17 @@ remote_send(mach_msg_header_t *header, mach_msg_size_t size, ipc_side_t sender,
 			&data_length, broker_guest_of(dest_global_id), &fds);
 
 	struct remote_header rh = {
-		.message_size = size,
-		.dest_disposition = MACH_MSGH_BITS_REMOTE(bits),
-		.reply_disposition = MACH_MSGH_BITS_LOCAL(bits),
-		.reply_global_id = (header->msgh_local_port != MACH_PORT_NULL)
-				? export_local_port(header->msgh_local_port)
-				: 0,
-		.sender_pid = sender_pid,
-		.descriptor_count = descriptor_count,
+			.message_size = size,
+			.dest_disposition = MACH_MSGH_BITS_REMOTE(bits),
+			.reply_disposition = MACH_MSGH_BITS_LOCAL(bits),
+			.reply_global_id
+			= (header->msgh_local_port != MACH_PORT_NULL)
+					? export_local_port(
+							  header->msgh_local_port)
+					: 0,
+			.sender_pid = sender_pid,
+			.descriptor_count = descriptor_count,
+			.sender_guest_id = broker_client_guest_id(),
 	};
 
 	count_rights(header, bits, rh.reply_global_id, global_ids,
@@ -988,6 +1004,9 @@ count_right(mach_port_name_t name, mach_msg_type_name_t type,
 	if (type == MACH_MSG_TYPE_PORT_SEND
 			&& (entry->type & MACH_PORT_TYPE_RECEIVE)) {
 		count_sender_guest(entry->port, dest_guest_id, 1);
+	} else if (type == MACH_MSG_TYPE_PORT_SEND_ONCE
+			&& (entry->type & MACH_PORT_TYPE_RECEIVE)) {
+		remember_send_once(name, dest_guest_id);
 	} else if (type == MACH_MSG_TYPE_PORT_SEND && entry->port->remote
 			&& broker_guest_of(global_id) != dest_guest_id) {
 		queue_notice((struct pending_notice){
@@ -1058,6 +1077,42 @@ tell_holders_dead(struct ipc_port *port)
 		});
 	}
 	port->sender_guest_count = 0;
+	forget_send_onces(port->name, BROKER_GUEST_ID, UINT64_MAX);
+}
+
+static void
+remember_send_once(mach_port_name_t port, uint32_t guest_id)
+{
+	struct remote_send_once *record = malloc(sizeof(*record));
+	*record = (struct remote_send_once){
+			.next = remote_send_onces,
+			.port = port,
+			.guest_id = guest_id,
+	};
+	remote_send_onces = record;
+}
+
+static uint32_t
+forget_send_onces(mach_port_name_t port, uint32_t guest_id, uint64_t count)
+{
+	uint32_t found = 0;
+	for (int pass = 0; pass != 2; pass++) {
+		struct remote_send_once **link = &remote_send_onces;
+		while (*link != NULL && found != count) {
+			struct remote_send_once *record = *link;
+			if (record->port != port
+					|| (pass == 0
+							&& record->guest_id
+									!= guest_id)) {
+				link = &record->next;
+				continue;
+			}
+			*link = record->next;
+			free(record);
+			found++;
+		}
+	}
+	return found;
 }
 
 static void
@@ -1098,6 +1153,10 @@ receive_notice(uint64_t dest_global_id, const struct remote_notice *notice)
 		release_grants(entry, notice->guest_id, notice->count);
 	} else if (owned && notice->kind == REMOTE_NOTICE_ADD) {
 		count_sender_guest(port, notice->guest_id, 1);
+	} else if (owned && notice->kind == REMOTE_NOTICE_SEND_ONCE) {
+		queue_send_once_notifications(entry,
+				forget_send_onces(port->name, notice->guest_id,
+						notice->count));
 	}
 	pthread_mutex_unlock(&lock);
 	flush_notices();
@@ -1144,8 +1203,10 @@ port_for_global_id(uint64_t global_id)
 }
 
 static mach_port_name_t
-import_remote_send(uint64_t global_id, mach_msg_type_name_t type, bool counted)
+import_remote_send(uint64_t global_id, mach_msg_type_name_t type,
+		uint32_t sender_guest_id)
 {
+	bool counted = sender_guest_id != BROKER_GUEST_ID;
 	if (global_id == dead_global_id
 			|| guest_is_gone(broker_guest_of(global_id))) {
 		return MACH_PORT_DEAD;
@@ -1155,6 +1216,9 @@ import_remote_send(uint64_t global_id, mach_msg_type_name_t type, bool counted)
 		struct ipc_port *port = port_for_global_id(global_id);
 		if (port == NULL) {
 			return MACH_PORT_DEAD;
+		}
+		if (type == MACH_MSG_TYPE_PORT_SEND_ONCE) {
+			forget_send_onces(port->name, sender_guest_id, 1);
 		}
 		transfer_right(port->name, type, IPC_KERNEL, IPC_USER, &type);
 		return port->name;
@@ -1219,9 +1283,13 @@ ipc_remote_deliver(uint64_t dest_global_id, const void *blob, uint32_t length,
 
 	mach_msg_type_name_t reply_type = received_type(rh->reply_disposition);
 	mach_port_name_t reply_name = (rh->reply_global_id != 0)
-			? import_remote_send(
-					  rh->reply_global_id, reply_type, true)
+			? import_remote_send(rh->reply_global_id, reply_type,
+					  rh->sender_guest_id)
 			: MACH_PORT_NULL;
+	if (received_type(rh->dest_disposition)
+			== MACH_MSG_TYPE_PORT_SEND_ONCE) {
+		forget_send_onces(dest->name, rh->sender_guest_id, 1);
+	}
 	kmsg->header->msgh_bits = MACH_MSGH_BITS_SET(reply_type,
 			received_type(rh->dest_disposition), 0,
 			message->msgh_bits & MACH_MSGH_BITS_COMPLEX);
@@ -1231,8 +1299,8 @@ ipc_remote_deliver(uint64_t dest_global_id, const void *blob, uint32_t length,
 	kmsg->header->msgh_size = rh->message_size;
 
 	import_body_ports(kmsg->header, global_ids,
-			(const uint8_t *)&global_ids[rh->descriptor_count],
-			fds);
+			(const uint8_t *)&global_ids[rh->descriptor_count], fds,
+			rh->sender_guest_id);
 
 	enqueue(dest, kmsg);
 	unlock_and_notify_arrival(dest);
@@ -1380,7 +1448,7 @@ remote_right_fits(uint64_t global_id, mach_msg_type_name_t disposition)
 
 static void
 import_body_ports(mach_msg_header_t *header, const uint64_t *global_ids,
-		const uint8_t *data, const int *fds)
+		const uint8_t *data, const int *fds, uint32_t sender_guest_id)
 {
 	if (!(header->msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
 		return;
@@ -1396,8 +1464,8 @@ import_body_ports(mach_msg_header_t *header, const uint64_t *global_ids,
 			mach_msg_port_descriptor_t *d
 					= (mach_msg_port_descriptor_t *)cursor;
 			mach_msg_type_name_t type = received_type(d->disposition);
-			d->name = import_body_port(
-					global_ids[count++], type, &fds, &data);
+			d->name = import_body_port(global_ids[count++], type,
+					&fds, &data, sender_guest_id);
 			d->disposition = type;
 			cursor += sizeof(*d);
 		} else if (descriptor->type == MACH_MSG_OOL_DESCRIPTOR
@@ -1413,8 +1481,8 @@ import_body_ports(mach_msg_header_t *header, const uint64_t *global_ids,
 					= (mach_msg_guarded_port_descriptor64_t *)
 							cursor;
 			mach_msg_type_name_t type = received_type(d->disposition);
-			d->name = import_body_port(
-					global_ids[count++], type, &fds, &data);
+			d->name = import_body_port(global_ids[count++], type,
+					&fds, &data, sender_guest_id);
 			d->disposition = type;
 			cursor += sizeof(*d);
 		}
@@ -1423,7 +1491,7 @@ import_body_ports(mach_msg_header_t *header, const uint64_t *global_ids,
 
 static mach_port_name_t
 import_body_port(uint64_t global_id, mach_msg_type_name_t type, const int **fds,
-		const uint8_t **data)
+		const uint8_t **data, uint32_t sender_guest_id)
 {
 	if (global_id == 0) {
 		return MACH_PORT_NULL;
@@ -1443,7 +1511,7 @@ import_body_port(uint64_t global_id, mach_msg_type_name_t type, const int **fds,
 		entry->port->global_id = global_id;
 		return entry->port->name;
 	}
-	return import_remote_send(global_id, type, true);
+	return import_remote_send(global_id, type, sender_guest_id);
 }
 
 static mach_port_name_t
@@ -1589,7 +1657,7 @@ ipc_service_look_up(const char *name)
 	}
 	pthread_mutex_lock(&lock);
 	mach_port_name_t name_out = import_remote_send(
-			global_id, MACH_MSG_TYPE_PORT_SEND, false);
+			global_id, MACH_MSG_TYPE_PORT_SEND, BROKER_GUEST_ID);
 	pthread_mutex_unlock(&lock);
 	return name_out;
 }
@@ -3390,6 +3458,16 @@ port_has_receiver(const struct ipc_port *port)
 static void
 queue_send_once_notifications(struct ipc_entry *entry, uint32_t count)
 {
+	if (entry->port->remote && count != 0) {
+		queue_notice((struct pending_notice){
+				.global_id = entry->port->global_id,
+				.notice = {
+						.kind = REMOTE_NOTICE_SEND_ONCE,
+						.guest_id = broker_client_guest_id(),
+						.count = count,
+				},
+		});
+	}
 	if (!(entry->type & MACH_PORT_TYPE_RECEIVE)) {
 		return;
 	}

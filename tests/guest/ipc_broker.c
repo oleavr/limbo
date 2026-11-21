@@ -104,6 +104,7 @@ typedef struct {
 	uint64_t reply_global_id;
 	pid_t sender_pid;
 	uint32_t descriptor_count;
+	uint32_t sender_guest_id;
 } remote_header_t;
 
 typedef struct {
@@ -147,6 +148,8 @@ static const mach_msg_id_t KEEP_ID = 7911;
 static const mach_msg_id_t DROP_ID = 7912;
 static const mach_msg_id_t FORWARD_ID = 7913;
 static const mach_msg_id_t TYPE_ID = 7914;
+static const mach_msg_id_t HOLD_REPLY_ID = 7915;
+static const mach_msg_id_t DROP_REPLY_ID = 7916;
 static const char FROM_SENDER[] = "from the sender";
 static const char FROM_RECEIVER[] = "from the receiver";
 
@@ -680,6 +683,7 @@ serve_peer(void)
 	int32_t counted = 0;
 	int32_t marked = 0;
 	mach_port_t kept = MACH_PORT_NULL;
+	mach_port_t held_reply = MACH_PORT_NULL;
 	for (;;) {
 		static union {
 			mach_msg_header_t Head;
@@ -737,6 +741,12 @@ serve_peer(void)
 			answer(&message.Head, 1);
 		} else if (message.Head.msgh_id == TYPE_ID) {
 			answer(&message.Head, type_of(kept));
+		} else if (message.Head.msgh_id == HOLD_REPLY_ID) {
+			held_reply = message.Head.msgh_remote_port;
+		} else if (message.Head.msgh_id == DROP_REPLY_ID) {
+			answer(&message.Head,
+					mach_port_deallocate(mach_task_self(),
+							held_reply));
 		} else if (message.Head.msgh_id == LARGE_ID) {
 			answer(&message.Head,
 					patterned(message.bytes,
@@ -1515,6 +1525,34 @@ check_sender_counts(void)
 	destroy_port(port);
 }
 
+static mach_port_t
+post_for(mach_port_t port, mach_msg_id_t id)
+{
+	mach_msg_header_t request = {
+			.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0),
+			.msgh_size = sizeof(request),
+			.msgh_remote_port = port,
+			.msgh_id = id,
+	};
+	return post(&request);
+}
+
+static void
+check_send_once_rights(void)
+{
+	child_t holder = start_peer(HOLDER_NAME);
+	mach_port_t reply = post_for(holder.port, HOLD_REPLY_ID);
+	mach_port_name_t unused;
+	CHECK(receive_notification(reply, MACH_NOTIFY_SEND_ONCE, 100, &unused)
+			== MACH_RCV_TIMED_OUT);
+	CHECK(ask_for(holder.port, DROP_REPLY_ID) == KERN_SUCCESS);
+	CHECK(receive_notification(
+			      reply, MACH_NOTIFY_SEND_ONCE, ANSWER_MS, &unused)
+			== MACH_MSG_SUCCESS);
+	destroy_port(reply);
+	end_peer(&holder);
+}
+
 static void
 check_transport(void)
 {
@@ -1566,5 +1604,6 @@ main(int argc, char *argv[])
 	check_transport();
 	check_gone_process();
 	check_sender_counts();
+	check_send_once_rights();
 	return 0;
 }
