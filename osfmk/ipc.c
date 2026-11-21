@@ -2648,6 +2648,9 @@ entry_release_if_unused(struct ipc_entry *entry)
 		close(*(int *)port->kobject);
 		free(port->kobject);
 		free(port);
+	} else if (port->kotype == IPC_KOBJECT_MEMORY_ENTRY) {
+		memory_entry_destroy(port->kobject);
+		free(port);
 	} else if (port->kotype == IPC_KOBJECT_EVENTLINK) {
 		eventlink_port_gone(port->kobject);
 		free(port);
