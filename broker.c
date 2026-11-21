@@ -193,8 +193,10 @@ handle_guest(int fd)
 		return;
 	}
 	if (received == 0) {
-		if (queued_fds + fds_ahead() > descriptor_room) {
-			remove_connection(index);
+		if (conn->ahead.count != 0
+				&& queued_fds + fds_ahead() > descriptor_room) {
+			broker_wire_forget(&conn->ahead);
+			conn->ahead.lost = true;
 		}
 		return;
 	}
@@ -377,9 +379,13 @@ queue_frame(struct connection *conn, struct broker_wire_frame *frame)
 		broker_wire_free(frame);
 		return;
 	}
-	bool room = conn->queued_fds + frame->fd_count <= CONNECTION_FDS
-			&& queued_fds + fds_ahead() + frame->fd_count
-					<= descriptor_room;
+	size_t share = descriptor_room / 2 < CONNECTION_FDS
+			? descriptor_room / 2
+			: CONNECTION_FDS;
+	bool room = frame->fd_count == 0
+			|| (conn->queued_fds + frame->fd_count <= share
+					&& queued_fds + fds_ahead() + frame->fd_count
+							<= descriptor_room);
 	if (!room && frame->fds_sent == 0) {
 		broker_wire_free(frame);
 		return;
