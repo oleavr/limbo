@@ -43,6 +43,7 @@
 #include "broker.h"
 #include "broker_client.h"
 #include "ipc.h"
+#include "thread.h"
 
 static void connect_to_broker(const char *path);
 static void *read_until_end(void *user);
@@ -169,7 +170,7 @@ connect_to_broker(const char *path)
 	connect(broker_fd, (struct sockaddr *)&addr, sizeof(addr));
 
 	pthread_t thread;
-	pthread_create(&thread, NULL, read_until_end, NULL);
+	thread_create_own(&thread, NULL, read_until_end, NULL);
 
 	expect_reply();
 	send_parts(BROKER_HELLO, NULL, 0, NULL, 0);
