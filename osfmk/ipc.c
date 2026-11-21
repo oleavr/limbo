@@ -234,6 +234,7 @@ static void wake_all_waiters(void);
 static void write_trailer(mach_msg_header_t *msg, struct ipc_port *port,
 		pid_t sender_pid);
 static void flush_notices(void);
+static void notify_port_deleted(struct ipc_port *notify, mach_port_name_t name);
 static void notify_send_possible(
 		struct ipc_port *notify, mach_port_name_t name);
 static void notify_send_once(struct ipc_port *port);
@@ -1735,6 +1736,9 @@ flush_notices(void)
 		struct pending_notice *notice = notices;
 		notices = notice->next;
 		switch (notice->id) {
+		case MACH_NOTIFY_PORT_DELETED:
+			notify_port_deleted(notice->notify, notice->name);
+			break;
 		case MACH_NOTIFY_SEND_POSSIBLE:
 			notify_send_possible(notice->notify, notice->name);
 			break;
@@ -1747,6 +1751,21 @@ flush_notices(void)
 		}
 		free(notice);
 	}
+}
+
+static void
+notify_port_deleted(struct ipc_port *notify, mach_port_name_t name)
+{
+	mach_port_deleted_notification_t notification = {
+		.not_header = {
+			.msgh_size = sizeof(notification)
+					- sizeof(notification.trailer),
+			.msgh_id = MACH_NOTIFY_PORT_DELETED,
+		},
+		.NDR = NDR_record,
+		.not_port = name,
+	};
+	deliver_notification(notify, &notification.not_header);
 }
 
 static void
@@ -2430,6 +2449,14 @@ entry_release_if_unused(struct ipc_entry *entry)
 	}
 
 	struct ipc_port *port = entry->port;
+	struct ipc_port *notify = cancel_dead_name_request(port->name);
+	if (notify != NULL) {
+		queue_notice((struct pending_notice){
+				.id = MACH_NOTIFY_PORT_DELETED,
+				.notify = notify,
+				.name = port->name,
+		});
+	}
 	port->name = MACH_PORT_NULL;
 	if (port->is_pset) {
 		pset_release_members(port);
