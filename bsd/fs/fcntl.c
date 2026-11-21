@@ -46,6 +46,7 @@
 #include "bsd/kevent.h"
 #include "bsd/process.h"
 #include "bsd/xnu-errno.h"
+#include "protection.h"
 #include "sysroot.h"
 
 #define _F_DUPFD                    0
@@ -288,10 +289,10 @@ sys_sys_fcntl(int fd, int cmd, long arg)
 		if (fstat(fd, &file) == -1) {
 			return err_map(errno);
 		}
-		return S_ISDIR(file.st_mode) ? 0 : 3;
+		return (int)protection_get(fd);
 	}
 	case _F_SETPROTECTIONCLASS:
-		return 0;
+		return errno_map(protection_set(fd, (int)arg));
 	case _F_ASSERT_BG_ACCESS:
 	case _F_RELEASE_BG_ACCESS:
 		return 0;
