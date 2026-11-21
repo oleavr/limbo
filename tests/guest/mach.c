@@ -78,6 +78,9 @@ static void check_space_info(void);
 static void check_messages(void);
 static void check_out_of_line_copies(void);
 static void check_port_sets(void);
+static void check_receive_on_destroyed(void);
+static mach_msg_return_t receive_on_destroyed(mach_port_right_t right);
+static void *receive_nothing(void *arg);
 static void check_queued_rights_destroyed(void);
 static void check_refused_reply(void);
 static void check_right_moved_twice(void);
@@ -127,6 +130,7 @@ main(void)
 	check_messages();
 	check_out_of_line_copies();
 	check_port_sets();
+	check_receive_on_destroyed();
 	check_queued_rights_destroyed();
 	check_refused_reply();
 	check_right_moved_twice();
@@ -543,6 +547,45 @@ check_port_sets(void)
 			== MACH_MSG_SUCCESS);
 	CHECK(received.header.msgh_id == 42);
 	CHECK(received.header.msgh_local_port == member);
+}
+
+static void
+check_receive_on_destroyed(void)
+{
+	CHECK(receive_on_destroyed(MACH_PORT_RIGHT_RECEIVE)
+			== MACH_RCV_PORT_CHANGED);
+}
+
+static mach_msg_return_t
+receive_on_destroyed(mach_port_right_t right)
+{
+	mach_port_t task = mach_task_self();
+	void *result = (void *)(uintptr_t)MACH_RCV_INVALID_NAME;
+	while ((uintptr_t)result == MACH_RCV_INVALID_NAME) {
+		mach_port_t name;
+		CHECK(mach_port_allocate(task, right, &name) == KERN_SUCCESS);
+		pthread_t receiver;
+		CHECK(pthread_create(&receiver, NULL, receive_nothing,
+				      (void *)(uintptr_t)name)
+				== 0);
+		usleep(100000);
+		CHECK(mach_port_mod_refs(task, name, right, -1)
+				== KERN_SUCCESS);
+		CHECK(pthread_join(receiver, &result) == 0);
+	}
+	return (mach_msg_return_t)(uintptr_t)result;
+}
+
+static void *
+receive_nothing(void *arg)
+{
+	struct {
+		mach_msg_header_t header;
+		mach_msg_trailer_t trailer;
+	} message;
+	return (void *)(uintptr_t)mach_msg(&message.header,
+			MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(message),
+			(mach_port_t)(uintptr_t)arg, 3000, MACH_PORT_NULL);
 }
 
 static void

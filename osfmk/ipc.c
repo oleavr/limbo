@@ -1341,7 +1341,7 @@ receive(mach_msg_header_t *msg, mach_msg_option64_t options,
 						& (MACH_PORT_TYPE_RECEIVE
 								| MACH_PORT_TYPE_PORT_SET))) {
 			pthread_mutex_unlock(&lock);
-			return waited ? MACH_RCV_PORT_DIED
+			return waited ? MACH_RCV_PORT_CHANGED
 				      : MACH_RCV_INVALID_NAME;
 		}
 
