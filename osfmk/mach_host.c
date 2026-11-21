@@ -297,19 +297,29 @@ host_statistics(host_t host_priv, host_flavor_t flavor,
 	if (flavor != HOST_VM_INFO) {
 		unimplemented();
 	}
+	mach_msg_type_number_t count = *host_info_outCnt;
+	if (count < HOST_VM_INFO_REV0_COUNT) {
+		return KERN_FAILURE;
+	}
+	if (count >= HOST_VM_INFO_REV2_COUNT) {
+		count = HOST_VM_INFO_REV2_COUNT;
+	} else if (count < HOST_VM_INFO_REV1_COUNT) {
+		count = HOST_VM_INFO_REV0_COUNT;
+	}
 
 	struct linux_vm vm;
 	read_linux_vm(&vm);
-	vm_statistics_t statistics = (vm_statistics_t)host_info_out;
-	memset(statistics, 0, sizeof(*statistics));
-	statistics->free_count = truncate_to_32_bit(vm.free);
-	statistics->active_count = truncate_to_32_bit(vm.active);
-	statistics->inactive_count = truncate_to_32_bit(vm.inactive);
-	statistics->wire_count = truncate_to_32_bit(wired_pages(&vm));
-	statistics->pageins = truncate_to_32_bit(vm.pageins);
-	statistics->pageouts = truncate_to_32_bit(vm.pageouts);
-	statistics->faults = truncate_to_32_bit(vm.faults);
-	*host_info_outCnt = HOST_VM_INFO_COUNT;
+	vm_statistics_data_t statistics = {
+			.free_count = truncate_to_32_bit(vm.free),
+			.active_count = truncate_to_32_bit(vm.active),
+			.inactive_count = truncate_to_32_bit(vm.inactive),
+			.wire_count = truncate_to_32_bit(wired_pages(&vm)),
+			.pageins = truncate_to_32_bit(vm.pageins),
+			.pageouts = truncate_to_32_bit(vm.pageouts),
+			.faults = truncate_to_32_bit(vm.faults),
+	};
+	memcpy(host_info_out, &statistics, count * sizeof(integer_t));
+	*host_info_outCnt = count;
 	return KERN_SUCCESS;
 }
 
