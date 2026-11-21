@@ -86,6 +86,7 @@
 #include "bsd/process.h"
 #include "codesign.h"
 #include "commpage.h"
+#include "fs/acl.h"
 #include "fs/at.h"
 #include "fs/bsd_flags.h"
 #include "fs/fileid.h"
@@ -2837,6 +2838,10 @@ int
 sys_chmod_extended(user_addr_t path, void *uid, void *gid, int mode,
 		user_addr_t xsecurity)
 {
+	struct acl_list list;
+	if (xsecurity != NULL && acl_from_filesec(xsecurity, &list) == -1) {
+		return _EINVAL;
+	}
 	char buffer[PATH_MAX];
 	const char *host_path = sysroot_host_path(path, 0, buffer);
 	if (chown(host_path,
@@ -2849,25 +2854,35 @@ sys_chmod_extended(user_addr_t path, void *uid, void *gid, int mode,
 			== -1) {
 		return err_map(errno);
 	}
-	if (mode == -1) {
+	if (mode != -1 && chmod(host_path, mode & ALLPERMS) == -1) {
+		return err_map(errno);
+	}
+	if (xsecurity == NULL) {
 		return 0;
 	}
-	return errno_map(chmod(host_path, mode & ALLPERMS));
+	return errno_map(acl_set_at(AT_FDCWD, host_path, 0, &list));
 }
 
 int
 sys_fchmod_extended(
 		int fd, uid_t uid, gid_t gid, int mode, user_addr_t xsecurity)
 {
+	struct acl_list list;
+	if (xsecurity != NULL && acl_from_filesec(xsecurity, &list) == -1) {
+		return _EINVAL;
+	}
 	if (fchown(fd, (uid == KAUTH_UID_NONE) ? (uid_t)-1 : uid,
 			    (gid == KAUTH_GID_NONE) ? (gid_t)-1 : gid)
 			== -1) {
 		return err_map(errno);
 	}
-	if (mode == -1) {
+	if (mode != -1 && fchmod(fd, mode & ALLPERMS) == -1) {
+		return err_map(errno);
+	}
+	if (xsecurity == NULL) {
 		return 0;
 	}
-	return errno_map(fchmod(fd, mode & ALLPERMS));
+	return errno_map(acl_set_at(fd, "", AT_EMPTY_PATH, &list));
 }
 
 int
