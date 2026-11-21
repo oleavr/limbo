@@ -53,6 +53,7 @@ struct process {
 };
 
 struct process_thread {
+	char comm[16];
 	char state;
 	uint64_t user_ticks;
 	uint64_t system_ticks;

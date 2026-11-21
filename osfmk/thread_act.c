@@ -113,6 +113,8 @@ static bool thread_state_from_darwin(thread_state_flavor_t flavor,
 		struct thread_state *out);
 #endif
 static struct thread_times thread_times(struct thread *thread);
+static void extended_info(
+		const struct thread_times *times, thread_extended_info_t info);
 static uint64_t timeval_nanoseconds(const struct timeval *time);
 static integer_t run_state(char linux_state);
 static time_value_t time_value(uint64_t nanoseconds);
@@ -495,15 +497,7 @@ thread_info(thread_inspect_t target_act, thread_flavor_t flavor,
 		struct thread_times times = thread_times(thread);
 		thread_extended_info_t info
 				= (thread_extended_info_t)thread_info_out;
-		*info = (thread_extended_info_data_t){
-				.pth_user_time = times.user,
-				.pth_system_time = times.system,
-				.pth_policy = POLICY_TIMESHARE,
-				.pth_run_state = times.run_state,
-				.pth_curpri = 31,
-				.pth_priority = 31,
-				.pth_maxpriority = 63,
-		};
+		extended_info(&times, info);
 		memcpy(info->pth_name, thread->name, sizeof(info->pth_name));
 		*thread_info_outCnt = THREAD_EXTENDED_INFO_COUNT;
 		return KERN_SUCCESS;
@@ -564,6 +558,38 @@ thread_times(struct thread *thread)
 		times.run_state = run_state(stat.state);
 	}
 	return times;
+}
+
+static void
+extended_info(const struct thread_times *times, thread_extended_info_t info)
+{
+	*info = (thread_extended_info_data_t){
+			.pth_user_time = times->user,
+			.pth_system_time = times->system,
+			.pth_policy = POLICY_TIMESHARE,
+			.pth_run_state = times->run_state,
+			.pth_curpri = 31,
+			.pth_priority = 31,
+			.pth_maxpriority = 63,
+	};
+}
+
+bool
+thread_linux_extended_info(pid_t pid, pid_t tid, thread_extended_info_t info)
+{
+	struct process_thread stat;
+	if (process_thread_lookup(pid, tid, &stat) != 0) {
+		return false;
+	}
+	struct thread_times times = {
+			.user = process_ticks_to_nanoseconds(stat.user_ticks),
+			.system
+			= process_ticks_to_nanoseconds(stat.system_ticks),
+			.run_state = run_state(stat.state),
+	};
+	extended_info(&times, info);
+	memcpy(info->pth_name, stat.comm, sizeof(stat.comm));
+	return true;
 }
 
 static uint64_t

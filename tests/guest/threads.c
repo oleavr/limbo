@@ -35,10 +35,12 @@
 #include <mach/mach_time.h>
 #include <pthread.h>
 #include <pthread/qos.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/event.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -91,6 +93,8 @@ static uint64_t microseconds(time_value_t time);
 static void check_thread_name(void);
 static thread_extended_info_data_t extended_info(void);
 static void check_task_threads(void);
+static void check_child_threads(void);
+static void *name_and_count(void *arg);
 static void *wait_until_listed(void *arg);
 
 extern int __pthread_fchdir(int fd);
@@ -181,6 +185,7 @@ main(void)
 	check_thread_times();
 	check_thread_name();
 	check_task_threads();
+	check_child_threads();
 	return 0;
 }
 
@@ -566,5 +571,79 @@ wait_until_listed(void *arg)
 	while (!listed) {
 		usleep(1000);
 	}
+	return NULL;
+}
+
+static void
+check_child_threads(void)
+{
+	uint64_t ids[16];
+	if (getuid() != 0) {
+		CHECK(proc_pidinfo(1, PROC_PIDLISTTHREADIDS, 0, ids,
+				      sizeof(ids))
+				== 0);
+		CHECK(errno == EPERM);
+	}
+	int counted[2], stay[2];
+	CHECK(pipe(counted) == 0 && pipe(stay) == 0);
+	pid_t child = fork();
+	CHECK(child != -1);
+	if (child == 0) {
+		char byte;
+		pthread_t worker;
+		CHECK(close(stay[1]) == 0);
+		CHECK(pthread_create(&worker, NULL, name_and_count, &counted[1])
+				== 0);
+		read(stay[0], &byte, 1);
+		_exit(0);
+	}
+	CHECK(close(stay[0]) == 0);
+	uint8_t own_count;
+	CHECK(read(counted[0], &own_count, 1) == 1);
+
+	int size = proc_pidinfo(
+			child, PROC_PIDLISTTHREADIDS, 0, ids, sizeof(ids));
+	CHECK(size == own_count * (int)sizeof(ids[0]) && own_count >= 2);
+	bool found = false;
+	for (int i = 0; i < size / (int)sizeof(ids[0]); i++) {
+		struct proc_threadinfo info;
+		CHECK(proc_pidinfo(child, PROC_PIDTHREADID64INFO, ids[i], &info,
+				      sizeof(info))
+				== sizeof(info));
+		found |= strcmp(info.pth_name, "worker") == 0;
+	}
+	CHECK(found);
+	struct proc_threadinfo info;
+	CHECK(proc_pidinfo(child, PROC_PIDTHREADID64INFO, 1, &info,
+			      sizeof(info))
+			== 0);
+	CHECK(errno == ESRCH);
+	CHECK(proc_pidinfo(child, PROC_PIDTHREADID64INFO, ids[0], &info,
+			      sizeof(info) - 1)
+			== 0);
+	CHECK(errno == ENOMEM);
+
+	CHECK(close(stay[1]) == 0);
+	int status;
+	CHECK(waitpid(child, &status, 0) == child);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	CHECK(close(counted[0]) == 0 && close(counted[1]) == 0);
+}
+
+static void *
+name_and_count(void *arg)
+{
+	int *counted = arg;
+	CHECK(pthread_setname_np("worker") == 0);
+	int queue = kqueue();
+	struct kevent change;
+	EV_SET(&change, SIGUSR1, EVFILT_SIGNAL, EV_ADD, 0, 0, NULL);
+	CHECK(queue != -1 && kevent(queue, &change, 1, NULL, 0, NULL) == 0);
+	uint64_t ids[16];
+	int size = proc_pidinfo(
+			getpid(), PROC_PIDLISTTHREADIDS, 0, ids, sizeof(ids));
+	uint8_t count = (uint8_t)(size / (int)sizeof(ids[0]));
+	CHECK(write(*counted, &count, 1) == 1);
+	pause();
 	return NULL;
 }
