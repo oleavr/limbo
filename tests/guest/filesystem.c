@@ -67,6 +67,7 @@
 static void check_files(void);
 static void check_directories(void);
 static void check_dangling_links(void);
+static void check_folder_opens(void);
 static void check_volume_requests(void);
 static int volume_request(attrgroup_t common, attrgroup_t dir, attrgroup_t file,
 		attrgroup_t fork, unsigned long options, uint32_t *length);
@@ -93,6 +94,7 @@ main(int argc, char **argv)
 	check_files();
 	check_directories();
 	check_dangling_links();
+	check_folder_opens();
 	check_volume_requests();
 	check_attributes();
 	check_copyfile();
@@ -190,6 +192,24 @@ check_dangling_links(void)
 		CHECK(lstat("dangling", &st) == 0 && S_ISLNK(st.st_mode));
 		CHECK(unlink("dangling") == 0);
 	}
+}
+
+static void
+check_folder_opens(void)
+{
+	CHECK(mkdir("opened", 0755) == 0);
+	int fd = open("opened", O_RDONLY | O_CREAT, 0644);
+	CHECK(fd != -1);
+	struct stat st;
+	CHECK(fstat(fd, &st) == 0 && S_ISDIR(st.st_mode));
+	CHECK(close(fd) == 0);
+	errno = 0;
+	CHECK(open("opened", O_WRONLY | O_CREAT, 0644) == -1);
+	CHECK(errno == EISDIR);
+	errno = 0;
+	CHECK(open("opened", O_RDONLY | O_CREAT | O_EXCL, 0644) == -1);
+	CHECK(errno == EEXIST);
+	CHECK(rmdir("opened") == 0);
 }
 
 static void
