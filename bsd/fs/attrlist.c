@@ -236,6 +236,7 @@ typedef struct vol_capabilities_attr {
 } vol_capabilities_attr_t;
 
 #define ATTRIBUTES_SIZE_MAX (2 * PATH_MAX + 4096)
+#define GUID_SIZE           16
 
 static int pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 		uint64_t options, char *buffer);
@@ -254,6 +255,8 @@ static uint32_t pack_u32(char *buffer, uint32_t offset, uint32_t value);
 static uint32_t directory_entry_count(int fd);
 static uint32_t pack_u64(char *buffer, uint32_t offset, uint64_t value);
 static const char *unpack_timespec(const char *buffer, struct timespec *ts);
+static int set_protection_class(
+		int dirfd, const char *path, int flags, uint32_t dpclass);
 
 static int
 fgetattrlist(int fd, void *alist, void *attributeBuffer, size_t bufferSize,
@@ -1009,7 +1012,8 @@ set_attributes(int dirfd, const char *path, int flags, void *alist,
 					    | ATTR_CMN_ACCESSMASK
 					    | ATTR_CMN_FLAGS
 					    | ATTR_CMN_EXTENDED_SECURITY
-					    | ATTR_CMN_UUID | ATTR_CMN_GRPUUID))
+					    | ATTR_CMN_UUID | ATTR_CMN_GRPUUID
+					    | ATTR_CMN_DATA_PROTECT_FLAGS))
 			|| alistp->volattr || alistp->dirattr
 			|| alistp->fileattr || alistp->forkattr) {
 		unimplemented();
@@ -1082,6 +1086,25 @@ set_attributes(int dirfd, const char *path, int flags, void *alist,
 			return -1;
 		}
 	}
+	if (alistp->commonattr & ATTR_CMN_FLAGS) {
+		cursor += sizeof(uint32_t);
+	}
+	if (alistp->commonattr & ATTR_CMN_EXTENDED_SECURITY) {
+		cursor += sizeof(attrreference_t);
+	}
+	if (alistp->commonattr & ATTR_CMN_UUID) {
+		cursor += GUID_SIZE;
+	}
+	if (alistp->commonattr & ATTR_CMN_GRPUUID) {
+		cursor += GUID_SIZE;
+	}
+	if (alistp->commonattr & ATTR_CMN_DATA_PROTECT_FLAGS) {
+		uint32_t dpclass;
+		memcpy(&dpclass, cursor, sizeof(dpclass));
+		if (set_protection_class(dirfd, path, flags, dpclass) == -1) {
+			return -1;
+		}
+	}
 	return (path == NULL) ? futimens(dirfd, times)
 			      : utimensat(dirfd, path, times, flags);
 }
@@ -1094,6 +1117,24 @@ unpack_timespec(const char *buffer, struct timespec *ts)
 	ts->tv_sec = value[0];
 	ts->tv_nsec = value[1];
 	return buffer + sizeof(value);
+}
+
+static int
+set_protection_class(int dirfd, const char *path, int flags, uint32_t dpclass)
+{
+	if (path == NULL) {
+		return protection_set(dirfd, (int)dpclass);
+	}
+	int nofollow = (flags & AT_SYMLINK_NOFOLLOW) ? O_NOFOLLOW : 0;
+	int fd = openat(dirfd, path, O_PATH | O_CLOEXEC | nofollow);
+	if (fd == -1) {
+		return -1;
+	}
+	int r = protection_set(fd, (int)dpclass);
+	int saved = errno;
+	close(fd);
+	errno = saved;
+	return r;
 }
 
 int
