@@ -150,6 +150,7 @@ quarantine_handle_syscall(int call)
 #define SANDBOX_EXTENSION_ISSUE      5
 #define SANDBOX_EXTENSION_FILE       0
 #define SANDBOX_EXTENSION_TOKEN_SIZE 0x3ff0
+#define SANDBOX_FILTER_PATH          1
 
 struct sandbox_check_args {
 	uint64_t *result;
@@ -167,6 +168,13 @@ sandbox_check(struct sandbox_check_args *args)
 {
 	bool self = args->pid == 0 || args->pid == getpid();
 	*args->result = self && sandboxed && args->operation == NULL;
+	char buffer[PATH_MAX];
+	const char *path = (const char *)args->filter;
+	if (args->operation != NULL && args->filter_type == SANDBOX_FILTER_PATH
+			&& access(sysroot_host_path(path, 0, buffer), F_OK)
+					== -1) {
+		*args->result = 1;
+	}
 	return 0;
 }
 
