@@ -135,6 +135,13 @@ broker_client_look_up(const char *name, uint64_t *global_id)
 	return reply.found;
 }
 
+bool
+broker_client_carries(uint64_t length, size_t fd_count)
+{
+	return broker_wire_carries(
+			sizeof(struct broker_send) + length, fd_count);
+}
+
 mach_msg_return_t
 broker_client_send(uint64_t dest_global_id, const void *blob, uint32_t length,
 		const int *fds, size_t fd_count)
@@ -325,13 +332,12 @@ send_result(int error)
 		return MACH_MSG_SUCCESS;
 	case EMSGSIZE:
 		return MACH_SEND_TOO_LARGE;
-	case ENOBUFS:
-	case ENOMEM:
-	case EMFILE:
-	case ENFILE:
-	case ETOOMANYREFS:
-		return MACH_SEND_NO_BUFFER;
-	default:
+	case EPIPE:
+	case ENOTCONN:
+	case ECONNRESET:
+	case EBADF:
 		return MACH_SEND_INVALID_DEST;
+	default:
+		return MACH_SEND_NO_BUFFER;
 	}
 }

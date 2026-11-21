@@ -79,8 +79,8 @@ broker_wire_new(uint32_t type, const struct iovec *parts, int part_count,
 	for (size_t i = 0; i != fd_count; i++) {
 		frame->fds[frame->fd_count++] = fds[i];
 	}
-	if (length > BROKER_FRAME_MAX || inline_length > BROKER_INLINE_MAX
-			|| fd_count + out_of_line > BROKER_FDS_MAX) {
+	if (!broker_wire_carries(length, fd_count)
+			|| inline_length > BROKER_INLINE_MAX) {
 		broker_wire_free(frame);
 		errno = EMSGSIZE;
 		return NULL;
@@ -104,6 +104,14 @@ broker_wire_new(uint32_t type, const struct iovec *parts, int part_count,
 	frame->type |= BROKER_FRAME_OOL;
 	frame->fds[frame->fd_count++] = fd;
 	return frame;
+}
+
+bool
+broker_wire_carries(uint64_t length, size_t fd_count)
+{
+	return length <= BROKER_FRAME_MAX
+			&& fd_count + (length > BROKER_INLINE_MAX)
+			<= BROKER_FDS_MAX;
 }
 
 static int
