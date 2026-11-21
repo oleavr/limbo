@@ -58,6 +58,7 @@
 #define PEER_ROOM    (1 << 20)
 #define MANY_PORTS   300
 #define FDS_MAX      1024
+#define WAITING      5
 
 typedef struct {
 	mach_msg_header_t Head;
@@ -726,8 +727,8 @@ reap(pid_t pid)
 	return status;
 }
 
-static int32_t
-ask(mach_msg_header_t *request)
+static mach_port_t
+post(mach_msg_header_t *request)
 {
 	mach_port_t reply_port;
 	mach_port_allocate(
@@ -735,6 +736,12 @@ ask(mach_msg_header_t *request)
 	request->msgh_bits |= MACH_MSGH_BITS(0, MACH_MSG_TYPE_MAKE_SEND_ONCE);
 	request->msgh_local_port = reply_port;
 	send_request(request);
+	return reply_port;
+}
+
+static int32_t
+collect(mach_port_t reply_port)
+{
 
 	struct {
 		valued_t reply;
@@ -749,6 +756,12 @@ ask(mach_msg_header_t *request)
 			MACH_PORT_RIGHT_RECEIVE, -1);
 	CHECK(kr == KERN_SUCCESS);
 	return message.reply.value;
+}
+
+static int32_t
+ask(mach_msg_header_t *request)
+{
+	return collect(post(request));
 }
 
 static int32_t
@@ -1221,6 +1234,33 @@ check_killed_receiver(void)
 }
 
 static void
+check_descriptors_wait(pid_t peer, mach_port_t port)
+{
+	static carriers_t carriers;
+	carry(&carriers, port, MANY_PORTS);
+	carry_offsets(&carriers, MACH_MSG_TYPE_COPY_SEND);
+
+	stop(peer);
+	flood(port);
+	mach_port_t replies[WAITING];
+	for (int i = 0; i != WAITING; i++) {
+		replies[i] = post(&carriers.Head);
+	}
+	CHECK(bootstrap_call(LOOK_UP, PEER_NAME) == port);
+
+	CHECK(kill(peer, SIGCONT) == 0);
+	for (int i = 0; i != WAITING; i++) {
+		CHECK(collect(replies[i]) == MANY_PORTS);
+	}
+	CHECK(ask_for(port, REPORT_ID) == BULK_COUNT);
+	for (int i = 0; i != MANY_PORTS; i++) {
+		CHECK(mach_port_deallocate(
+				      mach_task_self(), carriers.ports[i].name)
+				== KERN_SUCCESS);
+	}
+}
+
+static void
 check_transport(void)
 {
 	pid_t peer = start(serve_peer);
@@ -1235,6 +1275,7 @@ check_transport(void)
 	check_fileport(port);
 	check_many_fileports(port);
 	check_memory_entry(port);
+	check_descriptors_wait(peer, port);
 
 	send_quit(port);
 	int status = reap(peer);

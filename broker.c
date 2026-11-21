@@ -37,6 +37,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <sys/un.h>
@@ -57,6 +58,7 @@ struct service {
 	char name[LIMBO_BROKER_SERVICE_NAME_MAX];
 };
 
+static void raise_file_limit(void);
 static void run(int listen_fd);
 static void accept_guest(int listen_fd);
 static void handle_guest(int fd);
@@ -102,8 +104,20 @@ main(int argc, char *argv[])
 	}
 	listen(listen_fd, 64);
 
+	raise_file_limit();
 	run(listen_fd);
 	return 0;
+}
+
+static void
+raise_file_limit(void)
+{
+	struct rlimit limit;
+	if (getrlimit(RLIMIT_NOFILE, &limit) == 0
+			&& limit.rlim_cur < limit.rlim_max) {
+		limit.rlim_cur = limit.rlim_max;
+		setrlimit(RLIMIT_NOFILE, &limit);
+	}
 }
 
 static void
