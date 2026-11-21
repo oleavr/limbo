@@ -29,6 +29,7 @@
 #include <bank/bank_types.h>
 #include <bsm/audit.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <mach/mach_vm.h>
@@ -52,6 +53,8 @@ kern_return_t mk_timer_arm(mach_port_name_t name, uint64_t expire_time);
 kern_return_t mk_timer_destroy(mach_port_name_t name);
 kern_return_t _kernelrpc_mach_task_is_self(
 		task_name_t task, boolean_t *is_self);
+int fileport_makeport(int fd, mach_port_t *port);
+int fileport_makefd(mach_port_t port);
 
 #define LARGEST_MESSAGE (2u << 20)
 
@@ -84,6 +87,7 @@ static void check_messages(void);
 static void check_out_of_line_copies(void);
 static void check_large_messages(void);
 static void check_large_message(mach_msg_size_t size);
+static void check_fileports(void);
 static void check_port_sets(void);
 static void check_receive_on_destroyed(void);
 static mach_msg_return_t receive_on_destroyed(mach_port_right_t right);
@@ -159,6 +163,7 @@ main(void)
 	check_messages();
 	check_out_of_line_copies();
 	check_large_messages();
+	check_fileports();
 	check_port_sets();
 	check_receive_on_destroyed();
 	check_queued_rights_destroyed();
@@ -594,6 +599,63 @@ check_large_message(mach_msg_size_t size)
 			      sent.bytes + sizeof(sent.header),
 			      size - sizeof(sent.header))
 			== 0);
+	CHECK(mach_port_mod_refs(mach_task_self(), port,
+			      MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+}
+
+static void
+check_fileports(void)
+{
+	char path[] = "/tmp/limbo-fileport-XXXXXX";
+	int fd = mkstemp(path);
+	CHECK(fd != -1 && unlink(path) == 0);
+	mach_port_t fileport;
+	CHECK(fileport_makeport(fd, &fileport) == 0);
+	mach_port_t port = allocate_port();
+
+	struct {
+		mach_msg_header_t header;
+		mach_msg_body_t body;
+		mach_msg_port_descriptor_t port;
+		mach_msg_trailer_t trailer;
+	} message = {
+			.header = {
+					.msgh_bits = MACH_MSGH_BITS_SET(
+							MACH_MSG_TYPE_MAKE_SEND,
+							0, 0,
+							MACH_MSGH_BITS_COMPLEX),
+					.msgh_size = sizeof(message)
+							- sizeof(message.trailer),
+					.msgh_remote_port = port,
+			},
+			.body = {.msgh_descriptor_count = 1},
+			.port = {
+					.name = fileport,
+					.disposition = MACH_MSG_TYPE_COPY_SEND,
+					.type = MACH_MSG_PORT_DESCRIPTOR,
+			},
+	};
+	CHECK(mach_msg(&message.header, MACH_SEND_MSG, message.header.msgh_size,
+			      0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+			      MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	CHECK(mach_msg(&message.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof(message), port, 1000, MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	CHECK(message.port.name == fileport);
+	CHECK(send_refs(fileport) == 2);
+
+	int made = fileport_makefd(message.port.name);
+	CHECK(made != -1 && made != fd);
+	CHECK(fcntl(made, F_GETFD) & FD_CLOEXEC);
+	CHECK(lseek(fd, 123, SEEK_SET) == 123);
+	CHECK(lseek(made, 0, SEEK_CUR) == 123);
+
+	CHECK(close(made) == 0 && close(fd) == 0);
+	CHECK(mach_port_mod_refs(mach_task_self(), fileport,
+			      MACH_PORT_RIGHT_SEND, -2)
+			== KERN_SUCCESS);
 	CHECK(mach_port_mod_refs(mach_task_self(), port,
 			      MACH_PORT_RIGHT_RECEIVE, -1)
 			== KERN_SUCCESS);
