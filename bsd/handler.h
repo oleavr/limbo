@@ -127,6 +127,7 @@ int sys_socket(int domain, int type, int protocol);
 int sys_connect(int s, void *name, void *namelen);
 int sys_getpriority(int which, void *who);
 int sys_bind(int s, void *name, void *namelen);
+bool unix_bound_address(uint64_t inode, void *address, size_t size);
 int sys_setsockopt(int s, int level, int name, void *val, void *valsize);
 int sys_listen(int s, int backlog);
 int sys_sigsuspend(uint32_t mask);

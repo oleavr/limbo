@@ -1792,6 +1792,13 @@ sys_getpriority(int which, void *who)
 	return priority;
 }
 
+struct unix_bound;
+
+static void unix_bound_remember(
+		int s, const struct xnu_sockaddr_un *address, socklen_t length);
+static struct unix_bound **unix_bound_find(ino_t inode);
+static void unix_bounds_prune(void);
+
 int
 sys_bind(int s, void *name, void *namelen)
 {
@@ -1819,7 +1826,110 @@ sys_bind(int s, void *name, void *namelen)
 	if (directory != -1) {
 		close(directory);
 	}
-	return result == -1 ? err_map(error) : 0;
+	if (result == -1) {
+		return err_map(error);
+	}
+	unix_bound_remember(s, address, length);
+	return 0;
+}
+
+struct unix_bound {
+	struct unix_bound *next;
+	ino_t inode;
+	bool listed;
+	struct xnu_sockaddr_un address;
+};
+
+#define UNIX_BOUNDS_UNPRUNED 64
+
+static struct unix_bound *unix_bounds;
+static size_t unix_bound_count;
+static size_t unix_bound_prune_at = UNIX_BOUNDS_UNPRUNED;
+static pthread_mutex_t unix_bounds_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void
+unix_bound_remember(
+		int s, const struct xnu_sockaddr_un *address, socklen_t length)
+{
+	struct stat st;
+	fstat(s, &st);
+	struct unix_bound *bound = malloc(sizeof(*bound));
+	*bound = (struct unix_bound){.inode = st.st_ino};
+	size_t size = length < sizeof(bound->address) ? length
+						      : sizeof(bound->address);
+	memcpy(&bound->address, address, size);
+	bound->address.sun_len = (uint8_t)size;
+	pthread_mutex_lock(&unix_bounds_lock);
+	struct unix_bound **link = unix_bound_find(st.st_ino);
+	if (*link != NULL) {
+		bound->next = (*link)->next;
+		free(*link);
+		*link = bound;
+	} else {
+		*link = bound;
+		if (++unix_bound_count >= unix_bound_prune_at) {
+			unix_bounds_prune();
+		}
+	}
+	pthread_mutex_unlock(&unix_bounds_lock);
+}
+
+static struct unix_bound **
+unix_bound_find(ino_t inode)
+{
+	struct unix_bound **link = &unix_bounds;
+	while (*link != NULL && (*link)->inode != inode) {
+		link = &(*link)->next;
+	}
+	return link;
+}
+
+static void
+unix_bounds_prune(void)
+{
+	FILE *sockets = fopen("/proc/net/unix", "re");
+	if (sockets == NULL) {
+		return;
+	}
+	char line[PATH_MAX + 128];
+	while (fgets(line, sizeof(line), sockets) != NULL) {
+		unsigned long inode;
+		if (sscanf(line, "%*x: %*x %*x %*x %*x %*x %lu", &inode) == 1
+				&& *unix_bound_find(inode) != NULL) {
+			(*unix_bound_find(inode))->listed = true;
+		}
+	}
+	fclose(sockets);
+	struct unix_bound **link = &unix_bounds;
+	while (*link != NULL) {
+		struct unix_bound *bound = *link;
+		if (bound->listed) {
+			bound->listed = false;
+			link = &bound->next;
+		} else {
+			*link = bound->next;
+			free(bound);
+			unix_bound_count--;
+		}
+	}
+	unix_bound_prune_at = unix_bound_count * 2 > UNIX_BOUNDS_UNPRUNED
+			? unix_bound_count * 2
+			: UNIX_BOUNDS_UNPRUNED;
+}
+
+bool
+unix_bound_address(uint64_t inode, void *address, size_t size)
+{
+	pthread_mutex_lock(&unix_bounds_lock);
+	const struct unix_bound *bound = *unix_bound_find(inode);
+	if (bound != NULL) {
+		memcpy(address, &bound->address,
+				size < sizeof(bound->address)
+						? size
+						: sizeof(bound->address));
+	}
+	pthread_mutex_unlock(&unix_bounds_lock);
+	return bound != NULL;
 }
 
 int
