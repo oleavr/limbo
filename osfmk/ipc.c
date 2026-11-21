@@ -1084,6 +1084,7 @@ transfer_right(mach_port_name_t name, mach_msg_type_name_t disposition,
 				break;
 			case MACH_MSG_TYPE_MOVE_RECEIVE:
 				entry->type &= ~MACH_PORT_TYPE_RECEIVE;
+				wake_all_waiters();
 				break;
 			}
 			return MACH_MSG_SUCCESS;
@@ -2152,6 +2153,7 @@ entry_release_if_unused(struct ipc_entry *entry)
 	port->name = MACH_PORT_NULL;
 	if (port->is_pset) {
 		pset_release_members(port);
+		wake_all_waiters();
 	}
 	if (port->kotype == IPC_KOBJECT_NONE) {
 		port_leave_all_sets(port);
