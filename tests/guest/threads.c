@@ -447,6 +447,9 @@ check_thread_name(void)
 	const char *longer_than_comm = "a name longer than fifteen bytes";
 	CHECK(pthread_setname_np(longer_than_comm) == 0);
 	CHECK(strcmp(extended_info().pth_name, longer_than_comm) == 0);
+	char process[2 * MAXCOMLEN];
+	CHECK(proc_name(getpid(), process, sizeof(process)) > 0);
+	CHECK(strcmp(process, "threads") == 0);
 	CHECK(pthread_setname_np("") == 0);
 	CHECK(extended_info().pth_name[0] == '\0');
 }
