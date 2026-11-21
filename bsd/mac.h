@@ -31,5 +31,6 @@
 
 #include "bsd/sandbox_profile.h"
 
+bool mac_sandbox_denies(int operation, int dirfd, const char *path, int follow);
 bool mac_sandbox_denies_open(int dirfd, const char *path, bool write,
 		bool create, int follow);

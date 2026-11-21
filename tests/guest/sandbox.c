@@ -37,6 +37,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/acl.h>
+#include <sys/clonefile.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -88,6 +90,7 @@ static void check_profile(void);
 static void ask_profile(void);
 static void check_enforced(void);
 static void denied_opening(void);
+static void denied_creating(void);
 static void in_denied_folder(void (*body)(void));
 static int remove_entry(const char *path, const struct stat *st, int type,
 		struct FTW *ftw);
@@ -246,6 +249,7 @@ check_enforced(void)
 	check_deep();
 	in_denied_folder(denied_spawning);
 	in_denied_folder(denied_opening);
+	in_denied_folder(denied_creating);
 }
 
 static void
@@ -346,6 +350,58 @@ denied_opening(void)
 		CHECK(unlink(ALLOWED "-link") == 0);
 	}
 	CHECK(access(DENIED "/made", F_OK) == -1);
+}
+
+static void
+denied_creating(void)
+{
+	int dir = open(DENIED, O_RDONLY);
+	CHECK(dir >= 0);
+	errno = 0;
+	CHECK(mkdir(DENIED "/folder", 0755) == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(mkdirat(dir, "folder", 0755) == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(mkfifo(DENIED "/fifo", 0644) == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(symlink("existing", DENIED "/link") == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(symlinkat("existing", dir, "link") == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(link(ALLOWED, DENIED "/hard") == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(linkat(AT_FDCWD, ALLOWED, dir, "hard", 0) == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(clonefile(ALLOWED, DENIED "/clone", 0) == -1);
+	CHECK(errno == EPERM);
+	int source = open(ALLOWED, O_RDONLY);
+	CHECK(source >= 0);
+	errno = 0;
+	CHECK(fclonefileat(source, AT_FDCWD, DENIED "/clone", 0) == -1);
+	CHECK(errno == EPERM);
+	CHECK(close(source) == 0);
+	filesec_t filesec = filesec_init();
+	mode_t mode = 0755;
+	CHECK(filesec_set_property(filesec, FILESEC_MODE, &mode) == 0);
+	errno = 0;
+	CHECK(mkdirx_np(DENIED "/folder", filesec) == -1);
+	CHECK(errno == EPERM);
+	filesec_free(filesec);
+	CHECK(close(dir) == 0);
+
+	CHECK(mkdir(ALLOWED "-folder", 0755) == 0);
+	CHECK(rmdir(ALLOWED "-folder") == 0);
+	CHECK(symlink("existing", ALLOWED "-link") == 0);
+	CHECK(unlink(ALLOWED "-link") == 0);
+	CHECK(link(ALLOWED, ALLOWED "-hard") == 0);
+	CHECK(unlink(ALLOWED "-hard") == 0);
 }
 
 static void

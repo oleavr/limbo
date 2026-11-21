@@ -252,6 +252,13 @@ profile_denies(int operation, int dirfd, const char *path, int follow)
 }
 
 bool
+mac_sandbox_denies(int operation, int dirfd, const char *path, int follow)
+{
+	return profile.enforced != 0 && path != NULL
+			&& profile_denies(operation, dirfd, path, follow);
+}
+
+bool
 mac_sandbox_denies_open(int dirfd, const char *path, bool write, bool create,
 		int follow)
 {
