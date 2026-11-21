@@ -59,6 +59,8 @@
 
 #define DARWIN_SYSTEM_FSID_OFFSET 2
 
+#define DARWIN_MNT_EXT_ROOT_DATA_VOL 0x00000001
+
 static inline int32_t
 darwin_device(dev_t dev)
 {

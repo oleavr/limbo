@@ -173,7 +173,9 @@ struct reference {
 
 #define DIR_MNTSTATUS_MNTPOINT 0x00000001
 
-#define VOLUME_NAME "Macintosh HD"
+#define VOLUME_NAME           "Macintosh HD"
+#define DATA_VOLUME_NAME      "Data"
+#define DATA_VOLUME_UUID_MARK 0x5d
 
 #define VOLUME_SIGNATURE                0x4244
 #define VOL_CAP_FMT_CASE_SENSITIVE      0x00000100
@@ -244,11 +246,13 @@ typedef struct vol_capabilities_attr {
 #define REFERENCES_MAX      9
 #define GUID_SIZE           16
 
-static int pack_attributes(int fd, const struct __darwin_attrlist *alistp,
-		uint64_t options, char *buffer);
+static int pack_attributes(int fd, bool data,
+		const struct __darwin_attrlist *alistp, uint64_t options,
+		char *buffer);
 static bool volume_request_valid(
 		const struct __darwin_attrlist *list, uint64_t options);
-static int attrlist_open(int dirfd, const char *path, uint64_t options);
+static int attrlist_open(
+		int dirfd, const char *path, uint64_t options, bool *data);
 static uint32_t pack_reference(char *buffer, uint32_t offset,
 		struct reference *references, uint32_t *reference_count,
 		const char *value);
@@ -271,11 +275,11 @@ static bool sandbox_denies(
 		int operation, int dirfd, const char *path, int follow);
 
 static int
-fgetattrlist(int fd, void *alist, void *attributeBuffer, size_t bufferSize,
-		uint64_t options)
+fgetattrlist(int fd, bool data, void *alist, void *attributeBuffer,
+		size_t bufferSize, uint64_t options)
 {
 	char attributes[ATTRIBUTES_SIZE_MAX];
-	if (pack_attributes(fd, alist, options, attributes)) {
+	if (pack_attributes(fd, data, alist, options, attributes)) {
 		return 1;
 	}
 
@@ -289,7 +293,7 @@ fgetattrlist(int fd, void *alist, void *attributeBuffer, size_t bufferSize,
 }
 
 static int
-pack_attributes(int fd, const struct __darwin_attrlist *alistp,
+pack_attributes(int fd, bool data, const struct __darwin_attrlist *alistp,
 		uint64_t options, char *buffer)
 {
 	if (alistp->bitmapcount != ATTR_BIT_MAP_COUNT) {
@@ -316,6 +320,9 @@ pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 	readlink(link, host_path, sizeof(host_path) - 1);
 	const char *path = sysroot_guest_path(host_path);
 	fileid_remember(sysroot_file_id(s.st_dev, s.st_ino), path);
+	if (data && strcmp(path, "/") == 0) {
+		path = DARWIN_DATA_MOUNT_ON;
+	}
 
 	attribute_set_t returned = {
 			.commonattr = alistp->commonattr & ~ATTR_CMN_ERROR,
@@ -643,18 +650,21 @@ pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 
 	if (returned.volattr & ATTR_VOL_MOUNTPOINT) {
 		offset = pack_reference(buffer, offset, references,
-				&reference_count, "/");
+				&reference_count,
+				data ? DARWIN_DATA_MOUNT_ON : "/");
 		volattr &= ~ATTR_VOL_MOUNTPOINT;
 	}
 
 	if (returned.volattr & ATTR_VOL_NAME) {
 		offset = pack_reference(buffer, offset, references,
-				&reference_count, VOLUME_NAME);
+				&reference_count,
+				data ? DATA_VOLUME_NAME : VOLUME_NAME);
 		volattr &= ~ATTR_VOL_NAME;
 	}
 
 	if (returned.volattr & ATTR_VOL_MOUNTFLAGS) {
-		uint32_t flags = DARWIN_MOUNT_FLAGS;
+		uint32_t flags = data ? DARWIN_DATA_MOUNT_FLAGS
+				      : DARWIN_MOUNT_FLAGS;
 		memcpy(buffer + offset, &flags, sizeof(flags));
 		offset += sizeof(flags);
 		volattr &= ~ATTR_VOL_MOUNTFLAGS;
@@ -662,7 +672,9 @@ pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 
 	if (returned.volattr & ATTR_VOL_MOUNTEDDEVICE) {
 		offset = pack_reference(buffer, offset, references,
-				&reference_count, "/dev/disk1s1");
+				&reference_count,
+				data ? DARWIN_DATA_MOUNT_FROM
+				     : DARWIN_SYSTEM_MOUNT_FROM);
 		volattr &= ~ATTR_VOL_MOUNTEDDEVICE;
 	}
 
@@ -686,14 +698,16 @@ pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 	if (returned.volattr & ATTR_VOL_UUID) {
 		struct statfs fs;
 		fstatfs(fd, &fs);
-		uint64_t uuid[2] = {*(uint64_t *)&fs.f_fsid, s.st_dev};
+		uint64_t uuid[2] = {*(uint64_t *)&fs.f_fsid,
+				s.st_dev ^ (data ? DATA_VOLUME_UUID_MARK : 0)};
 		memcpy(buffer + offset, uuid, sizeof(uuid));
 		offset += sizeof(uuid);
 		volattr &= ~ATTR_VOL_UUID;
 	}
 
 	if (returned.volattr & ATTR_VOL_MOUNTEXTFLAGS) {
-		offset = pack_u32(buffer, offset, 0);
+		offset = pack_u32(buffer, offset,
+				data ? DARWIN_MNT_EXT_ROOT_DATA_VOL : 0);
 		volattr &= ~ATTR_VOL_MOUNTEXTFLAGS;
 	}
 
@@ -814,9 +828,10 @@ pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 	}
 
 	if (returned.dirattr & ATTR_DIR_MOUNTSTATUS) {
+		bool mounted_on = strcmp(path, "/") == 0
+				|| strcmp(path, DARWIN_DATA_MOUNT_ON) == 0;
 		offset = pack_u32(buffer, offset,
-				strcmp(path, "/") == 0 ? DIR_MNTSTATUS_MNTPOINT
-						       : 0);
+				mounted_on ? DIR_MNTSTATUS_MNTPOINT : 0);
 		dirattr &= ~ATTR_DIR_MOUNTSTATUS;
 	}
 
@@ -887,12 +902,16 @@ pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 	}
 
 	if (returned.forkattr & ATTR_CMNEXT_REALDEVID) {
-		offset = pack_u32(buffer, offset, darwin_device(s.st_dev));
+		offset = pack_u32(buffer, offset,
+				darwin_fsid(sysroot_device(s.st_dev),
+						sysroot_root_device(), data));
 		cmnextattr &= ~ATTR_CMNEXT_REALDEVID;
 	}
 
 	if (returned.forkattr & ATTR_CMNEXT_REALFSID) {
-		offset = pack_u32(buffer, offset, darwin_device(s.st_dev));
+		offset = pack_u32(buffer, offset,
+				darwin_fsid(sysroot_device(s.st_dev),
+						sysroot_root_device(), data));
 		offset = pack_u32(buffer, offset, DARWIN_FSTYPE_APFS);
 		cmnextattr &= ~ATTR_CMNEXT_REALFSID;
 	}
@@ -1229,7 +1248,8 @@ sys_getattrlistbulk(int dirfd, void *alist, void *attributeBuffer,
 		if (fd == -1) {
 			return err_map(errno);
 		}
-		int error = pack_attributes(fd, alist, options, attributes);
+		int error = pack_attributes(fd, sysroot_fd_on_data_volume(fd),
+				alist, options, attributes);
 		close(fd);
 		if (error) {
 			return err_map(errno);
@@ -1262,12 +1282,14 @@ int
 sys_getattrlist(const char *path, void *alist, void *attributeBuffer,
 		size_t bufferSize, uint64_t options)
 {
-	int fd = attrlist_open(AT_FDCWD, path, options);
+	bool data;
+	int fd = attrlist_open(AT_FDCWD, path, options, &data);
 	if (fd == -1) {
 		return err_map(errno);
 	}
 
-	if (fgetattrlist(fd, alist, attributeBuffer, bufferSize, options)) {
+	if (fgetattrlist(fd, data, alist, attributeBuffer, bufferSize,
+			    options)) {
 		close(fd);
 		return err_map(errno);
 	}
@@ -1326,7 +1348,8 @@ int
 sys_fgetattrlist(int fd, void *alist, void *attributeBuffer, size_t bufferSize,
 		uint64_t options)
 {
-	if (fgetattrlist(fd, alist, attributeBuffer, bufferSize, options)) {
+	if (fgetattrlist(fd, sysroot_fd_on_data_volume(fd), alist,
+			    attributeBuffer, bufferSize, options)) {
 		return err_map(errno);
 	}
 
@@ -1351,12 +1374,14 @@ int
 sys_getattrlistat(int dirfd, const char *path, void *alist,
 		void *attributeBuffer, size_t bufferSize, uint64_t options)
 {
-	int fd = attrlist_open(at_fd(dirfd), path, options);
+	bool data;
+	int fd = attrlist_open(at_fd(dirfd), path, options, &data);
 	if (fd == -1) {
 		return err_map(errno);
 	}
 
-	if (fgetattrlist(fd, alist, attributeBuffer, bufferSize, options)) {
+	if (fgetattrlist(fd, data, alist, attributeBuffer, bufferSize,
+			    options)) {
 		close(fd);
 		return err_map(errno);
 	}
@@ -1394,10 +1419,12 @@ volume_request_valid(const struct __darwin_attrlist *list, uint64_t options)
 }
 
 static int
-attrlist_open(int dirfd, const char *path, uint64_t options)
+attrlist_open(int dirfd, const char *path, uint64_t options, bool *data)
 {
 	int flags = (options & FSOPT_NOFOLLOW) ? AT_SYMLINK_NOFOLLOW : 0;
 	char buffer[PATH_MAX];
-	return openat(dirfd, sysroot_host_path(path, flags, buffer),
+	const char *host_path = sysroot_host_path(path, flags, buffer);
+	*data = sysroot_at_on_data_volume(dirfd, path, host_path);
+	return openat(dirfd, host_path,
 			O_PATH | ((flags != 0) ? O_NOFOLLOW : 0));
 }
