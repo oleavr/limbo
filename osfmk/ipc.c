@@ -241,7 +241,7 @@ static void deliver_notification(
 static kern_return_t request_notification(mach_port_name_t name,
 		mach_msg_id_t id, mach_port_mscount_t sync,
 		mach_port_name_t notify, mach_port_name_t *previous);
-static kern_return_t request_dead_name(mach_port_name_t name,
+static kern_return_t request_dead_name(mach_port_name_t name, mach_msg_id_t id,
 		mach_port_name_t notify, struct ipc_port **replaced);
 static void destroy_receive_right(struct ipc_entry *entry);
 static void queue_dead_name_notification(struct ipc_entry *entry);
@@ -2157,8 +2157,9 @@ request_notification(mach_port_name_t name, mach_msg_id_t id,
 	struct ipc_port *replaced = NULL;
 	kern_return_t kr = KERN_SUCCESS;
 	switch (id) {
+	case MACH_NOTIFY_SEND_POSSIBLE:
 	case MACH_NOTIFY_DEAD_NAME:
-		kr = request_dead_name(name, notify, &replaced);
+		kr = request_dead_name(name, id, notify, &replaced);
 		break;
 	}
 	if (kr != KERN_SUCCESS) {
@@ -2175,8 +2176,8 @@ request_notification(mach_port_name_t name, mach_msg_id_t id,
 }
 
 static kern_return_t
-request_dead_name(mach_port_name_t name, mach_port_name_t notify,
-		struct ipc_port **replaced)
+request_dead_name(mach_port_name_t name, mach_msg_id_t id,
+		mach_port_name_t notify, struct ipc_port **replaced)
 {
 	struct ipc_entry *entry = lookup(name);
 	if (entry == NULL) {
@@ -2197,6 +2198,16 @@ request_dead_name(mach_port_name_t name, mach_port_name_t notify,
 		return KERN_SUCCESS;
 	}
 	if (notify == MACH_PORT_NULL) {
+		return KERN_SUCCESS;
+	}
+	if (id == MACH_NOTIFY_SEND_POSSIBLE
+			&& (entry->type & MACH_PORT_TYPE_DEAD_NAME)) {
+		entry->urefs++;
+		queue_notice((struct pending_notice){
+				.id = MACH_NOTIFY_DEAD_NAME,
+				.notify = hold_send_once(notify),
+				.name = name,
+		});
 		return KERN_SUCCESS;
 	}
 	return (entry->type & MACH_PORT_TYPE_PORT_OR_DEAD)
