@@ -1,0 +1,7 @@
+(version 1)
+(allow default)
+(deny file-write* (subpath "/private/tmp/sbt"))
+(allow file-write* (literal "/private/tmp/sbt/ok")
+        (regex #"^/private/tmp/sbt/r[0-9]+$")
+        (subpath "/private/tmp/sbt/Sub") (prefix "/private/tmp/sbt/pre"))
+(allow file-write* (regex #"/zz$"))

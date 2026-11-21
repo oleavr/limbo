@@ -1,0 +1,62 @@
+(version 1)
+(debug deny) ; log all denied operations to /var/log/system.log
+(deny network-outbound (to unix-socket))
+
+(deny file-read* (subpath "/Users/test/.zprofile"))
+(deny file-read* (subpath "/Users/test/.zsh_history"))
+(deny file-read* (subpath "/Users/test/Documents"))
+(deny file-read* (subpath "/Users/test/Movies"))
+(deny file-read* (subpath "/Users/test/Music"))
+(deny file-read* (subpath "/Users/test/Pictures"))
+(deny file-read* (subpath "/Users/test/Library/Keychains"))
+(deny network*)
+(allow file-read* (subpath "/opt/homebrew/var/homebrew/tmp/.cellar/verify-20261104-269092-qeweki/5c88e2d7d08ec9503dadc908579c39a63831b49951b8aa9dce642604af10fc84--json-c--0.19.arm64_golden_gate.bottle.1.tar.gz"))
+(allow file-read* (subpath "/opt/homebrew/var/homebrew/tmp/.cellar/verify-20261104-269092-qeweki/homebrew-unpack-20261104-269092-ft5k0s"))
+(allow file-write* (subpath "/opt/homebrew/var/homebrew/tmp/.cellar/verify-20261104-269092-qeweki/homebrew-unpack-20261104-269092-ft5k0s"))
+(allow file-write-setugid (subpath "/opt/homebrew/var/homebrew/tmp/.cellar/verify-20261104-269092-qeweki/homebrew-unpack-20261104-269092-ft5k0s"))
+(allow file-write-mode (subpath "/opt/homebrew/var/homebrew/tmp/.cellar/verify-20261104-269092-qeweki/homebrew-unpack-20261104-269092-ft5k0s"))
+(deny file-write* (literal "/opt/homebrew/bin/brew"))
+(deny file-write* (subpath "/opt/homebrew/Library"))
+(deny file-write* (subpath "/opt/homebrew/.git"))
+(allow file-read* (subpath "/opt/homebrew/var/homebrew/tmp/.cellar/verify-20261104-269092-qeweki/homebrew-sandbox20261104-269092-43zvqs"))
+(allow file-write* (subpath "/opt/homebrew/var/homebrew/tmp/.cellar/verify-20261104-269092-qeweki/homebrew-sandbox20261104-269092-43zvqs"))
+(allow file-write-setugid (subpath "/opt/homebrew/var/homebrew/tmp/.cellar/verify-20261104-269092-qeweki/homebrew-sandbox20261104-269092-43zvqs"))
+(allow file-write-mode (subpath "/opt/homebrew/var/homebrew/tmp/.cellar/verify-20261104-269092-qeweki/homebrew-sandbox20261104-269092-43zvqs"))
+(allow network* network-outbound (subpath "/opt/homebrew/var/homebrew/tmp/.cellar/verify-20261104-269092-qeweki/homebrew-sandbox20261104-269092-43zvqs"))
+(allow file-write*
+    (literal "/dev/ptmx")
+    (literal "/dev/dtracehelper")
+    (literal "/dev/null")
+    (literal "/dev/random")
+    (literal "/dev/zero")
+    (regex #"^/dev/fd/[0-9]+$")
+    (regex #"^/dev/tty[a-z0-9]*$")
+    )
+(deny file-write*) ; deny non-allowlist file write operations
+(deny file-write-setugid) ; deny non-allowlist file write SUID/SGID operations
+(deny file-write-mode) ; deny non-allowlist file write mode operations
+(deny mach-lookup)
+(allow mach-lookup
+    (xpc-service-name "com.apple.MTLCompilerService")
+    (global-name "com.apple.mobileassetd.v2")
+    (global-name "com.apple.sysmond")
+    (global-name "com.apple.lsd.mapdb")
+    (global-name "com.apple.bsd.dirhelper")
+    (global-name "com.apple.system.opendirectoryd.libinfo")
+    (global-name "com.apple.system.opendirectoryd.membership")
+    (global-name "com.apple.PowerManagement.control")
+    (global-name "com.apple.SecurityServer")
+    (global-name "com.apple.networkd")
+    (global-name "com.apple.ocspd")
+    (global-name "com.apple.trustd.agent")
+
+    (global-name "com.apple.SystemConfiguration.DNSConfiguration")
+    (global-name "com.apple.SystemConfiguration.configd")
+    )
+(deny lsopen)
+(deny appleevent-send)
+(allow process-exec
+    (literal "/bin/ps")
+    (with no-sandbox)
+    ) ; allow certain processes running without sandbox
+(allow default) ; allow everything else
