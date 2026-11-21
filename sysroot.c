@@ -1,5 +1,6 @@
 /*
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -49,12 +50,15 @@
 
 #define RESOLVE_PREFIX       "/.resolve/"
 #define RESOLVE_NOFOLLOW_ANY 0x1
+#define LINKS_MAX            32
 
 static char root[PATH_MAX];
 static dev_t root_dev;
 static ino_t root_ino;
 static size_t root_length;
 
+static bool leads_on(
+		int dirfd, const char *path, const char *host, char *target);
 static const char *host_path(const char *path, int flags, char *buffer);
 static int open_in_root(const char *path, int flags, uint64_t resolve);
 static ssize_t read_fd_path(int fd, char *buffer);
@@ -89,6 +93,46 @@ sysroot_host_path(const char *path, int flags, char *buffer)
 		trace_path(path, host);
 	}
 	return host;
+}
+
+const char *
+sysroot_creation_path(int dirfd, const char *path, int flags, char *buffer)
+{
+	const char *host = sysroot_host_path(path, flags, buffer);
+	char target[PATH_MAX];
+	for (int links = 0; links < LINKS_MAX && !(flags & AT_SYMLINK_NOFOLLOW)
+			&& leads_on(dirfd, path, host, target);
+			links++) {
+		const char *next = host_path(target, 0, buffer);
+		if (next != buffer) {
+			snprintf(buffer, PATH_MAX, "%s", next);
+		}
+		host = buffer;
+	}
+	return host;
+}
+
+static bool
+leads_on(int dirfd, const char *path, const char *host, char *target)
+{
+	char link[PATH_MAX];
+	ssize_t length = readlinkat(dirfd, host, link, sizeof(link) - 1);
+	if (length == -1
+			|| strncmp(path, NOFOLLOW_PREFIX,
+					   strlen(NOFOLLOW_PREFIX))
+					== 0
+			|| strncmp(path, RESOLVE_PREFIX, strlen(RESOLVE_PREFIX))
+					== 0) {
+		return false;
+	}
+	link[length] = '\0';
+	const char *folder = sysroot_guest_path(host);
+	const char *name = strrchr(folder, '/');
+	int folder_length = (link[0] == '/' || name == NULL)
+			? 0
+			: (int)(name - folder + 1);
+	return snprintf(target, PATH_MAX, "%.*s%s", folder_length, folder, link)
+			< PATH_MAX;
 }
 
 static const char *

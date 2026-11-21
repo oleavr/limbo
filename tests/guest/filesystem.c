@@ -66,6 +66,7 @@
 
 static void check_files(void);
 static void check_directories(void);
+static void check_dangling_links(void);
 static void check_attributes(void);
 static void check_copyfile(void);
 static void check_xattrs(void);
@@ -88,6 +89,7 @@ main(int argc, char **argv)
 
 	check_files();
 	check_directories();
+	check_dangling_links();
 	check_attributes();
 	check_copyfile();
 	check_xattrs();
@@ -153,6 +155,37 @@ check_files(void)
 	CHECK(stat("a", &st) == 0 && st.st_size == 5);
 	CHECK(unlink("a") == 0);
 	CHECK(unlink("e") == 0);
+}
+
+static void
+check_dangling_links(void)
+{
+	char here[PATH_MAX], target[PATH_MAX + 16], link[PATH_MAX + 16];
+	CHECK(getcwd(here, sizeof(here)) != NULL);
+	snprintf(target, sizeof(target), "%s/made", here);
+	snprintf(link, sizeof(link), "%s/dangling", here);
+	const char *targets[] = {target, "made"};
+	for (int i = 0; i != 2; i++) {
+		CHECK(symlink(targets[i], "dangling") == 0);
+		errno = 0;
+		CHECK(open(link, O_WRONLY | O_CREAT | O_EXCL, 0644) == -1);
+		CHECK(errno == EEXIST);
+		errno = 0;
+		CHECK(mkdir(link, 0755) == -1);
+		CHECK(errno == EEXIST);
+		struct stat st;
+		CHECK(stat(link, &st) == -1 && errno == ENOENT);
+		const char *paths[] = {link, "dangling"};
+		for (int j = 0; j != 2; j++) {
+			int fd = open(paths[j], O_WRONLY | O_CREAT, 0644);
+			CHECK(fd != -1);
+			CHECK(close(fd) == 0);
+			CHECK(lstat("made", &st) == 0 && S_ISREG(st.st_mode));
+			CHECK(unlink("made") == 0);
+		}
+		CHECK(lstat("dangling", &st) == 0 && S_ISLNK(st.st_mode));
+		CHECK(unlink("dangling") == 0);
+	}
 }
 
 static void

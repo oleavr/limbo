@@ -1,5 +1,6 @@
 /*
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -48,6 +49,8 @@ static void make_dir(const char *path);
 static void make_file(const char *path);
 static void make_link(const char *target, const char *path);
 static void check_host_path(const char *path, int flags, const char *expected);
+static void check_creation_path(
+		const char *path, int flags, const char *expected);
 static int remove_entry(const char *path, const struct stat *st, int type,
 		struct FTW *ftw);
 
@@ -73,6 +76,14 @@ main(void)
 	check_host_path("/.resolve/32/System/Library/file", 0,
 			"/System/Library/file");
 	check_host_path("/", 0, "");
+	check_host_path("/dangling", 0, "/dangling");
+	check_creation_path("/dangling", 0, "/System/Library/new");
+	check_creation_path("/dangling", AT_SYMLINK_NOFOLLOW, "/dangling");
+	check_creation_path("/dangling-absolute", 0, "/private/etc/new");
+	check_creation_path("/dangling-chain", 0, "/System/Library/new");
+	check_creation_path("/dangling-outside", 0, "/new");
+	check_creation_path("/absolute/file", 0, "/System/Library/file");
+	check_creation_path("dangling-absolute", 0, "/private/etc/new");
 
 	char buffer[PATH_MAX];
 	CHECK(strcmp(sysroot_host_path("/tmp", 0, buffer), "/tmp") == 0);
@@ -105,6 +116,27 @@ populate(void)
 	make_link("private/etc", "/etc");
 	make_link("/System/Library", "/absolute");
 	make_link("System/Library", "/relative");
+	make_link("System/Library/new", "/dangling");
+	make_link("/etc/new", "/dangling-absolute");
+	make_link("dangling", "/dangling-chain");
+	make_link("../../new", "/dangling-outside");
+}
+
+static void
+check_creation_path(const char *path, int flags, const char *expected)
+{
+	char buffer[PATH_MAX];
+	char full[PATH_MAX * 2];
+	snprintf(full, sizeof(full), "%s%s", root, expected);
+	int top = open(root, O_RDONLY | O_DIRECTORY);
+	CHECK(top != -1);
+	const char *host_path = sysroot_creation_path(top, path, flags, buffer);
+	CHECK(close(top) == 0);
+	if (strcmp(host_path, full) != 0) {
+		fprintf(stderr, "%s: expected %s to make, got %s\n", path, full,
+				host_path);
+		exit(1);
+	}
 }
 
 static void

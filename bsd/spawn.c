@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -495,8 +496,8 @@ apply_file_actions(
 		int fd;
 		switch (action->type) {
 		case PSFA_OPEN:
-			fd = open(sysroot_host_path(
-						  action->open.path, 0, buffer),
+			fd = open(open_path(AT_FDCWD, action->open.path,
+						  action->open.oflag, buffer),
 					open_flags(action->open.oflag),
 					action->open.mode);
 			if (fd == -1) {
