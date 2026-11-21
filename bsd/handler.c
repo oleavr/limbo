@@ -219,6 +219,8 @@ int __attribute__((noreturn)) sys_exit(int rval)
 	_exit(rval);
 }
 
+static void aio_fork_child(void);
+
 int
 sys_fork(void)
 {
@@ -233,6 +235,7 @@ sys_fork(void)
 		trace_fork_child();
 		broker_client_reset();
 		signals_fork_child();
+		aio_fork_child();
 	}
 	syscall_set_rdx(pid == 0);
 	return (pid == 0) ? parent : pid;
@@ -3641,6 +3644,14 @@ aio_notify(const struct darwin_sigevent *event)
 	if (event->notify == DARWIN_SIGEV_SIGNAL) {
 		sys_kill(getpid(), event->signo, 1);
 	}
+}
+
+static void
+aio_fork_child(void)
+{
+	pthread_mutex_init(&aio.lock, NULL);
+	aio.count = 0;
+	aio.waiters = NULL;
 }
 
 #define IOPOL_CMD_GET                             1
