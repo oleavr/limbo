@@ -29,15 +29,20 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/in_pcb.h>
 #include <netinet/in_systm.h>
 #include <netinet/ip.h>
 #include <netinet/ip_icmp.h>
+#include <netinet/tcp_fsm.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/sys_domain.h>
+#include <sys/sysctl.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -46,6 +51,14 @@ static void check_icmp(void);
 static void check_connection_info(void);
 static void check_refused_error(void);
 static void check_control_with_many_open(void);
+static void check_pcblist(void);
+static uint8_t *read_list(const char *name, size_t *size);
+static const uint8_t *find_socket(const uint8_t *list, size_t size,
+		uint16_t local_port, uint16_t remote_port);
+static const uint8_t *next_record(const uint8_t *record, uint32_t kind);
+static uint16_t field16(const uint8_t *record, size_t offset);
+static uint32_t field32(const uint8_t *record, size_t offset);
+static uint16_t bound_port(int fd);
 
 int
 main(void)
@@ -97,6 +110,7 @@ main(void)
 	check_connection_info();
 	check_refused_error();
 	check_control_with_many_open();
+	check_pcblist();
 	check_icmp();
 	return 0;
 }
@@ -252,4 +266,162 @@ check_icmp(void)
 	CHECK(memcmp(reply + sizeof(*header) + ICMP_MINLEN, "limbo!!!", 8)
 			== 0);
 	CHECK(close(s) == 0);
+}
+
+enum {
+	RECORD_LENGTH = 0,
+	RECORD_KIND = 4,
+	XSO_SOCKET = 0x001,
+	XSO_RCVBUF = 0x002,
+	XSO_SNDBUF = 0x004,
+	XSO_STATS = 0x008,
+	XSO_INPCB = 0x010,
+	XSO_TCPCB = 0x020,
+	INPCB_FPORT = 16,
+	INPCB_LPORT = 18,
+	INPCB_VFLAG = 44,
+	INPCB_LADDR4 = 76,
+	SOCKET_TYPE = 16,
+	SOCKET_OPTIONS = 20,
+	SOCKET_PROTOCOL = 36,
+	SOCKET_FAMILY = 40,
+	SOCKBUF_CC = 8,
+	TCPCB_STATE = 36,
+};
+
+static void
+check_pcblist(void)
+{
+	struct sockaddr_in loopback = {
+			.sin_len = sizeof(loopback),
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+	};
+	int listener = socket(AF_INET, SOCK_STREAM, 0);
+	CHECK(listener != -1);
+	CHECK(bind(listener, (struct sockaddr *)&loopback, sizeof(loopback))
+			== 0);
+	CHECK(listen(listener, 1) == 0);
+	struct sockaddr_in listening = loopback;
+	listening.sin_port = bound_port(listener);
+	int client = socket(AF_INET, SOCK_STREAM, 0);
+	CHECK(client != -1);
+	CHECK(connect(client, (struct sockaddr *)&listening, sizeof(listening))
+			== 0);
+	int accepted = accept(listener, NULL, NULL);
+	CHECK(accepted != -1 && write(client, "hello", 5) == 5);
+	char byte;
+	CHECK(recv(accepted, &byte, 1, MSG_PEEK) == 1);
+
+	size_t size;
+	uint8_t *list = read_list("net.inet.tcp.pcblist_n", &size);
+	struct xinpgen first, last;
+	memcpy(&first, list, sizeof(first));
+	memcpy(&last, list + size - sizeof(last), sizeof(last));
+	CHECK(first.xig_len == sizeof(first) && last.xig_len == sizeof(last));
+	CHECK(first.xig_count >= 3);
+
+	const uint8_t *record = find_socket(list, size, listening.sin_port, 0);
+	CHECK(record != NULL && record[INPCB_VFLAG] == INP_IPV4);
+	CHECK(field32(record, INPCB_LADDR4) == loopback.sin_addr.s_addr);
+	record = next_record(record, XSO_SOCKET);
+	CHECK(field16(record, SOCKET_TYPE) == SOCK_STREAM);
+	CHECK(field32(record, SOCKET_OPTIONS) & SO_ACCEPTCONN);
+	CHECK(field32(record, SOCKET_PROTOCOL) == IPPROTO_TCP);
+	CHECK(field32(record, SOCKET_FAMILY) == AF_INET);
+	record = next_record(record, XSO_RCVBUF);
+	record = next_record(record, XSO_SNDBUF);
+	record = next_record(record, XSO_STATS);
+	record = next_record(record, XSO_TCPCB);
+	CHECK(field32(record, TCPCB_STATE) == TCPS_LISTEN);
+
+	record = find_socket(
+			list, size, listening.sin_port, bound_port(client));
+	CHECK(record != NULL);
+	record = next_record(record, XSO_SOCKET);
+	CHECK((field32(record, SOCKET_OPTIONS) & SO_ACCEPTCONN) == 0);
+	record = next_record(record, XSO_RCVBUF);
+	CHECK(field32(record, SOCKBUF_CC) == 5);
+	record = next_record(record, XSO_SNDBUF);
+	record = next_record(record, XSO_STATS);
+	record = next_record(record, XSO_TCPCB);
+	CHECK(field32(record, TCPCB_STATE) == TCPS_ESTABLISHED);
+	free(list);
+
+	uint8_t small[2 * sizeof(struct xinpgen)];
+	size = sizeof(struct xinpgen) - 1;
+	CHECK(sysctlbyname("net.inet.tcp.pcblist_n", small, &size, NULL, 0)
+			== -1);
+	CHECK(errno == ENOMEM && size == 0);
+	size = sizeof(small);
+	CHECK(sysctlbyname("net.inet.tcp.pcblist_n", small, &size, NULL, 0)
+			== -1);
+	CHECK(errno == ENOMEM && size == sizeof(struct xinpgen));
+
+	CHECK(close(accepted) == 0 && close(client) == 0);
+	CHECK(close(listener) == 0);
+}
+
+static uint8_t *
+read_list(const char *name, size_t *size)
+{
+	size_t estimate;
+	CHECK(sysctlbyname(name, NULL, &estimate, NULL, 0) == 0);
+	uint8_t *list = malloc(estimate);
+	CHECK(list != NULL);
+	*size = estimate;
+	CHECK(sysctlbyname(name, list, size, NULL, 0) == 0);
+	CHECK(*size <= estimate && *size >= 2 * sizeof(struct xinpgen));
+	return list;
+}
+
+static const uint8_t *
+find_socket(const uint8_t *list, size_t size, uint16_t local_port,
+		uint16_t remote_port)
+{
+	const uint8_t *end = list + size - sizeof(struct xinpgen);
+	const uint8_t *record = list + sizeof(struct xinpgen);
+	while (record < end) {
+		if (field32(record, RECORD_KIND) == XSO_INPCB
+				&& field16(record, INPCB_LPORT) == local_port
+				&& field16(record, INPCB_FPORT)
+						== remote_port) {
+			return record;
+		}
+		record += (field32(record, RECORD_LENGTH) + 7) & ~7u;
+	}
+	return NULL;
+}
+
+static const uint8_t *
+next_record(const uint8_t *record, uint32_t kind)
+{
+	record += (field32(record, RECORD_LENGTH) + 7) & ~7u;
+	CHECK(field32(record, RECORD_KIND) == kind);
+	return record;
+}
+
+static uint16_t
+field16(const uint8_t *record, size_t offset)
+{
+	uint16_t value;
+	memcpy(&value, record + offset, sizeof(value));
+	return value;
+}
+
+static uint32_t
+field32(const uint8_t *record, size_t offset)
+{
+	uint32_t value;
+	memcpy(&value, record + offset, sizeof(value));
+	return value;
+}
+
+static uint16_t
+bound_port(int fd)
+{
+	struct sockaddr_in address;
+	socklen_t length = sizeof(address);
+	CHECK(getsockname(fd, (struct sockaddr *)&address, &length) == 0);
+	return address.sin_port;
 }
