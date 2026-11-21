@@ -200,6 +200,8 @@ int sys_munlock(void *addr, size_t len);
 int sys_undelete(user_addr_t path);
 int sys_open_dprotected_np(
 		user_addr_t path, int flags, int class, int dpflags, int mode);
+int sys_openat_dprotected_np(int fd, user_addr_t path, int flags, int class,
+		int dpflags, int mode, int authfd);
 user_ssize_t sys_fsgetpath_ext(user_addr_t buf, size_t bufsize,
 		user_addr_t fsid, uint64_t objid, uint32_t options);
 int sys_getattrlist(const char *path, void *alist, void *attributeBuffer,

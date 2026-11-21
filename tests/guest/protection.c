@@ -56,6 +56,8 @@
 
 int open_dprotected_np(
 		const char *path, int flags, int dpclass, int dpflags, ...);
+int openat_dprotected_np(int dirfd, const char *path, int flags, int dpclass,
+		int dpflags, ...);
 
 static void clean_up(void);
 static int remove_entry(const char *path, const struct stat *st, int type,
@@ -300,6 +302,22 @@ check_open_dprotected(void)
 	CHECK(close(fd) == 0);
 	CHECK(class_of("asked/inherited") == CLASS_A);
 
+	int dir = open("asked", O_RDONLY);
+	CHECK(dir != -1);
+	fd = openat_dprotected_np(
+			dir, "relative", O_RDWR | O_CREAT, CLASS_B, 0, 0644);
+	CHECK(fd != -1);
+	CHECK(close(fd) == 0);
+	CHECK(class_of("asked/relative") == CLASS_B);
+	fd = openat_dprotected_np(dir, "relative-inherited", O_RDWR | O_CREAT,
+			CLASS_DEFAULT, 0, 0644);
+	CHECK(fd != -1);
+	CHECK(close(fd) == 0);
+	CHECK(class_of("asked/relative-inherited") == CLASS_A);
+	CHECK(close(dir) == 0);
+
+	CHECK(unlink("asked/relative-inherited") == 0);
+	CHECK(unlink("asked/relative") == 0);
 	CHECK(unlink("asked/inherited") == 0);
 	CHECK(unlink("asked/b") == 0);
 	CHECK(rmdir("asked") == 0);
