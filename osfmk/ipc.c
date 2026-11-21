@@ -45,6 +45,7 @@
 
 #include "broker.h"
 #include "broker_client.h"
+#include "bsd/gid.h"
 #include "bsd/kevent.h"
 #include "bsd/signals.h"
 #include "eventlink.h"
@@ -1582,11 +1583,11 @@ write_trailer(mach_msg_header_t *msg, struct ipc_port *port, pid_t sender_pid)
 	trailer->msgh_trailer_size = sizeof(*trailer);
 	trailer->msgh_seqno = port->seqno++;
 	trailer->msgh_sender.val[0] = geteuid();
-	trailer->msgh_sender.val[1] = getegid();
+	trailer->msgh_sender.val[1] = gid_from_linux(getegid());
 	trailer->msgh_audit.val[1] = geteuid();
-	trailer->msgh_audit.val[2] = getegid();
+	trailer->msgh_audit.val[2] = gid_from_linux(getegid());
 	trailer->msgh_audit.val[3] = getuid();
-	trailer->msgh_audit.val[4] = getgid();
+	trailer->msgh_audit.val[4] = gid_from_linux(getgid());
 	trailer->msgh_audit.val[5] = sender_pid;
 	trailer->msgh_audit.val[7] = 10;
 	trailer->msgh_context = port->context;

@@ -44,6 +44,7 @@
 
 #include "acl.h"
 #include "at.h"
+#include "bsd/gid.h"
 #include "bsd/xnu-errno.h"
 #include "bsd_flags.h"
 #include "device.h"
@@ -193,7 +194,7 @@ convert_statx(struct statx *stat, struct __darwin_user64_stat64 *dest)
 			makedev(stat->stx_dev_major, stat->stx_dev_minor),
 			stat->stx_ino);
 	dest->st_uid = stat->stx_uid;
-	dest->st_gid = stat->stx_gid;
+	dest->st_gid = gid_from_linux(stat->stx_gid);
 	dest->st_rdev = (stat->stx_rdev_major << 24) | stat->stx_rdev_minor;
 	encode_timespec(&dest->st_atimespec, &stat->stx_atime);
 	encode_timespec(&dest->st_mtimespec, &stat->stx_mtime);

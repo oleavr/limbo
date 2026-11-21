@@ -41,6 +41,7 @@
 #include <unistd.h>
 
 #include "bsd/credentials.h"
+#include "bsd/gid.h"
 #include "bsd/xnu-errno.h"
 
 #define GROUPS_MAX 1024
@@ -284,13 +285,14 @@ credentials_setreuid(uid_t ruid, uid_t euid)
 int
 credentials_setgid(gid_t gid)
 {
-	return change(CHANGE_GROUP_IDS, SYS_setgid, gid, 0, 0);
+	return change(CHANGE_GROUP_IDS, SYS_setgid, gid_to_linux(gid), 0, 0);
 }
 
 int
 credentials_setegid(gid_t egid)
 {
-	return change(CHANGE_GROUP_IDS, SYS_setresgid, -1, egid, -1);
+	return change(CHANGE_GROUP_IDS, SYS_setresgid, -1, gid_to_linux(egid),
+			-1);
 }
 
 int
@@ -308,7 +310,7 @@ credentials_setgroups(uint32_t count, const uint32_t *groups)
 	}
 	gid_t list[GROUPS_MAX];
 	for (uint32_t i = 0; i != count; i++) {
-		list[i] = groups[i];
+		list[i] = gid_to_linux(groups[i]);
 	}
 	return change(CHANGE_GROUPS, SYS_setgroups, count, (long)list, 0);
 }

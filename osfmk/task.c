@@ -36,6 +36,7 @@
 #include <sys/resource.h>
 #include <unistd.h>
 
+#include "bsd/gid.h"
 #include "bsd/process.h"
 #include "commpage.h"
 #include "ipc.h"
@@ -181,9 +182,9 @@ task_info(task_name_t target_task, task_flavor_t flavor,
 		memset(audit_token_p, 0, sizeof(audit_token_t));
 		audit_token_p->val[0] = getuid();
 		audit_token_p->val[1] = geteuid();
-		audit_token_p->val[2] = getegid();
+		audit_token_p->val[2] = gid_from_linux(getegid());
 		audit_token_p->val[3] = getuid();
-		audit_token_p->val[4] = getgid();
+		audit_token_p->val[4] = gid_from_linux(getgid());
 		audit_token_p->val[5] = getpid();
 		/* TODO: idversion_for_pid(getpid()); */
 		audit_token_p->val[7] = 10;

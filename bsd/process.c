@@ -35,6 +35,7 @@
 #include <unistd.h>
 
 #include "broker.h"
+#include "gid.h"
 #include "process.h"
 
 static void executable_name(int32_t pid, struct process *process);
@@ -94,6 +95,9 @@ process_lookup(int32_t pid, struct process *process)
 	}
 	read_ids(status, "Uid:", process->uid);
 	read_ids(status, "Gid:", process->gid);
+	for (int i = 0; i != 3; i++) {
+		process->gid[i] = gid_from_linux(process->gid[i]);
+	}
 	fclose(status);
 	return 0;
 }

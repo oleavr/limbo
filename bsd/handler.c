@@ -82,6 +82,7 @@
 #include <unistd.h>
 
 #include "bsd/credentials.h"
+#include "bsd/gid.h"
 #include "bsd/hostuuid.h"
 #include "bsd/mac.h"
 #include "bsd/process.h"
@@ -947,13 +948,13 @@ sys_pipe2(int pipefd[2], int flags)
 uint32_t
 sys_getegid(void)
 {
-	return getegid();
+	return gid_from_linux(getegid());
 }
 
 uint32_t
 sys_getgid(void)
 {
-	return getgid();
+	return gid_from_linux(getgid());
 }
 
 int
@@ -1311,7 +1312,7 @@ sys_getgroups(uint32_t gidsetsize, void *gidset)
 		return errno_map(count);
 	}
 	for (int i = 0; i != count && gidsetsize != 0; i++) {
-		((uint32_t *)gidset)[i] = groups[i];
+		((uint32_t *)gidset)[i] = gid_from_linux(groups[i]);
 	}
 	return count;
 }
