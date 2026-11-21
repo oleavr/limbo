@@ -91,6 +91,7 @@ static void ask_profile(void);
 static void check_enforced(void);
 static void denied_opening(void);
 static void denied_creating(void);
+static void denied_unlinking(void);
 static void in_denied_folder(void (*body)(void));
 static int remove_entry(const char *path, const struct stat *st, int type,
 		struct FTW *ftw);
@@ -250,6 +251,7 @@ check_enforced(void)
 	in_denied_folder(denied_spawning);
 	in_denied_folder(denied_opening);
 	in_denied_folder(denied_creating);
+	in_denied_folder(denied_unlinking);
 }
 
 static void
@@ -402,6 +404,32 @@ denied_creating(void)
 	CHECK(unlink(ALLOWED "-link") == 0);
 	CHECK(link(ALLOWED, ALLOWED "-hard") == 0);
 	CHECK(unlink(ALLOWED "-hard") == 0);
+}
+
+static void
+denied_unlinking(void)
+{
+	int dir = open(DENIED, O_RDONLY);
+	CHECK(dir >= 0);
+	errno = 0;
+	CHECK(unlink(DENIED "/existing") == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(unlinkat(dir, "existing", 0) == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(rmdir(DENIED) == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(unlinkat(AT_FDCWD, DENIED, AT_REMOVEDIR) == -1);
+	CHECK(errno == EPERM);
+	CHECK(close(dir) == 0);
+	CHECK(access(DENIED "/existing", F_OK) == 0);
+
+	make_file(ALLOWED "-new");
+	CHECK(unlink(ALLOWED "-new") == 0);
+	CHECK(mkdir(ALLOWED "-folder", 0755) == 0);
+	CHECK(rmdir(ALLOWED "-folder") == 0);
 }
 
 static void

@@ -475,6 +475,10 @@ sys_link(user_addr_t oldpath, user_addr_t newpath)
 int
 sys_unlink(user_addr_t path)
 {
+	if (mac_sandbox_denies(SANDBOX_FILE_WRITE_UNLINK, AT_FDCWD, path,
+			    AT_SYMLINK_NOFOLLOW)) {
+		return _EPERM;
+	}
 	char buffer[PATH_MAX];
 	return errno_map(unlink(
 			sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer)));
@@ -2023,6 +2027,10 @@ last_component_is_dot(const char *path)
 int
 sys_rmdir(char *path)
 {
+	if (mac_sandbox_denies(SANDBOX_FILE_WRITE_UNLINK, AT_FDCWD, path,
+			    AT_SYMLINK_NOFOLLOW)) {
+		return _EPERM;
+	}
 	if (last_component_is_dot(path)) {
 		return _EINVAL;
 	}
@@ -3988,6 +3996,10 @@ sys_linkat(int fd1, user_addr_t path, int fd2, user_addr_t link, int flag)
 int
 sys_unlinkat(int fd, user_addr_t path, int flag)
 {
+	if (mac_sandbox_denies(SANDBOX_FILE_WRITE_UNLINK, at_fd(fd), path,
+			    AT_SYMLINK_NOFOLLOW)) {
+		return _EPERM;
+	}
 	char buffer[PATH_MAX];
 	return errno_map(unlinkat(at_fd(fd),
 			sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer),
