@@ -60,6 +60,7 @@ static mach_msg_return_t send_result(int error);
 static int broker_fd = -1;
 static uint32_t guest_id;
 static pthread_mutex_t call_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t send_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t reply_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t reply_ready = PTHREAD_COND_INITIALIZER;
 static bool reply_pending;
@@ -91,6 +92,7 @@ broker_client_reset(void)
 	reply_pending = false;
 	reader_ended = false;
 	pthread_mutex_init(&call_lock, NULL);
+	pthread_mutex_init(&send_lock, NULL);
 	pthread_mutex_init(&reply_lock, NULL);
 	pthread_cond_init(&reply_ready, NULL);
 }
@@ -146,10 +148,7 @@ broker_client_send(uint64_t dest_global_id, const void *blob, uint32_t length,
 			{.iov_base = &send, .iov_len = sizeof(send)},
 			{.iov_base = (void *)blob, .iov_len = length},
 	};
-	pthread_mutex_lock(&call_lock);
-	int error = send_parts(BROKER_SEND, parts, 2, fds, fd_count);
-	pthread_mutex_unlock(&call_lock);
-	return send_result(error);
+	return send_result(send_parts(BROKER_SEND, parts, 2, fds, fd_count));
 }
 
 static void
@@ -307,7 +306,9 @@ send_parts(uint32_t type, const struct iovec *parts, int part_count,
 	if (frame == NULL) {
 		return errno;
 	}
+	pthread_mutex_lock(&send_lock);
 	int error = broker_wire_send(broker_fd, frame, 0);
+	pthread_mutex_unlock(&send_lock);
 	broker_wire_free(frame);
 	return error;
 }
