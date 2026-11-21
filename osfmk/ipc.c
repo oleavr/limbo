@@ -115,6 +115,7 @@ struct dead_name_request {
 enum remote_notice_kind {
 	REMOTE_NOTICE_RELEASE,
 	REMOTE_NOTICE_ADD,
+	REMOTE_NOTICE_DEAD,
 };
 
 struct remote_notice {
@@ -268,6 +269,7 @@ static void count_sender_guest(
 static void release_grants(
 		struct ipc_entry *entry, uint32_t guest_id, uint64_t count);
 static void give_back_grants(struct ipc_port *port);
+static void tell_holders_dead(struct ipc_port *port);
 static void receive_notice(
 		uint64_t dest_global_id, const struct remote_notice *notice);
 static void send_remote_notice(const struct pending_notice *notice);
@@ -1040,6 +1042,25 @@ release_grants(struct ipc_entry *entry, uint32_t guest_id, uint64_t count)
 }
 
 static void
+tell_holders_dead(struct ipc_port *port)
+{
+	for (uint32_t i = 0; i < port->sender_guest_count; i++) {
+		uint32_t guest_id = port->sender_guests[i];
+		if (guest_id == BROKER_GUEST_ID) {
+			continue;
+		}
+		queue_notice((struct pending_notice){
+				.global_id = broker_global_id(guest_id, 0),
+				.notice = {
+						.kind = REMOTE_NOTICE_DEAD,
+						.count = port->global_id,
+				},
+		});
+	}
+	port->sender_guest_count = 0;
+}
+
+static void
 give_back_grants(struct ipc_port *port)
 {
 	if (!port->remote || port->grants == 0) {
@@ -1061,6 +1082,15 @@ static void
 receive_notice(uint64_t dest_global_id, const struct remote_notice *notice)
 {
 	pthread_mutex_lock(&lock);
+	for (uint32_t i = 1;
+			notice->kind == REMOTE_NOTICE_DEAD && i < entry_count;
+			i++) {
+		struct ipc_port *held = entries[i].port;
+		if (held != NULL && held->remote
+				&& held->global_id == notice->count) {
+			turn_dead(&entries[i]);
+		}
+	}
 	struct ipc_port *port = port_for_global_id(dest_global_id);
 	struct ipc_entry *entry = port != NULL ? lookup(port->name) : NULL;
 	bool owned = entry != NULL && (entry->type & MACH_PORT_TYPE_RECEIVE);
@@ -1132,6 +1162,11 @@ import_remote_send(uint64_t global_id, mach_msg_type_name_t type, bool counted)
 
 	for (uint32_t i = 1; i < entry_count; i++) {
 		struct ipc_port *port = entries[i].port;
+		if (port != NULL && port->remote && port->global_id == global_id
+				&& (entries[i].type
+						& MACH_PORT_TYPE_DEAD_NAME)) {
+			return MACH_PORT_DEAD;
+		}
 		if (port != NULL && port->remote
 				&& port->global_id == global_id) {
 			transfer_right(port->name, type, IPC_KERNEL, IPC_USER,
@@ -3037,6 +3072,7 @@ destroy_receive_right(struct ipc_entry *entry)
 	port->messages = NULL;
 	port_leave_all_sets(port);
 	destroy_requests(port);
+	tell_holders_dead(port);
 
 	entry->type &= ~MACH_PORT_TYPE_RECEIVE;
 	if (entry->type & (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE)) {

@@ -146,6 +146,7 @@ static const mach_msg_id_t DATA_ENTRY_ID = 7910;
 static const mach_msg_id_t KEEP_ID = 7911;
 static const mach_msg_id_t DROP_ID = 7912;
 static const mach_msg_id_t FORWARD_ID = 7913;
+static const mach_msg_id_t TYPE_ID = 7914;
 static const char FROM_SENDER[] = "from the sender";
 static const char FROM_RECEIVER[] = "from the receiver";
 
@@ -654,6 +655,14 @@ carrier_of(mach_port_t port, mach_msg_id_t id, mach_port_t carried)
 	};
 }
 
+static int32_t
+type_of(mach_port_t name)
+{
+	mach_port_type_t type = 0;
+	mach_port_type(mach_task_self(), name, &type);
+	return (int32_t)type;
+}
+
 static void
 forward(mach_port_t to, mach_port_t right)
 {
@@ -726,6 +735,8 @@ serve_peer(void)
 		} else if (message.Head.msgh_id == FORWARD_ID) {
 			forward(message.carrier.port.name, kept);
 			answer(&message.Head, 1);
+		} else if (message.Head.msgh_id == TYPE_ID) {
+			answer(&message.Head, type_of(kept));
 		} else if (message.Head.msgh_id == LARGE_ID) {
 			answer(&message.Head,
 					patterned(message.bytes,
@@ -1486,6 +1497,12 @@ check_sender_counts(void)
 	destroy_port(notify);
 	destroy_port(port);
 	end_peer(&third);
+
+	port = give_send_right(holder.port);
+	CHECK(ask_for(holder.port, TYPE_ID) == MACH_PORT_TYPE_SEND);
+	destroy_port(port);
+	CHECK(ask_for(holder.port, TYPE_ID) == MACH_PORT_TYPE_DEAD_NAME);
+	CHECK(ask_for(holder.port, DROP_ID) == KERN_SUCCESS);
 
 	port = give_send_right(holder.port);
 	notify = request_notification(port, MACH_NOTIFY_NO_SENDERS);
