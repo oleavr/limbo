@@ -29,9 +29,11 @@
 #include <fcntl.h>
 #include <ftw.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/acl.h>
+#include <sys/attr.h>
 #include <sys/stat.h>
 #include <sys/xattr.h>
 #include <unistd.h>
@@ -40,10 +42,28 @@
 
 #define USER 501
 
+#define FILESEC_MAGIC 0x012cc16d
+
+struct entry {
+	uint8_t applicable[16];
+	uint32_t flags;
+	uint32_t rights;
+};
+
+struct filesec {
+	uint32_t magic;
+	uint8_t owner[16];
+	uint8_t group[16];
+	uint32_t count;
+	uint32_t flags;
+	struct entry entry[16];
+};
+
 static void clean_up(void);
 static int remove_entry(const char *path, const struct stat *st, int type,
 		struct FTW *ftw);
 static void check_kept(void);
+static void check_listed(void);
 static void check_hidden(void);
 static acl_t list_of(int count, const uid_t *users, const acl_perm_t *perms,
 		const int *flags);
@@ -54,6 +74,8 @@ static void remove_list(const char *path);
 static int entries(const char *path);
 static int entries_of(acl_t acl);
 static bool allows(const char *path, uid_t user, acl_perm_t perm);
+static bool read_filesec(const char *path, struct filesec *filesec);
+static bool entry_for(const char *path, uid_t user, struct entry *found);
 
 static char folder[] = "/tmp/limbo-access-XXXXXX";
 static pid_t owner;
@@ -68,6 +90,7 @@ main(void)
 	CHECK(chdir(folder) == 0);
 
 	check_kept();
+	check_listed();
 	check_hidden();
 
 	CHECK(chdir("/") == 0);
@@ -151,6 +174,33 @@ check_kept(void)
 	remove_list("folder");
 	CHECK(entries("folder") == -1);
 	CHECK(rmdir("folder") == 0);
+}
+
+static void
+check_listed(void)
+{
+	int fd = open("listed", O_CREAT | O_WRONLY | O_EXCL, 0644);
+	CHECK(fd != -1 && close(fd) == 0);
+	struct filesec filesec;
+	CHECK(!read_filesec("listed", &filesec));
+
+	uid_t users[] = {USER, USER + 1};
+	acl_perm_t perms[] = {ACL_READ_DATA | ACL_WRITE_DATA, ACL_EXECUTE};
+	int flags[] = {0, 0};
+	set_list("listed", 2, users, perms, flags);
+	CHECK(read_filesec("listed", &filesec));
+	CHECK(filesec.count == 2);
+	struct entry found;
+	CHECK(entry_for("listed", USER, &found));
+	CHECK(found.flags == ACL_EXTENDED_ALLOW);
+	CHECK(found.rights == (ACL_READ_DATA | ACL_WRITE_DATA));
+	CHECK(entry_for("listed", USER + 1, &found));
+	CHECK(found.rights == ACL_EXECUTE);
+	CHECK(!entry_for("listed", USER + 2, &found));
+
+	remove_list("listed");
+	CHECK(!read_filesec("listed", &filesec));
+	CHECK(unlink("listed") == 0);
 }
 
 static void
@@ -304,4 +354,50 @@ allows(const char *path, uid_t user, acl_perm_t perm)
 	}
 	acl_free(acl);
 	return allowed;
+}
+
+static bool
+read_filesec(const char *path, struct filesec *filesec)
+{
+	struct attrlist request = {
+			.bitmapcount = ATTR_BIT_MAP_COUNT,
+			.commonattr = ATTR_CMN_EXTENDED_SECURITY,
+	};
+	struct {
+		uint32_t length;
+		attrreference_t reference;
+		char data[sizeof(struct filesec) + 64];
+	} __attribute__((packed)) buffer;
+	CHECK(getattrlist(path, &request, &buffer, sizeof(buffer), 0) == 0);
+	if (buffer.reference.attr_length == 0) {
+		return false;
+	}
+	CHECK(buffer.reference.attr_length <= sizeof(*filesec));
+	memcpy(filesec,
+			(char *)&buffer.reference
+					+ buffer.reference.attr_dataoffset,
+			buffer.reference.attr_length);
+	CHECK(filesec->magic == FILESEC_MAGIC);
+	size_t entries_size = filesec->count * sizeof(struct entry);
+	CHECK(buffer.reference.attr_length
+			== offsetof(struct filesec, entry) + entries_size);
+	return true;
+}
+
+static bool
+entry_for(const char *path, uid_t user, struct entry *found)
+{
+	struct filesec filesec;
+	if (!read_filesec(path, &filesec)) {
+		return false;
+	}
+	uint8_t guid[16];
+	user_guid(user, guid);
+	for (uint32_t i = 0; i < filesec.count; i++) {
+		if (memcmp(filesec.entry[i].applicable, guid, 16) == 0) {
+			*found = filesec.entry[i];
+			return true;
+		}
+	}
+	return false;
 }

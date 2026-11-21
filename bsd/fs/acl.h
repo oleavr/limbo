@@ -31,7 +31,11 @@
 
 #include "acl_core.h"
 
-#define ACL_FILESEC_DELETE ((const void *)1)
+#define ACL_FILESEC_DELETE      ((const void *)1)
+#define ACL_FILESEC_HEADER_SIZE 44
+#define ACL_FILESEC_SIZE_MAX                                                   \
+	(ACL_FILESEC_HEADER_SIZE                                               \
+			+ KAUTH_ACL_MAX_ENTRIES * sizeof(struct kauth_ace))
 
 int acl_from_filesec(const void *xsecurity, struct acl_list *list);
 int acl_set_at(int dirfd, const char *host_path, int at_flags,
