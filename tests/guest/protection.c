@@ -52,6 +52,10 @@
 #define CLASS_E        5
 #define CLASS_F        6
 #define CLASS_CX       7
+#define CLASS_DEFAULT  (-1)
+
+int open_dprotected_np(
+		const char *path, int flags, int dpclass, int dpflags, ...);
 
 static void clean_up(void);
 static int remove_entry(const char *path, const struct stat *st, int type,
@@ -61,6 +65,7 @@ static void check_kept(void);
 static void check_attrlist(void);
 static void check_hidden(void);
 static void check_inherited(void);
+static void check_open_dprotected(void);
 static void check_copy(void);
 static void check_user(void);
 static void user_sets(void);
@@ -89,6 +94,7 @@ main(void)
 	check_attrlist();
 	check_hidden();
 	check_inherited();
+	check_open_dprotected();
 	check_copy();
 	check_user();
 
@@ -269,6 +275,34 @@ check_inherited(void)
 	CHECK(rmdir("given/folder") == 0);
 	CHECK(unlink("given/file") == 0);
 	CHECK(rmdir("given") == 0);
+}
+
+static void
+check_open_dprotected(void)
+{
+	CHECK(mkdir("asked", 0755) == 0);
+	CHECK(set_class("asked", CLASS_A) == 0);
+
+	int fd = open_dprotected_np(
+			"asked/b", O_RDWR | O_CREAT, CLASS_B, 0, 0644);
+	CHECK(fd != -1);
+	CHECK(close(fd) == 0);
+	CHECK(class_of("asked/b") == CLASS_B);
+
+	fd = open_dprotected_np("asked/b", O_RDWR | O_CREAT, CLASS_C, 0, 0644);
+	CHECK(fd != -1);
+	CHECK(close(fd) == 0);
+	CHECK(class_of("asked/b") == CLASS_B);
+
+	fd = open_dprotected_np("asked/inherited", O_RDWR | O_CREAT,
+			CLASS_DEFAULT, 0, 0644);
+	CHECK(fd != -1);
+	CHECK(close(fd) == 0);
+	CHECK(class_of("asked/inherited") == CLASS_A);
+
+	CHECK(unlink("asked/inherited") == 0);
+	CHECK(unlink("asked/b") == 0);
+	CHECK(rmdir("asked") == 0);
 }
 
 static void

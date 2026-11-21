@@ -90,6 +90,7 @@
 #include "fs/at.h"
 #include "fs/bsd_flags.h"
 #include "fs/fileid.h"
+#include "fs/protection.h"
 #include "fs/purgeable.h"
 #include "fsevents.h"
 #include "handler.h"
@@ -274,6 +275,8 @@ sys_write(int fd, user_addr_t cbuf, user_size_t nbyte)
 
 static int open_follow(int flags);
 static int fpathconf_value(int fd, int name);
+static int open_protected(int dirfd, const char *host_path, int flags, int mode,
+		int dpclass);
 static short poll_events_to_linux(short events);
 static short poll_events_from_linux(short events);
 static int initial_list(user_addr_t xsecurity, struct acl_list *list,
@@ -2502,8 +2505,24 @@ sys_open_dprotected_np(
 		user_addr_t path, int flags, int class, int dpflags, int mode)
 {
 	char buffer[PATH_MAX];
-	return errno_map(open(open_path(AT_FDCWD, path, flags, buffer),
-			open_flags(flags), mode));
+	return errno_map(open_protected(AT_FDCWD,
+			open_path(AT_FDCWD, path, flags, buffer),
+			open_flags(flags), mode, class));
+}
+
+static int
+open_protected(int dirfd, const char *host_path, int flags, int mode,
+		int dpclass)
+{
+	if (dpclass == PROTECTION_CLASS_DEFAULT) {
+		return acl_openat(dirfd, host_path, flags, mode, NULL, NULL);
+	}
+	bool created;
+	int fd = acl_openat(dirfd, host_path, flags, mode, NULL, &created);
+	if (fd != -1 && created) {
+		protection_set(fd, dpclass);
+	}
+	return fd;
 }
 
 user_ssize_t

@@ -37,6 +37,7 @@
 #define PROTECTION_CLASS_D        4
 #define PROTECTION_CLASS_F        6
 #define PROTECTION_CLASS_CX       7
+#define PROTECTION_CLASS_DEFAULT  (-1)
 
 uint32_t protection_get(int fd);
 int protection_set(int fd, int dpclass);
