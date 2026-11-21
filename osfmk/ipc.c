@@ -264,6 +264,7 @@ static void remember_send_once(mach_port_name_t port, uint32_t guest_id);
 static uint32_t forget_send_onces(
 		mach_port_name_t port, uint32_t guest_id, uint64_t count);
 static void send_onces_gone(uint32_t guest_id);
+static void move_send_once(struct ipc_entry *entry, uint32_t from, uint32_t to);
 static void receive_notice(
 		uint64_t dest_global_id, const struct remote_notice *notice);
 static void send_remote_notice(const struct pending_notice *notice);
@@ -1070,6 +1071,17 @@ count_right(mach_port_name_t name, mach_msg_type_name_t type,
 	} else if (owned && type == MACH_MSG_TYPE_PORT_SEND_ONCE) {
 		queue_send_once_notifications(entry,
 				forget_send_onces(name, dest_guest_id, 1));
+	} else if (elsewhere && type == MACH_MSG_TYPE_PORT_SEND_ONCE) {
+		queue_notice((struct pending_notice){
+				.global_id = global_id,
+				.notice = {
+						.kind = sent ? REMOTE_NOTICE_SEND_ONCE_MOVED
+							     : REMOTE_NOTICE_SEND_ONCE,
+						.guest_id = dest_guest_id,
+						.count = sent ? broker_client_guest_id()
+							      : 1,
+				},
+		});
 	} else if (elsewhere && type == MACH_MSG_TYPE_PORT_SEND) {
 		queue_notice((struct pending_notice){
 				.global_id = global_id,
@@ -1141,7 +1153,17 @@ tell_holders_dead(struct ipc_port *port)
 		});
 	}
 	port->sender_guest_count = 0;
-	forget_send_onces(port->name, BROKER_GUEST_ID, UINT64_MAX);
+
+	struct remote_send_once **link = &remote_send_onces;
+	while (*link != NULL) {
+		struct remote_send_once *record = *link;
+		if (record->port != port->name) {
+			link = &record->next;
+			continue;
+		}
+		*link = record->next;
+		free(record);
+	}
 }
 
 static void
@@ -1160,23 +1182,31 @@ static uint32_t
 forget_send_onces(mach_port_name_t port, uint32_t guest_id, uint64_t count)
 {
 	uint32_t found = 0;
-	for (int pass = 0; pass != 2; pass++) {
-		struct remote_send_once **link = &remote_send_onces;
-		while (*link != NULL && found != count) {
-			struct remote_send_once *record = *link;
-			if (record->port != port
-					|| (pass == 0
-							&& record->guest_id
-									!= guest_id)) {
-				link = &record->next;
-				continue;
-			}
-			*link = record->next;
-			free(record);
-			found++;
+	struct remote_send_once **link = &remote_send_onces;
+	while (*link != NULL && found != count) {
+		struct remote_send_once *record = *link;
+		if (record->port != port || record->guest_id != guest_id) {
+			link = &record->next;
+			continue;
 		}
+		*link = record->next;
+		free(record);
+		found++;
 	}
 	return found;
+}
+
+static void
+move_send_once(struct ipc_entry *entry, uint32_t from, uint32_t to)
+{
+	if (forget_send_onces(entry->port->name, from, 1) == 0) {
+		return;
+	}
+	if (guest_is_gone(to)) {
+		queue_send_once_notifications(entry, 1);
+	} else {
+		remember_send_once(entry->port->name, to);
+	}
 }
 
 static void
@@ -1218,6 +1248,9 @@ receive_notice(uint64_t dest_global_id, const struct remote_notice *notice)
 	} else if (owned && notice->kind == REMOTE_NOTICE_ADD
 			&& !guest_is_gone(notice->guest_id)) {
 		count_sender_guest(port, notice->guest_id, 1);
+	} else if (owned && notice->kind == REMOTE_NOTICE_SEND_ONCE_MOVED) {
+		move_send_once(entry, (uint32_t)notice->count,
+				notice->guest_id);
 	} else if (owned && notice->kind == REMOTE_NOTICE_SEND_ONCE) {
 		queue_send_once_notifications(entry,
 				forget_send_onces(port->name, notice->guest_id,
