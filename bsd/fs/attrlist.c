@@ -238,6 +238,8 @@ typedef struct vol_capabilities_attr {
 	vol_capabilities_set_t valid;
 } vol_capabilities_attr_t;
 
+#define ATTR_BULK_REQUIRED (ATTR_CMN_NAME | ATTR_CMN_RETURNED_ATTRS)
+
 #define ATTRIBUTES_SIZE_MAX (2 * PATH_MAX + 4096 + ACL_FILESEC_SIZE_MAX)
 #define REFERENCES_MAX      9
 #define GUID_SIZE           16
@@ -1190,6 +1192,12 @@ sys_getattrlistbulk(int dirfd, void *alist, void *attributeBuffer,
 		size_t bufferSize, uint64_t options)
 {
 	options |= FSOPT_ATTR_CMN_EXTENDED;
+	const struct __darwin_attrlist *list = alist;
+	if (list->volattr
+			|| (list->commonattr & ATTR_BULK_REQUIRED)
+					!= ATTR_BULK_REQUIRED) {
+		return _EINVAL;
+	}
 	off_t start = lseek(dirfd, 0, SEEK_CUR);
 	if (start == -1) {
 		return err_map(errno);
