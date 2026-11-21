@@ -125,3 +125,14 @@ class_taken(const struct stat *s, int dpclass)
 	}
 	return dpclass;
 }
+
+uint32_t
+protection_folder_gives(const char *folder_path)
+{
+	uint32_t dpclass;
+	if (getxattr(folder_path, PROTECTION_XATTR, &dpclass, sizeof(dpclass))
+			!= sizeof(dpclass)) {
+		return PROTECTION_CLASS_DIR_NONE;
+	}
+	return dpclass;
+}

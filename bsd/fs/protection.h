@@ -40,3 +40,4 @@
 
 uint32_t protection_get(int fd);
 int protection_set(int fd, int dpclass);
+uint32_t protection_folder_gives(const char *folder_path);
