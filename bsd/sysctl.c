@@ -216,6 +216,10 @@ static int read_cpu_frequency(void *old, size_t *oldlenp);
 static int read_cpusubtype(void *old, size_t *oldlenp);
 static int read_loadavg(void *old, size_t *oldlenp);
 static int read_swapusage(void *old, size_t *oldlenp);
+static int read_osversion(void *old, size_t *oldlenp);
+static int read_osproductversion(void *old, size_t *oldlenp);
+static const char *system_version(const char *key, const char *otherwise,
+		char *value, size_t size);
 static int read_ip_ttl(void *old, size_t *oldlenp);
 static int read_pressure_level(void *old, size_t *oldlenp);
 
@@ -250,14 +254,14 @@ static const struct sysctl_node nodes[] = {
 				.reader = read_boottime},
 		{"kern.usrstack64", {CTL_KERN, KERN_USRSTACK64}, SYSCTL_QUAD,
 				.number = (int64_t)VM_USRSTACK64},
-		{"kern.osversion", {CTL_KERN, KERN_OSVERSION}, SYSCTL_STRING,
-				.string = "26A434"},
+		{"kern.osversion", {CTL_KERN, KERN_OSVERSION}, SYSCTL_READER,
+				.reader = read_osversion},
 		{"kern.bootargs", {0, 0}, SYSCTL_STRING, .string = ""},
 		{"kern.msgbuf", {0, 0}, SYSCTL_READER, .reader = read_msgbuf},
 		{"kern.bootsessionuuid", {0, 0}, SYSCTL_READER,
 				.reader = read_bootsessionuuid},
-		{"kern.osproductversion", {0, 0}, SYSCTL_STRING,
-				.string = "27.0.1"},
+		{"kern.osproductversion", {0, 0}, SYSCTL_READER,
+				.reader = read_osproductversion},
 		{"kern.secure_kernel", {0, 0}, SYSCTL_INT, .number = 0},
 
 		{"kern.iossupportversion", {0, 0}, SYSCTL_STRING,
@@ -726,7 +730,9 @@ oid_format(const int *oid, void *old, size_t *oldlenp)
 			format = "S,xsw_usage";
 		} else if (node->reader == read_hostname
 				|| node->reader == read_bootsessionuuid
-				|| node->reader == read_sandbox_sentinel) {
+				|| node->reader == read_sandbox_sentinel
+				|| node->reader == read_osversion
+				|| node->reader == read_osproductversion) {
 			kind = CTLTYPE_STRING;
 			format = "A";
 		} else if (node->reader == read_memsize) {
@@ -866,6 +872,52 @@ read_boottime(void *old, size_t *oldlenp)
 			.tv_usec = (boot_ns % 1000000000LL) / 1000,
 	};
 	return read_bytes(&tv, sizeof(tv), old, oldlenp);
+}
+
+static int
+read_osversion(void *old, size_t *oldlenp)
+{
+	char value[64];
+	const char *version = system_version(
+			"ProductBuildVersion", "26A434", value, sizeof(value));
+	return read_bytes(version, strlen(version) + 1, old, oldlenp);
+}
+
+static int
+read_osproductversion(void *old, size_t *oldlenp)
+{
+	char value[64];
+	const char *version = system_version(
+			"ProductVersion", "27.0.1", value, sizeof(value));
+	return read_bytes(version, strlen(version) + 1, old, oldlenp);
+}
+
+#define SYSTEM_VERSION_PATH "/System/Library/CoreServices/SystemVersion.plist"
+
+static const char *
+system_version(const char *key, const char *otherwise, char *value, size_t size)
+{
+	char buffer[PATH_MAX];
+	FILE *file = fopen(sysroot_host_path(SYSTEM_VERSION_PATH, 0, buffer),
+			"re");
+	if (file == NULL) {
+		return otherwise;
+	}
+	char text[8192];
+	size_t length = fread(text, 1, sizeof(text) - 1, file);
+	fclose(file);
+	text[length] = '\0';
+	char wanted[64];
+	snprintf(wanted, sizeof(wanted), "<key>%s</key>", key);
+	const char *at = strstr(text, wanted);
+	const char *start = at != NULL ? strstr(at, "<string>") : NULL;
+	const char *end = start != NULL ? strstr(start, "</string>") : NULL;
+	if (end == NULL) {
+		return otherwise;
+	}
+	start += strlen("<string>");
+	snprintf(value, size, "%.*s", (int)(end - start), start);
+	return value;
 }
 
 static int

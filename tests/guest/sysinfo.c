@@ -26,6 +26,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <CoreFoundation/CoreFoundation.h>
 #include <dispatch/dispatch.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -75,6 +76,8 @@ int proc_pidoriginatorinfo(int flavor, void *buffer, int buffersize);
 kern_return_t task_inspect_for_pid(
 		mach_port_name_t target, int pid, mach_port_name_t *task);
 
+static void check_system_version(void);
+static void check_version(const char *name, CFStringRef expected);
 static void check_main_thread_gone(void);
 static void check_sysctl_walk(void);
 static void check_structure(const char *name, const char *format);
@@ -90,6 +93,7 @@ main(void)
 	size_t size = sizeof(ostype);
 	CHECK(sysctlbyname("kern.ostype", ostype, &size, NULL, 0) == 0);
 	CHECK(strcmp(ostype, "Darwin") == 0);
+	check_system_version();
 
 	int ncpu;
 	size = sizeof(ncpu);
@@ -396,6 +400,40 @@ linger(void *arg)
 		pause();
 	}
 	return arg;
+}
+
+static void
+check_system_version(void)
+{
+	CFURLRef url = CFURLCreateWithFileSystemPath(NULL,
+			CFSTR("/System/Library/CoreServices/"
+			      "SystemVersion.plist"),
+			kCFURLPOSIXPathStyle, false);
+	CFReadStreamRef stream = CFReadStreamCreateWithFile(NULL, url);
+	CHECK(CFReadStreamOpen(stream));
+	CFDictionaryRef system = CFPropertyListCreateWithStream(
+			NULL, stream, 0, kCFPropertyListImmutable, NULL, NULL);
+	CHECK(system != NULL);
+	check_version("kern.osversion",
+			CFDictionaryGetValue(
+					system, CFSTR("ProductBuildVersion")));
+	check_version("kern.osproductversion",
+			CFDictionaryGetValue(system, CFSTR("ProductVersion")));
+	CFRelease(system);
+	CFReadStreamClose(stream);
+	CFRelease(stream);
+	CFRelease(url);
+}
+
+static void
+check_version(const char *name, CFStringRef expected)
+{
+	char value[64], wanted[64];
+	size_t size = sizeof(value);
+	CHECK(sysctlbyname(name, value, &size, NULL, 0) == 0);
+	CHECK(CFStringGetCString(expected, wanted, sizeof(wanted),
+			kCFStringEncodingUTF8));
+	CHECK(strcmp(value, wanted) == 0);
 }
 
 static void
