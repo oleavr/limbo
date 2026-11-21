@@ -47,6 +47,7 @@
 
 #include "acl.h"
 #include "at.h"
+#include "bsd/mac.h"
 #include "bsd/xnu-errno.h"
 #include "bsd_flags.h"
 #include "device.h"
@@ -262,6 +263,10 @@ static int set_list(int dirfd, const char *path, int flags, const void *filesec,
 		uint32_t size);
 static int set_protection_class(
 		int dirfd, const char *path, int flags, uint32_t dpclass);
+static bool sandbox_denies_set(int dirfd, const char *path, int follow,
+		const struct __darwin_attrlist *list);
+static bool sandbox_denies(
+		int operation, int dirfd, const char *path, int follow);
 
 static int
 fgetattrlist(int fd, void *alist, void *attributeBuffer, size_t bufferSize,
@@ -1266,12 +1271,45 @@ sys_setattrlist(const char *path, void *alist, void *attributeBuffer,
 		size_t bufferSize, uint64_t options)
 {
 	int flags = (options & FSOPT_NOFOLLOW) ? AT_SYMLINK_NOFOLLOW : 0;
+	if (sandbox_denies_set(AT_FDCWD, path, flags, alist)) {
+		return _EPERM;
+	}
 	char buffer[PATH_MAX];
 	if (set_attributes(AT_FDCWD, sysroot_host_path(path, flags, buffer),
 			    flags, alist, attributeBuffer)) {
 		return err_map(errno);
 	}
 	return 0;
+}
+
+static bool
+sandbox_denies_set(int dirfd, const char *path, int follow,
+		const struct __darwin_attrlist *list)
+{
+	static const struct {
+		uint32_t attributes;
+		int operation;
+	} gates[] = {
+			{UINT32_MAX, SANDBOX_FILE_WRITE_ALL},
+			{ATTR_CMN_FNDRINFO, SANDBOX_FILE_WRITE_FINDERINFO},
+			{ATTR_CMN_FLAGS, SANDBOX_FILE_WRITE_FLAGS},
+	};
+	for (size_t i = 0; i != sizeof(gates) / sizeof(*gates); i++) {
+		if ((list->commonattr & gates[i].attributes)
+				&& sandbox_denies(gates[i].operation, dirfd,
+						path, follow)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool
+sandbox_denies(int operation, int dirfd, const char *path, int follow)
+{
+	return (path == NULL)
+			? mac_sandbox_denies_fd(operation, dirfd)
+			: mac_sandbox_denies(operation, dirfd, path, follow);
 }
 
 int
@@ -1289,6 +1327,9 @@ int
 sys_fsetattrlist(int fd, void *alist, void *attributeBuffer, size_t bufferSize,
 		uint64_t options)
 {
+	if (sandbox_denies_set(fd, NULL, 0, alist)) {
+		return _EPERM;
+	}
 	if (set_attributes(fd, NULL, 0, alist, attributeBuffer)) {
 		return err_map(errno);
 	}
@@ -1319,6 +1360,9 @@ sys_setattrlistat(int dirfd, const char *path, void *alist,
 		void *attributeBuffer, size_t bufferSize, uint32_t options)
 {
 	int flags = (options & FSOPT_NOFOLLOW) ? AT_SYMLINK_NOFOLLOW : 0;
+	if (sandbox_denies_set(at_fd(dirfd), path, flags, alist)) {
+		return _EPERM;
+	}
 	char buffer[PATH_MAX];
 	if (set_attributes(at_fd(dirfd), sysroot_host_path(path, flags, buffer),
 			    flags, alist, attributeBuffer)) {
