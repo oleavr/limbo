@@ -79,6 +79,13 @@ check_short_datagram(void)
 	struct broker_wire_frame *frame;
 	CHECK(broker_wire_receive(pair[1], &ahead, &frame) == -1);
 	CHECK(is_closed(read_end));
+	CHECK(close(read_end) == 0);
+
+	write_end = pipe_to(&read_end);
+	send_datagram(pair[0], "", 0, &write_end, 1);
+	CHECK(close(write_end) == 0);
+	CHECK(broker_wire_receive(pair[1], &ahead, &frame) == -1);
+	CHECK(is_closed(read_end));
 	CHECK(close(read_end) == 0 && close(pair[0]) == 0
 			&& close(pair[1]) == 0);
 }
