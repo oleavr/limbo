@@ -422,6 +422,22 @@ ipc_kobject_lookup(mach_port_name_t name, ipc_kobject_type_t type)
 	return kobject;
 }
 
+void *
+ipc_kobject_lookup_held(mach_port_name_t name, ipc_kobject_type_t type,
+		void (*hold)(void *kobject))
+{
+	pthread_mutex_lock(&lock);
+	struct ipc_entry *entry = lookup(name);
+	void *kobject = (entry != NULL && entry->port->kotype == type)
+			? entry->port->kobject
+			: NULL;
+	if (kobject != NULL) {
+		hold(kobject);
+	}
+	pthread_mutex_unlock(&lock);
+	return kobject;
+}
+
 void
 ipc_kobject_destroy(mach_port_name_t name)
 {
