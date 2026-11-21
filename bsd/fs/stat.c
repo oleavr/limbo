@@ -37,6 +37,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/types.h>
 #include <sys/vfs.h>
 #include <unistd.h>
@@ -323,6 +324,16 @@ convert_statfs(const struct statfs *src, dev_t device, bool data,
 	dest->f_bavail = src->f_bavail;
 	dest->f_files = src->f_files;
 	dest->f_ffree = src->f_ffree;
+	struct statvfs space;
+	if (sysroot_space(device, &space)) {
+		dest->f_bsize = space.f_frsize;
+		dest->f_iosize = space.f_frsize;
+		dest->f_blocks = space.f_blocks;
+		dest->f_bfree = space.f_bfree;
+		dest->f_bavail = space.f_bavail;
+		dest->f_files += space.f_ffree - src->f_ffree;
+		dest->f_ffree = space.f_ffree;
+	}
 	/* TODO: These are not going to be compatible */
 	dest->f_fsid.__val[0] = darwin_fsid(
 			sysroot_device(device), sysroot_root_device(), data);

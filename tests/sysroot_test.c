@@ -42,12 +42,14 @@
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 #include "check.h"
 #include "sysroot.h"
 
-#define SKIP 77
+#define VOLUME_SIZE "3m"
+#define SKIP        77
 
 static char root[PATH_MAX];
 
@@ -156,7 +158,9 @@ populate(void)
 	make_file("/usr/share/firmlinks");
 	char firmlinks[PATH_MAX * 2];
 	snprintf(firmlinks, sizeof(firmlinks), "%s/usr/share/firmlinks", root);
-	CHECK(write_file(firmlinks, "/private\tprivate\n/Users\tUsers\n"));
+	CHECK(write_file(firmlinks,
+			"/tmp\ttmp\n/Volumes\tVolumes\n/private\tprivate\n/"
+			"Users\tUsers\n"));
 }
 
 static bool
@@ -171,7 +175,8 @@ mount_volume(void)
 			|| !write_file("/proc/self/setgroups", "deny")
 			|| !write_file("/proc/self/uid_map", uid_map)
 			|| !write_file("/proc/self/gid_map", gid_map)
-			|| mount("none", point, "tmpfs", 0, NULL) == -1) {
+			|| mount("none", point, "tmpfs", 0, "size=" VOLUME_SIZE)
+					== -1) {
 		return false;
 	}
 	make_file("/Volumes/file");
@@ -206,6 +211,14 @@ check_devices(void)
 			== (mounted.st_ino | (uint64_t)1 << 40));
 	CHECK(sysroot_file_id(top.st_dev, top.st_ino) == 2);
 	snprintf(path, sizeof(path), "%s/Volumes", root);
+	struct statvfs volume, space;
+	CHECK(statvfs(path, &volume) == 0);
+	CHECK(sysroot_space(top.st_dev, &space));
+	CHECK(space.f_blocks == volume.f_blocks);
+	CHECK(space.f_frsize == volume.f_frsize);
+	CHECK(sysroot_space(mounted.st_dev, &space));
+	CHECK(space.f_blocks == volume.f_blocks);
+	CHECK(!sysroot_space(top.st_dev + 1000, &space));
 	CHECK(umount(path) == 0);
 }
 

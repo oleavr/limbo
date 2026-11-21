@@ -33,6 +33,8 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+struct statvfs;
+
 int sysroot_open(void);
 const char *sysroot_host_path(const char *path, int flags, char *buffer);
 const char *sysroot_creation_path(
@@ -41,6 +43,7 @@ const char *sysroot_guest_path(const char *path);
 uint64_t sysroot_file_id(dev_t dev, uint64_t ino);
 dev_t sysroot_device(dev_t dev);
 dev_t sysroot_root_device(void);
+bool sysroot_space(dev_t dev, struct statvfs *space);
 bool sysroot_fd_on_data_volume(int fd);
 bool sysroot_at_on_data_volume(
 		int dirfd, const char *path, const char *host_path);

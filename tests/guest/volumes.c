@@ -124,6 +124,8 @@ check_statfs(void)
 	CHECK(statfs("/dev", &devices) == 0);
 	CHECK(stat("/dev", &dev) == 0);
 	CHECK(devices.f_fsid.val[0] == dev.st_dev);
+	CHECK(system.f_bsize == data.f_bsize);
+	CHECK(system.f_blocks == data.f_blocks);
 
 	int fd = open("/private/tmp", O_RDONLY);
 	CHECK(fd != -1);
