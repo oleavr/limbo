@@ -45,6 +45,7 @@
 #include "ipc.h"
 
 static void connect_to_broker(const char *path);
+static void *read_until_end(void *user);
 static void *read_frames(void *user);
 static void dispatch_frame(const struct broker_frame *header, const void *payload);
 static uint32_t least_length(uint32_t type);
@@ -60,6 +61,7 @@ static pthread_mutex_t call_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t reply_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t reply_ready = PTHREAD_COND_INITIALIZER;
 static bool reply_pending;
+static bool reader_ended;
 static struct broker_lookup_reply pending_lookup_reply;
 static struct broker_welcome pending_welcome;
 
@@ -85,6 +87,7 @@ broker_client_reset(void)
 	}
 	guest_id = 0;
 	reply_pending = false;
+	reader_ended = false;
 	pthread_mutex_init(&call_lock, NULL);
 	pthread_mutex_init(&reply_lock, NULL);
 	pthread_cond_init(&reply_ready, NULL);
@@ -119,8 +122,10 @@ broker_client_look_up(const char *name, uint64_t *global_id)
 	strncpy(req.name, name, sizeof(req.name) - 1);
 	pthread_mutex_lock(&call_lock);
 	expect_reply();
-	send_frame(BROKER_LOOKUP, &req, sizeof(req));
-	struct broker_lookup_reply reply = await_reply();
+	struct broker_lookup_reply reply = {0};
+	if (send_frame(BROKER_LOOKUP, &req, sizeof(req)) == 0) {
+		reply = await_reply();
+	}
 	pthread_mutex_unlock(&call_lock);
 	*global_id = reply.global_id;
 	return reply.found;
@@ -156,12 +161,26 @@ connect_to_broker(const char *path)
 	connect(broker_fd, (struct sockaddr *)&addr, sizeof(addr));
 
 	pthread_t thread;
-	pthread_create(&thread, NULL, read_frames, NULL);
+	pthread_create(&thread, NULL, read_until_end, NULL);
 
 	expect_reply();
 	send_parts(BROKER_HELLO, NULL, 0);
 	await_reply();
 	guest_id = pending_welcome.guest_id;
+}
+
+static void *
+read_until_end(void *user)
+{
+	read_frames(user);
+
+	pthread_mutex_lock(&reply_lock);
+	reader_ended = true;
+	reply_pending = false;
+	pending_lookup_reply = (struct broker_lookup_reply){0};
+	pthread_cond_signal(&reply_ready);
+	pthread_mutex_unlock(&reply_lock);
+	return NULL;
 }
 
 static void *
@@ -243,7 +262,8 @@ static void
 expect_reply(void)
 {
 	pthread_mutex_lock(&reply_lock);
-	reply_pending = true;
+	reply_pending = !reader_ended;
+	pending_lookup_reply = (struct broker_lookup_reply){0};
 	pthread_mutex_unlock(&reply_lock);
 }
 
