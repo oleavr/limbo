@@ -198,6 +198,10 @@ handle_guest(int fd)
 		}
 		return;
 	}
+	if (frame->lost) {
+		broker_wire_free(frame);
+		return;
+	}
 
 	union {
 		struct broker_register reg;
