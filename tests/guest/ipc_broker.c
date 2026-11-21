@@ -1179,6 +1179,14 @@ send_raw(int fd, uint32_t type, const void *payload, uint32_t length)
 	CHECK(sendmsg(fd, &message, 0) == (ssize_t)(sizeof(header) + length));
 }
 
+static void
+receive_raw(int fd, void *frame, size_t size)
+{
+	struct pollfd polled = {.fd = fd, .events = POLLIN};
+	CHECK(poll(&polled, 1, ANSWER_MS) == 1);
+	CHECK(recv(fd, frame, size, 0) == (ssize_t)size);
+}
+
 static uint64_t
 look_up_raw(int fd, const char *name)
 {
@@ -1190,7 +1198,7 @@ look_up_raw(int fd, const char *name)
 		struct broker_frame header;
 		struct broker_lookup_reply reply;
 	} answer;
-	CHECK(recv(fd, &answer, sizeof(answer), 0) == sizeof(answer));
+	receive_raw(fd, &answer, sizeof(answer));
 	CHECK(answer.header.type == BROKER_LOOKUP_REPLY && answer.reply.found);
 	return answer.reply.global_id;
 }
@@ -1581,7 +1589,7 @@ receive_raw_id(int fd)
 		carrier_t carrier;
 		uint64_t id;
 	} delivered;
-	CHECK(recv(fd, &delivered, sizeof(delivered), 0) == sizeof(delivered));
+	receive_raw(fd, &delivered, sizeof(delivered));
 	CHECK(delivered.frame.type == BROKER_DELIVER);
 	return delivered.id;
 }
@@ -1595,8 +1603,7 @@ check_late_add(int fd, uint32_t gone_guest_id)
 	} welcomed;
 	send_raw(fd, BROKER_HELLO, NULL, 0);
 	do {
-		CHECK(recv(fd, &welcomed, sizeof(welcomed), 0)
-				== sizeof(welcomed));
+		receive_raw(fd, &welcomed, sizeof(welcomed));
 	} while (welcomed.frame.type != BROKER_WELCOME);
 	struct broker_register registration = {
 			.global_id
