@@ -34,6 +34,7 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <util.h>
 
@@ -54,6 +55,7 @@ static void check_fsync(void);
 static void check_signal(void);
 static void check_list(void);
 static void check_limit(void);
+static void check_fork(void);
 static void wait_for(struct aiocb *cb);
 static void on_signal(int sig);
 static void *wait_for_own(void *arg);
@@ -75,6 +77,7 @@ main(void)
 	check_signal();
 	check_list();
 	check_limit();
+	check_fork();
 	printf("aio: ok\n");
 	return 0;
 }
@@ -445,6 +448,26 @@ check_limit(void)
 		wait_for(&cbs[i]);
 		CHECK(aio_return(&cbs[i]) == 1);
 	}
+}
+
+static void
+check_fork(void)
+{
+	struct aiocb cb = {
+			.aio_fildes = file, .aio_buf = text, .aio_nbytes = 1};
+	CHECK(aio_write(&cb) == 0);
+	wait_for(&cb);
+	pid_t child = fork();
+	CHECK(child != -1);
+	if (child == 0) {
+		CHECK(aio_error(&cb) == -1 && errno == EINVAL);
+		CHECK(aio_return(&cb) == -1 && errno == EINVAL);
+		_exit(0);
+	}
+	int status;
+	CHECK(waitpid(child, &status, 0) == child);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	CHECK(aio_error(&cb) == 0 && aio_return(&cb) == 1);
 }
 
 static void
