@@ -67,6 +67,7 @@ static void check_counts(void);
 static void check_waits(void);
 static void *wait_for_count(void *arg);
 static void ignore_signal(int sig);
+static void check_abandoned_waits(void);
 static void check_destroyed(void);
 static void *wait_until_destroyed(void *arg);
 static void create_pair(void);
@@ -79,6 +80,7 @@ main(void)
 	check_association();
 	check_counts();
 	check_waits();
+	check_abandoned_waits();
 	check_destroyed();
 	return 0;
 }
@@ -265,6 +267,54 @@ wait_for_count(void *arg)
 static void
 ignore_signal(int sig)
 {
+}
+
+static void
+check_abandoned_waits(void)
+{
+	create_pair();
+	CHECK(mach_eventlink_associate(ends[1], MACH_PORT_NULL, 0, 0, 0, 0,
+			      MELA_OPTION_ASSOCIATE_ON_WAIT)
+			== KERN_SUCCESS);
+	uint64_t count = 0;
+	CHECK(mach_eventlink_wait_until(ends[1], &count, MELSW_OPTION_NONE,
+			      KERN_CLOCK_MACH_ABSOLUTE_TIME, deadline_after(20))
+			== KERN_OPERATION_TIMED_OUT);
+	CHECK(count == 0);
+	CHECK(mach_eventlink_wait_until(ends[1], &count, MELSW_OPTION_NO_WAIT,
+			      KERN_CLOCK_MACH_ABSOLUTE_TIME, 0)
+			== KERN_INVALID_ARGUMENT);
+	CHECK(mach_eventlink_wait_until(ends[1], &count, MELSW_OPTION_NONE,
+			      KERN_CLOCK_MACH_ABSOLUTE_TIME, deadline_after(20))
+			== KERN_INVALID_ARGUMENT);
+	CHECK(count == 0);
+	CHECK(mach_eventlink_signal(ends[0], 0) == KERN_SUCCESS);
+	CHECK(mach_eventlink_wait_until(ends[1], &count, MELSW_OPTION_NO_WAIT,
+			      KERN_CLOCK_MACH_ABSOLUTE_TIME, 0)
+			== KERN_SUCCESS);
+	CHECK(count == 1);
+
+	struct sigaction action = {.sa_handler = ignore_signal};
+	CHECK(sigaction(SIGALRM, &action, NULL) == 0);
+	kern_return_t aborted = KERN_OPERATION_TIMED_OUT;
+	ualarm(100000, 100000);
+	aborted = mach_eventlink_wait_until(ends[1], &count, MELSW_OPTION_NONE,
+			KERN_CLOCK_MACH_ABSOLUTE_TIME, deadline_after(1000));
+	ualarm(0, 0);
+	CHECK(aborted == KERN_ABORTED);
+	CHECK(count == 1);
+	signal(SIGALRM, SIG_DFL);
+	CHECK(mach_eventlink_wait_until(ends[1], &count, MELSW_OPTION_NO_WAIT,
+			      KERN_CLOCK_MACH_ABSOLUTE_TIME, 0)
+			== KERN_INVALID_ARGUMENT);
+	CHECK(mach_eventlink_signal(ends[0], 0) == KERN_SUCCESS);
+	CHECK(mach_eventlink_wait_until(ends[1], &count, MELSW_OPTION_NO_WAIT,
+			      KERN_CLOCK_MACH_ABSOLUTE_TIME, 0)
+			== KERN_SUCCESS);
+	CHECK(count == 2);
+
+	CHECK(mach_eventlink_destroy(ends[0]) == KERN_SUCCESS);
+	CHECK(mach_eventlink_destroy(ends[1]) == KERN_SUCCESS);
 }
 
 static void
