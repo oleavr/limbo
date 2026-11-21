@@ -29,6 +29,7 @@
 #define _GNU_SOURCE
 #endif
 
+#include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <stdbool.h>
@@ -40,9 +41,11 @@
 #include "check.h"
 
 #define CLOSED_WITHIN_MS 5000
+#define REFUSED          47
 
 static void check_short_datagram(void);
 static void check_last_frames(void);
+static void check_cancel(void);
 static void connect_pair(int pair[2]);
 static int pipe_to(int *read_end);
 static void send_datagram(int fd, const void *bytes, size_t length,
@@ -54,6 +57,7 @@ main(void)
 {
 	check_short_datagram();
 	check_last_frames();
+	check_cancel();
 	return 0;
 }
 
@@ -94,6 +98,43 @@ check_last_frames(void)
 	broker_wire_free(frame);
 	CHECK(broker_wire_receive(pair[1], &ahead, &frame) == -1);
 	CHECK(close(pair[1]) == 0);
+}
+
+static void
+check_cancel(void)
+{
+	int pair[2];
+	connect_pair(pair);
+	int read_end;
+	int write_end = pipe_to(&read_end);
+	int fds[BROKER_DATAGRAM_FDS + REFUSED];
+	for (int i = 0; i != BROKER_DATAGRAM_FDS; i++) {
+		fds[i] = fcntl(write_end, F_DUPFD_CLOEXEC, 0);
+	}
+	for (int i = 0; i != REFUSED; i++) {
+		fds[BROKER_DATAGRAM_FDS + i] = -1;
+	}
+	CHECK(close(write_end) == 0);
+	struct broker_wire_frame *failing = broker_wire_new(BROKER_SEND, NULL,
+			0, fds, BROKER_DATAGRAM_FDS + REFUSED);
+	CHECK(broker_wire_send(pair[0], failing, 0) == EBADF);
+	broker_wire_free(failing);
+	struct broker_wire_frame *next
+			= broker_wire_new(BROKER_HELLO, NULL, 0, NULL, 0);
+	CHECK(broker_wire_send(pair[0], next, 0) == 0);
+	broker_wire_free(next);
+
+	struct broker_wire_ahead ahead = {0};
+	struct broker_wire_frame *frame;
+	CHECK(broker_wire_receive(pair[1], &ahead, &frame) == 0);
+	CHECK(ahead.count == BROKER_DATAGRAM_FDS);
+	CHECK(broker_wire_receive(pair[1], &ahead, &frame) == 0);
+	CHECK(ahead.count == 0 && is_closed(read_end));
+	CHECK(broker_wire_receive(pair[1], &ahead, &frame) == 1);
+	CHECK(frame->type == BROKER_HELLO && frame->fd_count == 0);
+	broker_wire_free(frame);
+	CHECK(close(read_end) == 0 && close(pair[0]) == 0
+			&& close(pair[1]) == 0);
 }
 
 static void

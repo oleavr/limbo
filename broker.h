@@ -54,6 +54,7 @@ enum broker_frame_type {
 	BROKER_DELIVER,
 	BROKER_FDS,
 	BROKER_GUEST_GONE,
+	BROKER_CANCEL,
 };
 
 struct broker_frame {
