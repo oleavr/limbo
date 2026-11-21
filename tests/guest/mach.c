@@ -89,6 +89,8 @@ static void check_refused_type(void);
 static void check_destroyed_memory(void);
 static void check_circular_message(void);
 static void check_dead_send_once_rights(void);
+static void check_send_once_destroyed(void);
+static void expect_send_once_notification(mach_port_t port);
 static void check_make_send_count(void);
 static mach_port_mscount_t make_send_count(mach_port_t port);
 static void check_reference_deltas(void);
@@ -139,6 +141,7 @@ main(void)
 	check_destroyed_memory();
 	check_circular_message();
 	check_dead_send_once_rights();
+	check_send_once_destroyed();
 	check_make_send_count();
 	check_reference_deltas();
 	check_fork_during_port_calls();
@@ -1002,6 +1005,114 @@ check_dead_send_once_rights(void)
 	CHECK(mach_port_deallocate(task, once) == KERN_SUCCESS);
 	CHECK(mach_port_type(task, port, &type) == KERN_SUCCESS);
 	CHECK(type == MACH_PORT_TYPE_DEAD_NAME);
+}
+
+static void
+check_send_once_destroyed(void)
+{
+	mach_port_t task = mach_task_self();
+	mach_port_t port = allocate_port();
+	mach_port_t right;
+	mach_msg_type_name_t type;
+	CHECK(mach_port_extract_right(task, port, MACH_MSG_TYPE_MAKE_SEND_ONCE,
+			      &right, &type)
+			== KERN_SUCCESS);
+	CHECK(type == MACH_MSG_TYPE_PORT_SEND_ONCE);
+	CHECK(mach_port_deallocate(task, right) == KERN_SUCCESS);
+	expect_send_once_notification(port);
+
+	CHECK(mach_port_extract_right(task, port, MACH_MSG_TYPE_MAKE_SEND_ONCE,
+			      &right, &type)
+			== KERN_SUCCESS);
+	CHECK(mach_port_mod_refs(task, right, MACH_PORT_RIGHT_SEND_ONCE, -1)
+			== KERN_SUCCESS);
+	expect_send_once_notification(port);
+
+	mach_port_t server = allocate_port();
+	struct {
+		mach_msg_header_t header;
+		mach_msg_trailer_t trailer;
+	} request = {
+		.header = {
+			.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MAKE_SEND,
+					MACH_MSG_TYPE_MAKE_SEND_ONCE),
+			.msgh_size = sizeof(request.header),
+			.msgh_remote_port = server,
+			.msgh_local_port = port,
+		},
+	};
+	CHECK(mach_msg(&request.header, MACH_SEND_MSG, sizeof(request.header),
+			      0, MACH_PORT_NULL, 0, MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	CHECK(mach_msg(&request.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof(request), server, 1000, MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	CHECK(MACH_MSGH_BITS_REMOTE(request.header.msgh_bits)
+			== MACH_MSG_TYPE_PORT_SEND_ONCE);
+	mach_msg_destroy(&request.header);
+	expect_send_once_notification(port);
+
+	request.header.msgh_bits = MACH_MSGH_BITS(
+			MACH_MSG_TYPE_MAKE_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+	request.header.msgh_remote_port = server;
+	request.header.msgh_local_port = port;
+	CHECK(mach_msg(&request.header, MACH_SEND_MSG, sizeof(request.header),
+			      0, MACH_PORT_NULL, 0, MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+
+	CHECK(mach_port_mod_refs(task, server, MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+	expect_send_once_notification(port);
+
+	server = allocate_port();
+	struct {
+		mach_msg_header_t header;
+		mach_msg_body_t body;
+		mach_msg_port_descriptor_t right;
+	} refused = {
+		.header = {
+			.msgh_bits = MACH_MSGH_BITS_SET(MACH_MSG_TYPE_MAKE_SEND,
+					MACH_MSG_TYPE_MAKE_SEND_ONCE, 0,
+					MACH_MSGH_BITS_COMPLEX),
+			.msgh_size = sizeof(refused),
+			.msgh_remote_port = server,
+			.msgh_local_port = port,
+		},
+		.body = {.msgh_descriptor_count = 1},
+		.right = {
+			.name = server,
+			.disposition = MACH_MSG_TYPE_MOVE_SEND,
+			.type = MACH_MSG_PORT_DESCRIPTOR,
+		},
+	};
+	CHECK(mach_msg(&refused.header, MACH_SEND_MSG, sizeof(refused), 0,
+			      MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+			      MACH_PORT_NULL)
+			== MACH_SEND_INVALID_RIGHT);
+	expect_send_once_notification(port);
+
+	CHECK(mach_port_mod_refs(task, server, MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+	CHECK(mach_port_mod_refs(task, port, MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+}
+
+static void
+expect_send_once_notification(mach_port_t port)
+{
+	struct {
+		mach_send_once_notification_t notification;
+		mach_msg_trailer_t trailer;
+	} message;
+	CHECK(mach_msg(&message.notification.not_header,
+			      MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof(message), port, 1000, MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	CHECK(message.notification.not_header.msgh_id == MACH_NOTIFY_SEND_ONCE);
+	CHECK(mach_msg(&message.notification.not_header,
+			      MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof(message), port, 100, MACH_PORT_NULL)
+			== MACH_RCV_TIMED_OUT);
 }
 
 static void

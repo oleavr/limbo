@@ -33,6 +33,7 @@
 #include <errno.h>
 #include <mach/mach.h>
 #include <mach/mig.h>
+#include <mach/notify.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -76,6 +77,7 @@ struct ipc_port {
 	struct ipc_kmsg **messages_tail;
 	mach_port_seqno_t seqno;
 	mach_port_mscount_t mscount;
+	mach_port_urefs_t kernel_sorights;
 	mach_port_context_t context;
 	uint64_t global_id;
 	bool remote;
@@ -93,6 +95,11 @@ struct arrival_waiter {
 	struct arrival_waiter *next;
 	const struct ipc_port *port;
 	_Atomic uint32_t woken;
+};
+
+struct pending_notice {
+	struct pending_notice *next;
+	struct ipc_port *notify;
 };
 
 struct remote_header {
@@ -149,6 +156,8 @@ static const struct mig_subsystem *const kobject_subsystems[] = {
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static struct arrival_waiter *arrival_waiters;
+static struct pending_notice *pending_notices;
+static struct pending_notice **pending_notices_tail = &pending_notices;
 static struct ipc_entry *entries;
 static uint32_t entry_count;
 static struct ipc_port *kobjects[IPC_KOBJECT_VOUCHER + 1];
@@ -215,6 +224,10 @@ static void wake_waiters_for(const struct ipc_port *port);
 static void wake_all_waiters(void);
 static void write_trailer(mach_msg_header_t *msg, struct ipc_port *port,
 		pid_t sender_pid);
+static void flush_notices(void);
+static void notify_send_once(struct ipc_port *port);
+static void deliver_notification(
+		struct ipc_port *port, const mach_msg_header_t *msg);
 static void destroy_receive_right(struct ipc_entry *entry);
 static void destroy_rights(mach_msg_header_t *header);
 static void destroy_right(mach_port_name_t name, mach_msg_type_name_t type);
@@ -222,6 +235,10 @@ static struct ipc_entry *lookup(mach_port_name_t name);
 static struct ipc_port *port_alloc(ipc_kobject_type_t kotype);
 static struct ipc_entry *entry_alloc(struct ipc_port *port);
 static void entry_release_if_unused(struct ipc_entry *entry);
+static void port_free_if_unheld(struct ipc_port *port);
+static void queue_send_once_notifications(
+		struct ipc_entry *entry, uint32_t count);
+static void queue_notice(struct pending_notice notice);
 static kern_return_t member_and_set(mach_port_name_t member,
 		mach_port_name_t pset, struct ipc_port **member_port,
 		struct ipc_port **pset_port);
@@ -423,6 +440,7 @@ ipc_mach_msg(mach_msg_header_t *msg, mach_msg_option64_t options,
 		trace_message(TRACE_MESSAGE_SENT, msg, send_size);
 		mach_msg_return_t mr = send(msg, send_size, IPC_USER,
 				getpid());
+		flush_notices();
 		if (mr != MACH_MSG_SUCCESS) {
 			return mr;
 		}
@@ -1489,13 +1507,17 @@ write_trailer(mach_msg_header_t *msg, struct ipc_port *port, pid_t sender_pid)
 mach_msg_return_t
 ipc_kernel_send(mach_msg_header_t *msg)
 {
-	return send(msg, msg->msgh_size, IPC_KERNEL, 0);
+	mach_msg_return_t mr = send(msg, msg->msgh_size, IPC_KERNEL, 0);
+	flush_notices();
+	return mr;
 }
 
 mach_msg_return_t
 ipc_launchd_send(mach_msg_header_t *msg)
 {
-	return send(msg, msg->msgh_size, IPC_KERNEL, 1);
+	mach_msg_return_t mr = send(msg, msg->msgh_size, IPC_KERNEL, 1);
+	flush_notices();
+	return mr;
 }
 
 kern_return_t
@@ -1559,6 +1581,7 @@ ipc_port_destruct(mach_port_name_t name, mach_port_delta_t srdelta,
 		destroy_receive_right(entry);
 	}
 	pthread_mutex_unlock(&lock);
+	flush_notices();
 	return kr;
 }
 
@@ -1584,6 +1607,7 @@ ipc_port_deallocate(mach_port_name_t name)
 		if (--entry->sorights == 0) {
 			entry->type &= ~MACH_PORT_TYPE_SEND_ONCE;
 		}
+		queue_send_once_notifications(entry, 1);
 	} else {
 		kr = KERN_INVALID_RIGHT;
 	}
@@ -1591,6 +1615,7 @@ ipc_port_deallocate(mach_port_name_t name)
 		entry_release_if_unused(entry);
 	}
 	pthread_mutex_unlock(&lock);
+	flush_notices();
 	return kr;
 }
 
@@ -1643,6 +1668,9 @@ ipc_port_mod_refs(mach_port_name_t name, mach_port_right_t right,
 		if (entry->sorights == 0) {
 			entry->type &= ~MACH_PORT_TYPE_SEND_ONCE;
 		}
+		if (delta < 0) {
+			queue_send_once_notifications(entry, -delta);
+		}
 		break;
 	case MACH_PORT_RIGHT_RECEIVE:
 		if (!(entry->type & MACH_PORT_TYPE_RECEIVE)) {
@@ -1665,7 +1693,60 @@ ipc_port_mod_refs(mach_port_name_t name, mach_port_right_t right,
 	entry_release_if_unused(entry);
 out:
 	pthread_mutex_unlock(&lock);
+	flush_notices();
 	return kr;
+}
+
+static void
+flush_notices(void)
+{
+	pthread_mutex_lock(&lock);
+	struct pending_notice *notices = pending_notices;
+	pending_notices = NULL;
+	pending_notices_tail = &pending_notices;
+	pthread_mutex_unlock(&lock);
+
+	while (notices != NULL) {
+		struct pending_notice *notice = notices;
+		notices = notice->next;
+		notify_send_once(notice->notify);
+		free(notice);
+	}
+}
+
+static void
+notify_send_once(struct ipc_port *port)
+{
+	mach_send_once_notification_t notification = {
+		.not_header = {
+			.msgh_size = sizeof(notification.not_header),
+			.msgh_id = MACH_NOTIFY_SEND_ONCE,
+		},
+	};
+	deliver_notification(port, &notification.not_header);
+}
+
+static void
+deliver_notification(struct ipc_port *port, const mach_msg_header_t *msg)
+{
+	pthread_mutex_lock(&lock);
+	port->kernel_sorights--;
+	struct ipc_entry *entry = lookup(port->name);
+	if (entry == NULL || !(entry->type & MACH_PORT_TYPE_RECEIVE)) {
+		port_free_if_unheld(port);
+		pthread_mutex_unlock(&lock);
+		return;
+	}
+
+	struct ipc_kmsg *kmsg = malloc(sizeof(*kmsg) + msg->msgh_size
+			+ sizeof(mach_msg_max_trailer_t));
+	kmsg->sender_pid = 0;
+	memcpy(kmsg->header, msg, msg->msgh_size);
+	kmsg->header->msgh_bits
+			= MACH_MSGH_BITS(0, MACH_MSG_TYPE_PORT_SEND_ONCE);
+	kmsg->header->msgh_local_port = port->name;
+	enqueue(port, kmsg);
+	unlock_and_notify_arrival(port);
 }
 
 kern_return_t
@@ -1978,7 +2059,7 @@ ipc_port_get_status(mach_port_name_t name, mach_port_status_t *status)
 				kmsg = kmsg->next) {
 			status->mps_msgcount++;
 		}
-		status->mps_sorights = entry->sorights;
+		status->mps_sorights = entry->sorights + port->kernel_sorights;
 		status->mps_srights = (entry->type & MACH_PORT_TYPE_SEND) != 0;
 	}
 	pthread_mutex_unlock(&lock);
@@ -2084,6 +2165,7 @@ destroy_right(mach_port_name_t name, mach_msg_type_name_t type)
 		} else if (--entry->sorights == 0) {
 			entry->type &= ~MACH_PORT_TYPE_SEND_ONCE;
 		}
+		queue_send_once_notifications(entry, 1);
 		break;
 	case MACH_MSG_TYPE_PORT_RECEIVE:
 		destroy_receive_right(entry);
@@ -2157,7 +2239,7 @@ entry_release_if_unused(struct ipc_entry *entry)
 	}
 	if (port->kotype == IPC_KOBJECT_NONE) {
 		port_leave_all_sets(port);
-		free(port);
+		port_free_if_unheld(port);
 	} else if (port->kotype == IPC_KOBJECT_FILEPORT) {
 		close(*(int *)port->kobject);
 		free(port->kobject);
@@ -2167,6 +2249,36 @@ entry_release_if_unused(struct ipc_entry *entry)
 	entry->urefs = 0;
 	entry->sorights = 0;
 	entry->generation += MACH_PORT_GEN(4);
+}
+
+static void
+port_free_if_unheld(struct ipc_port *port)
+{
+	if (port->name == MACH_PORT_NULL && port->kernel_sorights == 0) {
+		free(port);
+	}
+}
+
+static void
+queue_send_once_notifications(struct ipc_entry *entry, uint32_t count)
+{
+	if (!(entry->type & MACH_PORT_TYPE_RECEIVE)) {
+		return;
+	}
+
+	entry->port->kernel_sorights += count;
+	for (uint32_t i = 0; i < count; i++) {
+		queue_notice((struct pending_notice){.notify = entry->port});
+	}
+}
+
+static void
+queue_notice(struct pending_notice notice)
+{
+	struct pending_notice *queued = malloc(sizeof(*queued));
+	*queued = notice;
+	*pending_notices_tail = queued;
+	pending_notices_tail = &queued->next;
 }
 
 static bool
