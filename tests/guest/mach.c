@@ -135,6 +135,7 @@ static void check_time(void);
 static void check_timers(void);
 static void check_memory_entries(void);
 static void check_memory_entries_freed(void);
+static void check_memory_entry_sent(void);
 static void check_remaps(void);
 static void check_mincore(void);
 static void check_madvise_zero(void);
@@ -2266,6 +2267,71 @@ check_memory_entries(void)
 	check_shared_range_kept();
 	check_shared_anonymous_entry();
 	check_memory_entries_freed();
+	check_memory_entry_sent();
+}
+
+static void
+check_memory_entry_sent(void)
+{
+	memory_object_size_t size = vm_page_size;
+	mach_port_t entry = MACH_PORT_NULL;
+	vm_prot_t rw = VM_PROT_READ | VM_PROT_WRITE;
+	CHECK(mach_make_memory_entry_64(mach_task_self(), &size, 0,
+			      MAP_MEM_NAMED_CREATE | rw, &entry, MACH_PORT_NULL)
+			== KERN_SUCCESS);
+	mach_port_t port = allocate_port();
+
+	struct {
+		mach_msg_header_t header;
+		mach_msg_body_t body;
+		mach_msg_port_descriptor_t port;
+		mach_msg_trailer_t trailer;
+	} message = {
+			.header = {
+					.msgh_bits = MACH_MSGH_BITS_SET(
+							MACH_MSG_TYPE_MAKE_SEND,
+							0, 0,
+							MACH_MSGH_BITS_COMPLEX),
+					.msgh_size = sizeof(message)
+							- sizeof(message.trailer),
+					.msgh_remote_port = port,
+			},
+			.body = {.msgh_descriptor_count = 1},
+			.port = {
+					.name = entry,
+					.disposition = MACH_MSG_TYPE_MOVE_SEND,
+					.type = MACH_MSG_PORT_DESCRIPTOR,
+			},
+	};
+	CHECK(mach_msg(&message.header, MACH_SEND_MSG, message.header.msgh_size,
+			      0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+			      MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	CHECK(mach_msg(&message.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof(message), port, 1000, MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+
+	mach_vm_address_t first = 0, second = 0;
+	CHECK(mach_vm_map(mach_task_self(), &first, size, 0, VM_FLAGS_ANYWHERE,
+			      message.port.name, 0, false, rw, rw,
+			      VM_INHERIT_NONE)
+			== KERN_SUCCESS);
+	CHECK(mach_vm_map(mach_task_self(), &second, size, 0, VM_FLAGS_ANYWHERE,
+			      message.port.name, 0, false, rw, rw,
+			      VM_INHERIT_NONE)
+			== KERN_SUCCESS);
+	((volatile char *)first)[7] = 42;
+	CHECK(((volatile char *)second)[7] == 42);
+
+	CHECK(mach_vm_deallocate(mach_task_self(), first, size)
+			== KERN_SUCCESS);
+	CHECK(mach_vm_deallocate(mach_task_self(), second, size)
+			== KERN_SUCCESS);
+	CHECK(mach_port_deallocate(mach_task_self(), message.port.name)
+			== KERN_SUCCESS);
+	CHECK(mach_port_mod_refs(mach_task_self(), port,
+			      MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
 }
 
 static void
