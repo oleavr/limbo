@@ -3248,6 +3248,8 @@ _Static_assert(sizeof(struct darwin_aiocb) == 80, "struct aiocb");
 #define DARWIN_SIGKILL         9
 #define DARWIN_SIGSTOP         17
 #define DARWIN_NSIG            32
+#define DARWIN_AIO_ALLDONE     1
+#define DARWIN_AIO_NOTCANCELED 4
 #define DARWIN_AIO_PROCESS_MAX 256
 
 enum aio_kind {
@@ -3257,6 +3259,7 @@ enum aio_kind {
 
 struct aio_request {
 	uint64_t aiocb;
+	int fd;
 	bool active;
 	ssize_t result;
 	int error;
@@ -3279,7 +3282,7 @@ static int aio_submit(user_addr_t aiocbp, enum aio_kind kind);
 static int aio_validate(const struct darwin_aiocb *cb, enum aio_kind kind);
 static bool aio_sigevent_valid(const struct darwin_sigevent *event);
 static bool aio_is_vnode(int fd);
-static bool aio_begin(uint64_t aiocb);
+static bool aio_begin(uint64_t aiocb, int fd);
 static void aio_complete(uint64_t aiocb, const struct darwin_aiocb *cb,
 		enum aio_kind kind);
 static ssize_t aio_transfer(const struct darwin_aiocb *cb, bool writes);
@@ -3375,7 +3378,32 @@ aio_any_done(const uint64_t *list, int nent)
 int
 sys_aio_cancel(int fd, user_addr_t aiocbp)
 {
-	unimplemented();
+	if (!aio_is_vnode(fd)) {
+		return _EBADF;
+	}
+	pthread_mutex_lock(&aio.lock);
+	int result = aio.count == 0 ? DARWIN_AIO_ALLDONE : _EBADF;
+	if (aiocbp != NULL && aio.count != 0
+			&& ((const struct darwin_aiocb *)aiocbp)->aio_fildes
+					!= fd) {
+		pthread_mutex_unlock(&aio.lock);
+		return _EBADF;
+	}
+	uint64_t wanted = (uintptr_t)aiocbp;
+	for (size_t i = 0; i < aio.count; i++) {
+		const struct aio_request *request = &aio.requests[i];
+		if (request->fd != fd
+				|| (wanted != 0 && request->aiocb != wanted)) {
+			continue;
+		}
+		if (request->active) {
+			result = DARWIN_AIO_NOTCANCELED;
+			break;
+		}
+		result = DARWIN_AIO_ALLDONE;
+	}
+	pthread_mutex_unlock(&aio.lock);
+	return result;
 }
 
 int
@@ -3412,7 +3440,7 @@ aio_submit(user_addr_t aiocbp, enum aio_kind kind)
 	if (error != 0) {
 		return error;
 	}
-	if (!aio_begin((uintptr_t)aiocbp)) {
+	if (!aio_begin((uintptr_t)aiocbp, cb.aio_fildes)) {
 		return _EAGAIN;
 	}
 	aio_complete((uintptr_t)aiocbp, &cb, kind);
@@ -3466,14 +3494,14 @@ aio_is_vnode(int fd)
 }
 
 static bool
-aio_begin(uint64_t aiocb)
+aio_begin(uint64_t aiocb, int fd)
 {
 	pthread_mutex_lock(&aio.lock);
 	bool taken = aio.count != DARWIN_AIO_PROCESS_MAX
 			&& aio_find(aiocb) == NULL;
 	if (taken) {
 		aio.requests[aio.count++] = (struct aio_request){
-				.aiocb = aiocb, .active = true};
+				.aiocb = aiocb, .fd = fd, .active = true};
 	}
 	pthread_mutex_unlock(&aio.lock);
 	return taken;

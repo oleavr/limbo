@@ -49,6 +49,7 @@ static void check_append(void);
 static void check_waiters(void);
 static void check_refused(void);
 static void check_suspend(void);
+static void check_cancel(void);
 static void check_signal(void);
 static void check_limit(void);
 static void wait_for(struct aiocb *cb);
@@ -62,6 +63,7 @@ main(void)
 	file = mkstemp(path);
 	CHECK(file != -1 && unlink(path) == 0);
 	check_suspend();
+	check_cancel();
 	check_transfer();
 	check_terminal();
 	check_append();
@@ -96,6 +98,30 @@ check_suspend(void)
 	CHECK(aio_suspend(list, 2, &invalid) == -1 && errno == EINVAL);
 	invalid = (struct timespec){.tv_sec = -1};
 	CHECK(aio_suspend(list, 2, &invalid) == -1 && errno == EINVAL);
+	CHECK(aio_return(&cb) == (ssize_t)sizeof(text));
+}
+
+static void
+check_cancel(void)
+{
+	struct aiocb never = {.aio_fildes = file};
+	CHECK(aio_cancel(file, NULL) == AIO_ALLDONE);
+	CHECK(aio_cancel(file, &never) == AIO_ALLDONE);
+	CHECK(aio_cancel(-1, NULL) == -1 && errno == EBADF);
+	int ends[2];
+	CHECK(pipe(ends) == 0);
+	CHECK(aio_cancel(ends[0], NULL) == -1 && errno == EBADF);
+	CHECK(close(ends[0]) == 0 && close(ends[1]) == 0);
+
+	struct aiocb cb = {.aio_fildes = file,
+			.aio_buf = text,
+			.aio_nbytes = sizeof(text)};
+	CHECK(aio_write(&cb) == 0);
+	wait_for(&cb);
+	CHECK(aio_cancel(file, NULL) == AIO_ALLDONE);
+	CHECK(aio_cancel(file, &cb) == AIO_ALLDONE);
+	CHECK(aio_cancel(file, &never) == -1 && errno == EBADF);
+	CHECK(aio_cancel(STDERR_FILENO, &cb) == -1 && errno == EBADF);
 	CHECK(aio_return(&cb) == (ssize_t)sizeof(text));
 }
 
