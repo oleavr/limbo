@@ -47,6 +47,8 @@ static int payload_file(const struct iovec *parts, int part_count);
 static bool write_whole(int fd, const struct iovec *part);
 static int send_datagram(int fd, struct iovec *iov, int iov_count,
 		const int *fds, size_t fd_count, int flags);
+static int cancel_ahead(int fd, struct broker_wire_frame *frame, int flags);
+static bool would_block(int error);
 static void take_ahead(struct broker_wire_ahead *ahead,
 		struct broker_wire_frame *frame);
 static void close_fds(const int *fds, size_t count);
@@ -159,11 +161,36 @@ broker_wire_send(int fd, struct broker_wire_frame *frame, int flags)
 		error = send_datagram(fd, iov, 2, frame->fds + frame->fds_sent,
 				frame->fd_count - frame->fds_sent, flags);
 	}
-	if (error != 0 && error != EAGAIN && error != EWOULDBLOCK
-			&& frame->fds_sent != 0) {
+	if (error != 0 && !would_block(error) && frame->fds_sent != 0) {
+		int cancel = cancel_ahead(fd, frame, flags);
+		return would_block(cancel) ? cancel : error;
+	}
+	return error;
+}
+
+static int
+cancel_ahead(int fd, struct broker_wire_frame *frame, int flags)
+{
+	close_fds(frame->fds, frame->fd_count);
+	frame->fd_count = 0;
+	frame->fds_sent = 0;
+	frame->type = BROKER_CANCEL;
+	frame->length = 0;
+	frame->inline_length = 0;
+
+	struct broker_frame header = {.type = BROKER_CANCEL};
+	struct iovec iov = {.iov_base = &header, .iov_len = sizeof(header)};
+	int error = send_datagram(fd, &iov, 1, NULL, 0, flags);
+	if (error != 0 && !would_block(error)) {
 		shutdown(fd, SHUT_RDWR);
 	}
 	return error;
+}
+
+static bool
+would_block(int error)
+{
+	return error == EAGAIN || error == EWOULDBLOCK;
 }
 
 static int
@@ -246,6 +273,11 @@ broker_wire_receive(int fd, struct broker_wire_ahead *ahead,
 	}
 
 	take_ahead(ahead, frame);
+	if (header.type == BROKER_CANCEL) {
+		ahead->lost = false;
+		broker_wire_free(frame);
+		return 0;
+	}
 	if (header.type == BROKER_FDS) {
 		ahead->fds = frame->fds;
 		ahead->count = frame->fd_count;
