@@ -45,6 +45,7 @@
 #include <unistd.h>
 
 #include "bsd/mac.h"
+#include "bsd/responsibility.h"
 #include "commpage.h"
 #include "linker.h"
 #include "osfmk/mach_vm.h"
@@ -70,7 +71,8 @@ static void raise_file_limit(void);
 int
 main(int argc, char *argv[], char *envp[])
 {
-	if (!(personality(0xffffffff) & ADDR_NO_RANDOMIZE)) {
+	if (!responsibility_named()
+			|| !(personality(0xffffffff) & ADDR_NO_RANDOMIZE)) {
 		return restart_without_aslr(argv, envp);
 	}
 
@@ -151,8 +153,13 @@ restart_without_aslr(char *argv[], char *envp[])
 		perror("personality");
 		return 1;
 	}
+	char **env = responsibility_environment(envp);
+	if (env == NULL) {
+		fprintf(stderr, "limbo: cannot name who is responsible\n");
+		return 1;
+	}
 
-	execve("/proc/self/exe", argv, envp);
+	execve("/proc/self/exe", argv, env);
 	perror("execve");
 	return 1;
 }
