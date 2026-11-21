@@ -685,9 +685,9 @@ remote_send(mach_msg_header_t *header, mach_msg_size_t size, ipc_side_t sender,
 
 	release_unused_entries(header);
 	pthread_mutex_unlock(&lock);
-	broker_client_send(dest_global_id, blob, blob_length);
+	mr = broker_client_send(dest_global_id, blob, blob_length);
 	free(blob);
-	return MACH_MSG_SUCCESS;
+	return mr;
 }
 
 static mach_msg_return_t

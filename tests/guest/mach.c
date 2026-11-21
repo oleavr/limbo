@@ -52,6 +52,8 @@ kern_return_t mk_timer_destroy(mach_port_name_t name);
 kern_return_t _kernelrpc_mach_task_is_self(
 		task_name_t task, boolean_t *is_self);
 
+#define LARGEST_MESSAGE (2u << 20)
+
 typedef struct {
 	mach_msg_header_t header;
 	mach_msg_body_t body;
@@ -79,6 +81,8 @@ static atomic_bool forked;
 static void check_space_info(void);
 static void check_messages(void);
 static void check_out_of_line_copies(void);
+static void check_large_messages(void);
+static void check_large_message(mach_msg_size_t size);
 static void check_port_sets(void);
 static void check_receive_on_destroyed(void);
 static mach_msg_return_t receive_on_destroyed(mach_port_right_t right);
@@ -152,6 +156,7 @@ main(void)
 	check_space_info();
 	check_messages();
 	check_out_of_line_copies();
+	check_large_messages();
 	check_port_sets();
 	check_receive_on_destroyed();
 	check_queued_rights_destroyed();
@@ -548,6 +553,47 @@ check_out_of_line_copies(void)
 	CHECK(memcmp(copies[1], payload, sizeof(payload)) == 0);
 	CHECK(vm_deallocate(mach_task_self(), (vm_address_t)copies[1],
 			      sizeof(payload))
+			== KERN_SUCCESS);
+}
+
+static void
+check_large_messages(void)
+{
+	check_large_message(300 * 1024);
+	check_large_message(LARGEST_MESSAGE);
+}
+
+static void
+check_large_message(mach_msg_size_t size)
+{
+	static union {
+		mach_msg_header_t header;
+		char bytes[LARGEST_MESSAGE + sizeof(mach_msg_trailer_t)];
+	} sent, received;
+	mach_port_t port = allocate_port();
+
+	sent.header = (mach_msg_header_t){
+			.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MAKE_SEND, 0),
+			.msgh_size = size,
+			.msgh_remote_port = port,
+	};
+	for (mach_msg_size_t i = sizeof(sent.header); i < size; i++) {
+		sent.bytes[i] = (char)(i * 7 + size);
+	}
+	CHECK(mach_msg(&sent.header, MACH_SEND_MSG, size, 0, MACH_PORT_NULL,
+			      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+
+	CHECK(mach_msg(&received.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof(received), port, 1000, MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	CHECK(received.header.msgh_size == size);
+	CHECK(memcmp(received.bytes + sizeof(received.header),
+			      sent.bytes + sizeof(sent.header),
+			      size - sizeof(sent.header))
+			== 0);
+	CHECK(mach_port_mod_refs(mach_task_self(), port,
+			      MACH_PORT_RIGHT_RECEIVE, -1)
 			== KERN_SUCCESS);
 }
 

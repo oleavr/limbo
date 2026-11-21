@@ -30,13 +30,18 @@
 #include <mach/mach.h>
 #include <mach/ndr.h>
 #include <pthread.h>
+#include <signal.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include "check.h"
 
-#define PORT_COUNT 32
+#define PORT_COUNT   32
+#define OVERSIZED    (2u << 20)
+#define GUARD_TICKS  1000
+#define REAP_TICKS   100
+#define PEER_IDLE_MS 30000
 
 typedef struct {
 	mach_msg_header_t Head;
@@ -53,14 +58,16 @@ typedef struct {
 } bootstrap_reply_t;
 
 static const char SERVICE_NAME[] = "com.limbo.test.ipc";
+static const char PEER_NAME[] = "com.limbo.test.ipc.peer";
 static const mach_msg_id_t CHECK_IN = 402;
 static const mach_msg_id_t LOOK_UP = 404;
 static const mach_msg_id_t REQUEST_ID = 7777;
 static const mach_msg_id_t REPLY_ID = 7877;
+static const mach_msg_id_t QUIT_ID = 7900;
 static const char REQUEST_DATA[] = "out of line";
 
 static mach_port_t
-bootstrap_call(mach_msg_id_t id)
+bootstrap_call(mach_msg_id_t id, const char *name)
 {
 	mach_port_t reply_port;
 	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &reply_port);
@@ -80,7 +87,7 @@ bootstrap_call(mach_msg_id_t id)
 	message.request.Head.msgh_id = id;
 	message.request.Head.msgh_size = sizeof(bootstrap_request_t);
 	message.request.NDR = NDR_record;
-	strncpy(message.request.name, SERVICE_NAME, sizeof(message.request.name) - 1);
+	strncpy(message.request.name, name, sizeof(message.request.name) - 1);
 
 	kern_return_t kr = mach_msg(&message.request.Head,
 			MACH_SEND_MSG | MACH_RCV_MSG, sizeof(bootstrap_request_t),
@@ -174,7 +181,7 @@ destroy_with_queued_request(mach_port_t service)
 static void
 serve(void)
 {
-	mach_port_t service = bootstrap_call(CHECK_IN);
+	mach_port_t service = bootstrap_call(CHECK_IN, SERVICE_NAME);
 	CHECK(service != MACH_PORT_NULL);
 
 	receive_dead_names(service);
@@ -293,17 +300,24 @@ move_receive_right_away(mach_port_t service)
 	CHECK((uintptr_t)result == MACH_RCV_PORT_CHANGED);
 }
 
-static void
-call(void)
+static mach_port_t
+look_up(const char *name)
 {
 	mach_port_t service = MACH_PORT_NULL;
 	for (int attempt = 0; attempt != 50 && service == MACH_PORT_NULL; attempt++) {
-		service = bootstrap_call(LOOK_UP);
+		service = bootstrap_call(LOOK_UP, name);
 		if (service == MACH_PORT_NULL) {
 			usleep(100000);
 		}
 	}
 	CHECK(service != MACH_PORT_NULL);
+	return service;
+}
+
+static void
+call(void)
+{
+	mach_port_t service = look_up(SERVICE_NAME);
 
 	send_dead_names(service);
 	mach_port_t abandoned;
@@ -426,6 +440,122 @@ call(void)
 	move_receive_right_away(service);
 }
 
+static void
+serve_peer(void)
+{
+	mach_port_t service = bootstrap_call(CHECK_IN, PEER_NAME);
+	CHECK(service != MACH_PORT_NULL);
+
+	for (;;) {
+		struct {
+			mach_msg_header_t Head;
+			mach_msg_trailer_t trailer;
+		} message;
+		kern_return_t kr = mach_msg(&message.Head,
+				MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+				sizeof(message), service, PEER_IDLE_MS,
+				MACH_PORT_NULL);
+		CHECK(kr == MACH_MSG_SUCCESS);
+		if (message.Head.msgh_id == QUIT_ID) {
+			return;
+		}
+	}
+}
+
+static pid_t
+start(void (*role)(void))
+{
+	pid_t pid = fork();
+	CHECK(pid >= 0);
+	if (pid == 0) {
+		role();
+		_exit(0);
+	}
+	return pid;
+}
+
+static pid_t
+guard(pid_t child)
+{
+	pid_t parent = getpid();
+	pid_t pid = fork();
+	CHECK(pid >= 0);
+	if (pid == 0) {
+		int ticks = 0;
+		while (ticks != GUARD_TICKS && getppid() == parent) {
+			usleep(100000);
+			ticks++;
+		}
+		kill(child, SIGKILL);
+		if (ticks == GUARD_TICKS) {
+			kill(parent, SIGKILL);
+		}
+		_exit(0);
+	}
+	return pid;
+}
+
+static int
+reap(pid_t pid)
+{
+	int status = 0;
+	pid_t reaped = 0;
+	for (int ticks = 0; ticks != REAP_TICKS && reaped == 0; ticks++) {
+		reaped = waitpid(pid, &status, WNOHANG);
+		if (reaped == 0) {
+			usleep(100000);
+		}
+	}
+	CHECK(reaped == pid);
+	return status;
+}
+
+static void
+send_quit(mach_port_t port)
+{
+	mach_msg_header_t quit = {
+			.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0),
+			.msgh_size = sizeof(quit),
+			.msgh_remote_port = port,
+			.msgh_id = QUIT_ID,
+	};
+	send_request(&quit);
+}
+
+static void
+check_oversized(mach_port_t port)
+{
+	static union {
+		mach_msg_header_t Head;
+		char bytes[OVERSIZED];
+	} message;
+	message.Head = (mach_msg_header_t){
+			.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0),
+			.msgh_size = sizeof(message),
+			.msgh_remote_port = port,
+	};
+	kern_return_t kr = mach_msg(&message.Head, MACH_SEND_MSG,
+			sizeof(message), 0, MACH_PORT_NULL,
+			MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	CHECK(kr == MACH_SEND_TOO_LARGE);
+}
+
+static void
+check_transport(void)
+{
+	pid_t peer = start(serve_peer);
+	pid_t guardian = guard(peer);
+	mach_port_t port = look_up(PEER_NAME);
+
+	check_oversized(port);
+
+	send_quit(port);
+	int status = reap(peer);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	kill(guardian, SIGKILL);
+	reap(guardian);
+}
+
 int
 main(void)
 {
@@ -441,5 +571,7 @@ main(void)
 	int status;
 	waitpid(pid, &status, 0);
 	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+
+	check_transport();
 	return 0;
 }
