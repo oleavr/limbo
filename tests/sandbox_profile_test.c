@@ -25,6 +25,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -418,12 +419,22 @@ static void check_parsed(void);
 static void check_malformed(void);
 static size_t build(uint8_t *out, const uint8_t *pattern, size_t length);
 static uint32_t enforced_of(const uint8_t *data, size_t size);
+static void check_built(void);
+static void check_path_filters(void);
+static void check_homebrew(void);
+static void check_other_filters(void);
+static void check_earlier_table(void);
 
 int
 main(void)
 {
 	check_parsed();
 	check_malformed();
+	check_built();
+	check_path_filters();
+	check_homebrew();
+	check_other_filters();
+	check_earlier_table();
 	return 0;
 }
 
@@ -516,4 +527,165 @@ enforced_of(const uint8_t *data, size_t size)
 	uint32_t enforced = profile.enforced;
 	sandbox_profile_free(&profile);
 	return enforced;
+}
+
+static void
+check_built(void)
+{
+	static const uint8_t under_x[] = {0x41, '/', 'x', 0x0f, 0x0a};
+	uint8_t built[1024];
+	size_t size = build(built, under_x, sizeof(under_x));
+	struct sandbox_profile profile;
+	CHECK(sandbox_profile_parse(&profile, built, size));
+	CHECK(sandbox_profile_decide(&profile, SANDBOX_FILE_WRITE_DATA, "/x")
+			== SANDBOX_DENY);
+	CHECK(sandbox_profile_decide(&profile, SANDBOX_FILE_WRITE_DATA, "/y")
+			== SANDBOX_ALLOW);
+	sandbox_profile_free(&profile);
+
+	built[UNMATCH_AT] = 0;
+	CHECK(sandbox_profile_parse(&profile, built, size));
+	CHECK(sandbox_profile_decide(&profile, SANDBOX_FILE_WRITE_DATA, "/x")
+			== SANDBOX_DENY);
+	CHECK(sandbox_profile_decide(&profile, SANDBOX_FILE_WRITE_DATA, "/y")
+			== SANDBOX_ALLOW);
+	sandbox_profile_free(&profile);
+
+	uint8_t skips[3 * SKIP_PAST_MAX + 1];
+	for (int i = 0; i != SKIP_PAST_MAX; i++) {
+		memcpy(skips + 3 * i, (uint8_t[]){0x03, 'a', 0x0f}, 3);
+	}
+	skips[3 * SKIP_PAST_MAX] = 0x0a;
+	size = build(built, skips, sizeof(skips));
+	CHECK(sandbox_profile_parse(&profile, built, size));
+	char path[PATH_MAX];
+	memset(path, 'a', sizeof(path));
+	path[SKIP_PAST_MAX] = '\0';
+	CHECK(sandbox_profile_decide(&profile, SANDBOX_FILE_WRITE_DATA, path)
+			== SANDBOX_DENY);
+	path[SKIP_PAST_MAX - 1] = 'b';
+	CHECK(sandbox_profile_decide(&profile, SANDBOX_FILE_WRITE_DATA, path)
+			== SANDBOX_ALLOW);
+	sandbox_profile_free(&profile);
+}
+
+static void
+check_path_filters(void)
+{
+	struct sandbox_profile profile;
+	CHECK(sandbox_profile_parse(
+			&profile, path_filters_27, sizeof(path_filters_27)));
+	static const struct {
+		const char *path;
+		enum sandbox_decision decision;
+	} cases[] = {
+			{"/private/tmp/sbt/ok", SANDBOX_ALLOW},
+			{"/private/tmp/sbt/no", SANDBOX_DENY},
+			{"/private/tmp/sbt/r12", SANDBOX_ALLOW},
+			{"/private/tmp/sbt/r1x", SANDBOX_DENY},
+			{"/private/tmp/sbt/r", SANDBOX_DENY},
+			{"/private/tmp/sbt/Sub/a", SANDBOX_ALLOW},
+			{"/private/tmp/sbt/sub/b", SANDBOX_ALLOW},
+			{"/private/tmp/sbt/OK", SANDBOX_ALLOW},
+			{"/private/tmp/sbt/prefix", SANDBOX_ALLOW},
+			{"/private/tmp/sbt/pre", SANDBOX_ALLOW},
+			{"/private/tmp/sbt/a/zz", SANDBOX_ALLOW},
+			{"/private/tmp/sbt/a/zzz", SANDBOX_DENY},
+			{"/private/tmp/sbt", SANDBOX_DENY},
+			{"/private/tmp/sbt/newdir", SANDBOX_DENY},
+			{"/private/tmp/other", SANDBOX_ALLOW},
+	};
+	for (size_t i = 0; i != sizeof(cases) / sizeof(*cases); i++) {
+		CHECK(sandbox_profile_decide(&profile,
+				      SANDBOX_FILE_WRITE_CREATE, cases[i].path)
+				== cases[i].decision);
+	}
+	CHECK(sandbox_profile_decide(&profile, SANDBOX_FILE_WRITE_DATA,
+			      "/private/tmp/sbt/no")
+			== SANDBOX_DENY);
+	CHECK(sandbox_profile_decide(&profile, SANDBOX_FILE_WRITE_ALL - 1,
+			      "/private/tmp/sbt/no")
+			== SANDBOX_UNENFORCED);
+	sandbox_profile_free(&profile);
+}
+
+static void
+check_homebrew(void)
+{
+	struct sandbox_profile profile;
+	CHECK(sandbox_profile_parse(
+			&profile, homebrew_27, sizeof(homebrew_27)));
+	static const char unpack[] = "/opt/homebrew/var/homebrew/tmp/.cellar/"
+				     "verify-20261104-269092-qeweki/"
+				     "homebrew-unpack-20261104-269092-ft5k0s";
+	CHECK(sandbox_profile_decide(&profile, SANDBOX_FILE_WRITE_DATA,
+			      "/opt/homebrew/bin/brew")
+			== SANDBOX_DENY);
+	CHECK(sandbox_profile_decide(&profile, SANDBOX_FILE_WRITE_DATA,
+			      "/opt/homebrew/Library/Homebrew/sandbox.rb")
+			== SANDBOX_DENY);
+	CHECK(sandbox_profile_decide(
+			      &profile, SANDBOX_FILE_WRITE_CREATE, unpack)
+			== SANDBOX_ALLOW);
+	char inside[256];
+	snprintf(inside, sizeof(inside), "%s/wget/bin/wget", unpack);
+	CHECK(sandbox_profile_decide(
+			      &profile, SANDBOX_FILE_WRITE_CREATE, inside)
+			== SANDBOX_ALLOW);
+	snprintf(inside, sizeof(inside), "%sx", unpack);
+	CHECK(sandbox_profile_decide(
+			      &profile, SANDBOX_FILE_WRITE_CREATE, inside)
+			== SANDBOX_DENY);
+	CHECK(sandbox_profile_decide(
+			      &profile, SANDBOX_FILE_WRITE_DATA, "/dev/null")
+			== SANDBOX_ALLOW);
+	CHECK(sandbox_profile_decide(
+			      &profile, SANDBOX_FILE_WRITE_DATA, "/dev/ttys001")
+			== SANDBOX_ALLOW);
+	CHECK(sandbox_profile_decide(
+			      &profile, SANDBOX_FILE_WRITE_DATA, "/dev/fd/12")
+			== SANDBOX_ALLOW);
+	CHECK(sandbox_profile_decide(
+			      &profile, SANDBOX_FILE_WRITE_DATA, "/dev/fd/")
+			== SANDBOX_DENY);
+	CHECK(sandbox_profile_decide(&profile, SANDBOX_FILE_WRITE_CREATE,
+			      "/private/tmp/x")
+			== SANDBOX_DENY);
+	CHECK(sandbox_profile_decide(&profile, SANDBOX_FILE_WRITE_MODE,
+			      "/opt/homebrew/bin/brew")
+			== SANDBOX_DENY);
+	sandbox_profile_free(&profile);
+}
+
+static void
+check_other_filters(void)
+{
+	struct sandbox_profile profile;
+	CHECK(sandbox_profile_parse(
+			&profile, other_filters_27, sizeof(other_filters_27)));
+	CHECK(sandbox_profile_decide(
+			      &profile, SANDBOX_FILE_WRITE_CREATE, "/xab")
+			== SANDBOX_UNENFORCED);
+	sandbox_profile_free(&profile);
+}
+
+static void
+check_earlier_table(void)
+{
+	struct sandbox_profile profile;
+	CHECK(sandbox_profile_parse(
+			&profile, denied_folder_26, sizeof(denied_folder_26)));
+	CHECK(sandbox_profile_decide(&profile, SANDBOX_FILE_WRITE_CREATE,
+			      "/private/tmp/limbo-sandbox-denied/file")
+			== SANDBOX_DENY);
+	CHECK(sandbox_profile_decide(&profile, SANDBOX_FILE_WRITE_CREATE,
+			      "/private/tmp/limbo-sandbox-allowed")
+			== SANDBOX_ALLOW);
+	CHECK(sandbox_profile_decide(&profile, SANDBOX_FILE_WRITE_UNLINK,
+			      "/private/tmp/limbo-sandbox-denied/file")
+			== SANDBOX_DENY);
+	CHECK(sandbox_profile_decide(&profile, SANDBOX_FILE_WRITE_DATA,
+			      "/private/tmp/other")
+			== SANDBOX_ALLOW);
+	sandbox_profile_free(&profile);
 }
