@@ -26,6 +26,8 @@
  */
 
 #include "bsd/sandbox_profile.h"
+#include <ctype.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -62,6 +64,7 @@
 #define LONG_LITERAL_MIN 65
 #define RANGES_REPEAT    0x80
 #define FAIL_FAR_MIN     129
+#define KEPT_MAX         32
 #define SKIP_PAST_MAX    16
 #define NO_MATCH         SIZE_MAX
 
@@ -71,6 +74,14 @@ struct node {
 	uint16_t argument;
 	uint16_t match;
 	uint16_t unmatch;
+};
+
+struct match {
+	const char *s;
+	size_t n;
+	size_t pos;
+	size_t kept[KEPT_MAX];
+	size_t kept_count;
 };
 
 static uint16_t read16(const uint8_t *p);
@@ -88,6 +99,12 @@ static bool instruction(const uint8_t *p, size_t length, size_t pc,
 		size_t *size, bool *can_fail);
 static bool failure_target(const uint8_t *p, size_t length, size_t pc,
 		size_t *size, size_t *target);
+static bool run(const uint8_t *p, size_t length, size_t pc, struct match m);
+static bool step(uint8_t op, const uint8_t *operand, struct match *m);
+static bool in_ranges(const uint8_t *operand, char c);
+static bool skip_past(const uint8_t *p, size_t length, size_t pc, uint8_t c,
+		struct match m);
+static bool test(uint8_t op, const uint8_t *operand, struct match *m);
 
 bool
 sandbox_profile_parse(
@@ -307,4 +324,154 @@ sandbox_profile_free(struct sandbox_profile *profile)
 {
 	free(profile->data);
 	memset(profile, 0, sizeof(*profile));
+}
+
+enum sandbox_decision
+sandbox_profile_decide(const struct sandbox_profile *profile, int operation,
+		const char *path)
+{
+	if (operation < SANDBOX_FILE_WRITE_ALL
+			|| operation > SANDBOX_FILE_WRITE_XATTR
+			|| !(profile->enforced & SANDBOX_ENFORCED(operation))) {
+		return SANDBOX_UNENFORCED;
+	}
+	char folded[PATH_MAX];
+	struct match start = {.s = folded};
+	start.n = strnlen(path, sizeof(folded) - 1);
+	for (size_t i = 0; i != start.n; i++) {
+		folded[i] = (char)tolower((unsigned char)path[i]);
+	}
+	folded[start.n] = '\0';
+
+	uint16_t index = start_node(profile, operation);
+	for (size_t steps = 0; steps <= profile->node_count; steps++) {
+		struct node node = node_at(profile, index);
+		if (node.kind == KIND_DECISION) {
+			return (node.value & DECISION_DENY) ? SANDBOX_DENY
+							    : SANDBOX_ALLOW;
+		}
+		size_t length;
+		const uint8_t *pattern
+				= blob_at(profile, node.argument, &length);
+		index = run(pattern, length, 0, start) ? node.match
+						       : node.unmatch;
+	}
+	return SANDBOX_ALLOW;
+}
+
+static bool
+run(const uint8_t *p, size_t length, size_t pc, struct match m)
+{
+	while (pc < length) {
+		size_t size, target;
+		bool can_fail;
+		if (!instruction(p, length, pc, &size, &can_fail)) {
+			return false;
+		}
+		uint8_t op = p[pc];
+		const uint8_t *operand = p + pc + 1;
+		size_t next = pc + size;
+		if (op == OP_MATCH) {
+			return true;
+		}
+		if (!can_fail) {
+			if (!step(op, operand, &m)) {
+				return false;
+			}
+			pc = next;
+			continue;
+		}
+		if (!failure_target(p, length, next, &size, &target)) {
+			return false;
+		}
+		next += size;
+		if (op == OP_SKIP_PAST
+				&& skip_past(p, length, next, *operand, m)) {
+			return true;
+		}
+		if (test(op, operand, &m)) {
+			pc = next;
+		} else if (target == NO_MATCH) {
+			return false;
+		} else {
+			pc = target;
+		}
+	}
+	return false;
+}
+
+static bool
+step(uint8_t op, const uint8_t *operand, struct match *m)
+{
+	if (op == OP_KEEP) {
+		if (m->kept_count == KEPT_MAX) {
+			return false;
+		}
+		m->kept[m->kept_count++] = m->pos;
+	} else if (op == OP_RANGES) {
+		while (m->pos < m->n && in_ranges(operand, m->s[m->pos])) {
+			m->pos++;
+		}
+	} else {
+		if (m->kept_count == 0) {
+			return false;
+		}
+		m->kept_count--;
+		if (op == OP_RESTORE) {
+			m->pos = m->kept[m->kept_count];
+		}
+	}
+	return true;
+}
+
+static bool
+in_ranges(const uint8_t *operand, char c)
+{
+	size_t count = (size_t)(operand[0] & ~RANGES_REPEAT) + 1;
+	const uint8_t *range = operand + 1;
+	for (size_t i = 0; i != count; i++, range += 2) {
+		if ((uint8_t)c >= range[0] && (uint8_t)c <= range[1]) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool
+skip_past(const uint8_t *p, size_t length, size_t pc, uint8_t c, struct match m)
+{
+	const char *at = memchr(m.s + m.pos, c, m.n - m.pos);
+	while (at != NULL) {
+		m.pos = (size_t)(at - m.s) + 1;
+		if (run(p, length, pc, m)) {
+			return true;
+		}
+		at = memchr(m.s + m.pos, c, m.n - m.pos);
+	}
+	return false;
+}
+
+static bool
+test(uint8_t op, const uint8_t *operand, struct match *m)
+{
+	if (op == OP_END) {
+		return m->pos == m->n;
+	}
+	if (op == OP_SKIP_PAST) {
+		return false;
+	}
+	if (op == OP_RANGES) {
+		bool in = m->pos < m->n && in_ranges(operand, m->s[m->pos]);
+		m->pos += in;
+		return in;
+	}
+	bool is_long = op == OP_LONG_LITERAL;
+	size_t count = is_long ? (size_t)operand[0] + LONG_LITERAL_MIN
+			       : (size_t)(op - OP_LITERAL) + 1;
+	const uint8_t *bytes = is_long ? operand + 1 : operand;
+	if (m->n - m->pos < count || memcmp(m->s + m->pos, bytes, count) != 0) {
+		return false;
+	}
+	m->pos += count;
+	return true;
 }
