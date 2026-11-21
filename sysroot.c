@@ -65,9 +65,12 @@ static size_t root_length;
 static char too_long[PATH_MAX + 1];
 static dev_t devices[DEVICES_MAX];
 static size_t device_count;
+static char **firmlinks;
+static size_t firmlink_count;
 
 static void note_devices(void);
 static const char *unescaped(char *field);
+static void load_firmlinks(void);
 static bool leads_on(
 		int dirfd, const char *path, const char *host, char *target);
 static const char *host_path(const char *path, int flags, char *buffer);
@@ -76,6 +79,7 @@ static bool covers(const char *path);
 static const char *in_root(const char *path, char *buffer);
 static int open_in_root(const char *path, int flags, uint64_t resolve);
 static ssize_t read_fd_path(int fd, char *buffer);
+static bool on_data_volume(const char *host_path);
 
 int
 sysroot_open(void)
@@ -97,6 +101,7 @@ sysroot_open(void)
 		root_ino = s.st_ino;
 	}
 	note_devices();
+	load_firmlinks();
 
 	return 0;
 }
@@ -150,6 +155,28 @@ unescaped(char *field)
 	}
 	*out = '\0';
 	return field;
+}
+
+static void
+load_firmlinks(void)
+{
+	char path[PATH_MAX + sizeof("/usr/share/firmlinks")];
+	snprintf(path, sizeof(path), "%s/usr/share/firmlinks", root);
+	FILE *file = fopen(path, "re");
+	if (file == NULL) {
+		return;
+	}
+	char line[PATH_MAX];
+	while (fgets(line, sizeof(line), file) != NULL) {
+		line[strcspn(line, "\t\n")] = '\0';
+		if (line[0] != '/' || line[1] == '\0') {
+			continue;
+		}
+		firmlinks = realloc(firmlinks,
+				(firmlink_count + 1) * sizeof(*firmlinks));
+		firmlinks[firmlink_count++] = strdup(line);
+	}
+	fclose(file);
 }
 
 const char *
@@ -399,4 +426,65 @@ sysroot_device(dev_t dev)
 		}
 	}
 	return dev;
+}
+
+dev_t
+sysroot_root_device(void)
+{
+	return root_dev;
+}
+
+bool
+sysroot_fd_on_data_volume(int fd)
+{
+	char link[48], host[PATH_MAX];
+	snprintf(link, sizeof(link), "/proc/thread-self/fd/%d", fd);
+	ssize_t length = readlink(link, host, sizeof(host) - 1);
+	if (length == -1) {
+		return false;
+	}
+	host[length] = '\0';
+	return on_data_volume(host);
+}
+
+static bool
+on_data_volume(const char *host_path)
+{
+	const char *guest = sysroot_guest_path(host_path);
+	if (guest == host_path) {
+		return false;
+	}
+	for (size_t i = 0; i < firmlink_count; i++) {
+		if (under(guest, firmlinks[i])) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool
+sysroot_at_on_data_volume(int dirfd, const char *path, const char *host_path)
+{
+	if (path == NULL || path[0] == '\0') {
+		return sysroot_fd_on_data_volume(dirfd);
+	}
+	if (path[0] == '/') {
+		return under(path, DATA_VOLUME) || on_data_volume(host_path);
+	}
+	char folder[PATH_MAX], joined[PATH_MAX * 2];
+	if (dirfd == AT_FDCWD) {
+		if (getcwd(folder, sizeof(folder)) == NULL) {
+			return false;
+		}
+	} else {
+		char link[48];
+		snprintf(link, sizeof(link), "/proc/thread-self/fd/%d", dirfd);
+		ssize_t length = readlink(link, folder, sizeof(folder) - 1);
+		if (length == -1) {
+			return false;
+		}
+		folder[length] = '\0';
+	}
+	snprintf(joined, sizeof(joined), "%s/%s", folder, path);
+	return on_data_volume(joined);
 }

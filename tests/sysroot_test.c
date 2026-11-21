@@ -55,6 +55,7 @@ static void populate(void);
 static bool mount_volume(void);
 static bool write_file(const char *path, const char *text);
 static void check_devices(void);
+static void check_data_volume(void);
 static void check_too_long(void);
 static void make_dir(const char *path);
 static void make_file(const char *path);
@@ -84,6 +85,7 @@ main(int argc, char *argv[])
 	if (mounts) {
 		check_devices();
 	}
+	check_data_volume();
 
 	check_host_path("/System/Library/file", 0, "/System/Library/file");
 	check_host_path("/absolute/file", 0, "/System/Library/file");
@@ -149,6 +151,12 @@ populate(void)
 	make_link("dangling", "/dangling-chain");
 	make_link("../../new", "/dangling-outside");
 	make_dir("/proc");
+	make_dir("/usr");
+	make_dir("/usr/share");
+	make_file("/usr/share/firmlinks");
+	char firmlinks[PATH_MAX * 2];
+	snprintf(firmlinks, sizeof(firmlinks), "%s/usr/share/firmlinks", root);
+	CHECK(write_file(firmlinks, "/private\tprivate\n/Users\tUsers\n"));
 }
 
 static bool
@@ -199,6 +207,32 @@ check_devices(void)
 	CHECK(sysroot_file_id(top.st_dev, top.st_ino) == 2);
 	snprintf(path, sizeof(path), "%s/Volumes", root);
 	CHECK(umount(path) == 0);
+}
+
+static void
+check_data_volume(void)
+{
+	char host[PATH_MAX * 2];
+	snprintf(host, sizeof(host), "%s/private/etc", root);
+	CHECK(sysroot_at_on_data_volume(AT_FDCWD, "/private/etc", host));
+	CHECK(sysroot_at_on_data_volume(AT_FDCWD, "/etc", host));
+	int fd = open(host, O_RDONLY);
+	CHECK(fd != -1);
+	CHECK(sysroot_fd_on_data_volume(fd));
+	CHECK(sysroot_at_on_data_volume(fd, "", ""));
+	CHECK(sysroot_at_on_data_volume(fd, "new", "new"));
+	close(fd);
+
+	snprintf(host, sizeof(host), "%s/System/Library", root);
+	CHECK(!sysroot_at_on_data_volume(AT_FDCWD, "/System/Library", host));
+	CHECK(sysroot_at_on_data_volume(
+			AT_FDCWD, "/System/Volumes/Data/System/Library", host));
+	fd = open(host, O_RDONLY);
+	CHECK(fd != -1);
+	CHECK(!sysroot_fd_on_data_volume(fd));
+	CHECK(!sysroot_at_on_data_volume(fd, "file", "file"));
+	close(fd);
+	CHECK(!sysroot_at_on_data_volume(AT_FDCWD, "/privateer", "/privateer"));
 }
 
 static void

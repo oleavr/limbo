@@ -32,6 +32,7 @@
 #endif
 #include <errno.h>
 #include <fcntl.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -120,7 +121,7 @@ static int stat_at(int fd, const char *path, int flags,
 static int stat_extended_at(int fd, const char *path, int flags,
 		struct __darwin_user64_stat64 *ub, void *xsecurity,
 		uint64_t *xsecurity_size);
-static void convert_statfs(const struct statfs *src, dev_t device,
+static void convert_statfs(const struct statfs *src, dev_t device, bool data,
 		struct __darwin_struct_statfs64 *dest);
 static void convert_statx(
 		struct statx *stat, struct __darwin_user64_stat64 *dest);
@@ -303,12 +304,13 @@ sys_statfs64(char *path, void *buf)
 	if (statfs(host_path, &tmp) == -1 || stat(host_path, &st) == -1) {
 		return err_map(errno);
 	}
-	convert_statfs(&tmp, st.st_dev, buf);
+	bool data = sysroot_at_on_data_volume(AT_FDCWD, path, host_path);
+	convert_statfs(&tmp, st.st_dev, data, buf);
 	return 0;
 }
 
 static void
-convert_statfs(const struct statfs *src, dev_t device,
+convert_statfs(const struct statfs *src, dev_t device, bool data,
 		struct __darwin_struct_statfs64 *dest)
 {
 	memset(dest, 0, sizeof(*dest));
@@ -322,13 +324,17 @@ convert_statfs(const struct statfs *src, dev_t device,
 	dest->f_files = src->f_files;
 	dest->f_ffree = src->f_ffree;
 	/* TODO: These are not going to be compatible */
-	dest->f_fsid.__val[0] = darwin_device(device);
+	dest->f_fsid.__val[0] = darwin_fsid(
+			sysroot_device(device), sysroot_root_device(), data);
 	dest->f_fsid.__val[1] = DARWIN_FSTYPE_APFS;
 	dest->f_type = src->f_type;
-	dest->f_flags = DARWIN_MOUNT_FLAGS;
+	dest->f_flags = data ? DARWIN_DATA_MOUNT_FLAGS : DARWIN_MOUNT_FLAGS;
 	strcpy(dest->f_fstypename, "apfs");
-	strcpy(dest->f_mntonname, "/");
-	strcpy(dest->f_mntfromname, "/dev/disk1s1");
+	strcpy(dest->f_mntonname, data ? DARWIN_DATA_MOUNT_ON : "/");
+	strcpy(dest->f_mntfromname,
+			data ? DARWIN_DATA_MOUNT_FROM
+			     : DARWIN_SYSTEM_MOUNT_FROM);
+	dest->f_flags_ext = data ? MNT_EXT_ROOT_DATA_VOL : 0;
 }
 
 int
@@ -339,7 +345,7 @@ sys_fstatfs64(int fd, void *buf)
 	if (fstatfs(fd, &tmp) == -1 || fstat(fd, &st) == -1) {
 		return err_map(errno);
 	}
-	convert_statfs(&tmp, st.st_dev, buf);
+	convert_statfs(&tmp, st.st_dev, sysroot_fd_on_data_volume(fd), buf);
 	return 0;
 }
 
@@ -359,7 +365,7 @@ sys_getfsstat64(user_addr_t buf, int bufsize, int flags)
 	if (statfs(host_path, &tmp) == -1 || stat(host_path, &st) == -1) {
 		return err_map(errno);
 	}
-	convert_statfs(&tmp, st.st_dev, buf);
+	convert_statfs(&tmp, st.st_dev, false, buf);
 	return 1;
 }
 

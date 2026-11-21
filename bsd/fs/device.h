@@ -1,5 +1,6 @@
 /*
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -27,15 +28,18 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
 
 #define DARWIN_FSTYPE_APFS 0x1a
 
+#define DARWIN_MNT_CPROTECT   0x00000080
 #define DARWIN_MNT_LOCAL      0x00001000
 #define DARWIN_MNT_ROOTFS     0x00004000
 #define DARWIN_MNT_DOVOLFS    0x00008000
+#define DARWIN_MNT_DONTBROWSE 0x00100000
 #define DARWIN_MNT_JOURNALED  0x00800000
 #define DARWIN_MNT_MULTILABEL 0x04000000
 #define DARWIN_MNT_SNAPSHOT   0x40000000
@@ -44,9 +48,26 @@
 	(DARWIN_MNT_LOCAL | DARWIN_MNT_ROOTFS | DARWIN_MNT_DOVOLFS             \
 			| DARWIN_MNT_JOURNALED | DARWIN_MNT_MULTILABEL         \
 			| DARWIN_MNT_SNAPSHOT)
+#define DARWIN_DATA_MOUNT_FLAGS                                                \
+	(DARWIN_MNT_CPROTECT | DARWIN_MNT_LOCAL | DARWIN_MNT_DOVOLFS           \
+			| DARWIN_MNT_DONTBROWSE | DARWIN_MNT_JOURNALED         \
+			| DARWIN_MNT_MULTILABEL)
+
+#define DARWIN_SYSTEM_MOUNT_FROM "/dev/disk1s1"
+#define DARWIN_DATA_MOUNT_FROM   "/dev/disk1s5"
+#define DARWIN_DATA_MOUNT_ON     "/System/Volumes/Data"
+
+#define DARWIN_SYSTEM_FSID_OFFSET 2
 
 static inline int32_t
 darwin_device(dev_t dev)
 {
 	return (major(dev) << 24) | minor(dev);
+}
+
+static inline int32_t
+darwin_fsid(dev_t dev, dev_t volume_group, bool data)
+{
+	bool system = dev == volume_group && !data;
+	return darwin_device(dev) + (system ? DARWIN_SYSTEM_FSID_OFFSET : 0);
 }
