@@ -32,9 +32,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/attr.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
 #include "check.h"
@@ -57,6 +59,7 @@ static int remove_entry(const char *path, const struct stat *st, int type,
 static void check_defaults(void);
 static void check_kept(void);
 static void check_attrlist(void);
+static void check_hidden(void);
 static void check_copy(void);
 static void check_user(void);
 static void user_sets(void);
@@ -83,6 +86,7 @@ main(void)
 	check_defaults();
 	check_kept();
 	check_attrlist();
+	check_hidden();
 	check_copy();
 	check_user();
 
@@ -188,6 +192,39 @@ check_attrlist(void)
 
 	CHECK(unlink("listed/file") == 0);
 	CHECK(rmdir("listed") == 0);
+}
+
+static void
+check_hidden(void)
+{
+	CHECK(mkdir("hidden", 0755) == 0);
+	CHECK(set_class("hidden", CLASS_A) == 0);
+
+	char names[1024];
+	ssize_t length = listxattr("hidden", names, sizeof(names), 0);
+	CHECK(length >= 0);
+	for (const char *name = names; name < names + length;
+			name += strlen(name) + 1) {
+		CHECK(strstr(name, "limbo") == NULL);
+	}
+	uint32_t value = CLASS_B;
+	errno = 0;
+	CHECK(getxattr("hidden", "limbo.protection_class", &value,
+			      sizeof(value), 0, 0)
+			== -1);
+	CHECK(errno == ENOATTR);
+	if (setxattr("hidden", "limbo.protection_class", &value, sizeof(value),
+			    0, 0)
+			== 0) {
+		CHECK(removexattr("hidden", "limbo.protection_class", 0) == 0);
+	} else {
+		CHECK(errno == EPERM);
+		CHECK(removexattr("hidden", "limbo.protection_class", 0) == -1);
+		CHECK(errno == EPERM);
+	}
+	CHECK(class_of("hidden") == CLASS_A);
+
+	CHECK(rmdir("hidden") == 0);
 }
 
 static void
