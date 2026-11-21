@@ -27,7 +27,9 @@
  */
 
 #include <dispatch/dispatch.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <libproc.h>
 #include <limits.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
@@ -82,10 +84,14 @@ static void check_thread_times(void);
 static void *spin_then_wait(void *arg);
 static uint64_t cpu_microseconds(pthread_t thread);
 static uint64_t microseconds(time_value_t time);
+static void check_thread_name(void);
+static thread_extended_info_data_t extended_info(void);
 static void check_task_threads(void);
 static void *wait_until_listed(void *arg);
 
 extern int __pthread_fchdir(int fd);
+extern int __proc_info(int callnum, int pid, int flavor, uint64_t arg,
+		void *buffer, int buffersize);
 
 int
 main(void)
@@ -169,6 +175,7 @@ main(void)
 
 	check_identifiers();
 	check_thread_times();
+	check_thread_name();
 	check_task_threads();
 	return 0;
 }
@@ -418,6 +425,41 @@ static uint64_t
 microseconds(time_value_t time)
 {
 	return (uint64_t)time.seconds * 1000000 + time.microseconds;
+}
+
+static void
+check_thread_name(void)
+{
+	enum { PROC_INFO_CALL_SETCONTROL = 5 };
+	char name[MAXTHREADNAMESIZE + 1];
+	memset(name, 'n', sizeof(name));
+	CHECK(__proc_info(PROC_INFO_CALL_SETCONTROL, getpid(),
+			      PROC_SELFSET_THREADNAME, 0, name,
+			      MAXTHREADNAMESIZE)
+			== -1);
+	CHECK(errno == ENAMETOOLONG);
+	CHECK(__proc_info(PROC_INFO_CALL_SETCONTROL, getpid(),
+			      PROC_SELFSET_THREADNAME, 0, name,
+			      MAXTHREADNAMESIZE - 1)
+			== 0);
+	CHECK(strlen(extended_info().pth_name) == MAXTHREADNAMESIZE - 1);
+
+	const char *longer_than_comm = "a name longer than fifteen bytes";
+	CHECK(pthread_setname_np(longer_than_comm) == 0);
+	CHECK(strcmp(extended_info().pth_name, longer_than_comm) == 0);
+	CHECK(pthread_setname_np("") == 0);
+	CHECK(extended_info().pth_name[0] == '\0');
+}
+
+static thread_extended_info_data_t
+extended_info(void)
+{
+	thread_extended_info_data_t info;
+	mach_msg_type_number_t count = THREAD_EXTENDED_INFO_COUNT;
+	CHECK(thread_info(mach_thread_self(), THREAD_EXTENDED_INFO,
+			      (thread_info_t)&info, &count)
+			== KERN_SUCCESS);
+	return info;
 }
 
 static void
