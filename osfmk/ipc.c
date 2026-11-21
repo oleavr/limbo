@@ -1835,8 +1835,17 @@ ipc_service_register(const char *name, mach_port_name_t port)
 	struct ipc_entry *entry = lookup(port);
 	if (entry->type & MACH_PORT_TYPE_RECEIVE) {
 		count_sender_guest(entry->port, BROKER_GUEST_ID, 1);
+	} else if (entry->port->remote) {
+		queue_notice((struct pending_notice){
+				.global_id = global_id,
+				.notice = {
+						.kind = REMOTE_NOTICE_ADD,
+						.guest_id = BROKER_GUEST_ID,
+				},
+		});
 	}
 	pthread_mutex_unlock(&lock);
+	flush_notices();
 	broker_client_register(name, global_id);
 }
 
