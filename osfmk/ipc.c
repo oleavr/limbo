@@ -395,12 +395,17 @@ static void
 ipc_fork_child(void)
 {
 	arrival_waiters = NULL;
-	while (pending_notices != NULL) {
-		struct pending_notice *notice = pending_notices;
-		pending_notices = notice->next;
+	struct pending_notice **link = &pending_notices;
+	while (*link != NULL) {
+		struct pending_notice *notice = *link;
+		if (notice->id != 0) {
+			link = &notice->next;
+			continue;
+		}
+		*link = notice->next;
 		free(notice);
 	}
-	pending_notices_tail = &pending_notices;
+	pending_notices_tail = link;
 	while (remote_send_onces != NULL) {
 		struct remote_send_once *record = remote_send_onces;
 		remote_send_onces = record->next;
