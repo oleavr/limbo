@@ -42,6 +42,10 @@
 #define GUARD_TICKS  1000
 #define REAP_TICKS   100
 #define PEER_IDLE_MS 30000
+#define ANSWER_MS    20000
+#define BULK_SIZE    4096
+#define BULK_COUNT   1000
+#define PEER_ROOM    (2 * BULK_SIZE)
 
 typedef struct {
 	mach_msg_header_t Head;
@@ -57,6 +61,11 @@ typedef struct {
 	char padding[64];
 } bootstrap_reply_t;
 
+typedef struct {
+	mach_msg_header_t Head;
+	int32_t value;
+} valued_t;
+
 static const char SERVICE_NAME[] = "com.limbo.test.ipc";
 static const char PEER_NAME[] = "com.limbo.test.ipc.peer";
 static const mach_msg_id_t CHECK_IN = 402;
@@ -64,6 +73,9 @@ static const mach_msg_id_t LOOK_UP = 404;
 static const mach_msg_id_t REQUEST_ID = 7777;
 static const mach_msg_id_t REPLY_ID = 7877;
 static const mach_msg_id_t QUIT_ID = 7900;
+static const mach_msg_id_t ANSWER_ID = 7901;
+static const mach_msg_id_t COUNT_ID = 7902;
+static const mach_msg_id_t REPORT_ID = 7903;
 static const char REQUEST_DATA[] = "out of line";
 
 static mach_port_t
@@ -441,15 +453,34 @@ call(void)
 }
 
 static void
+answer(const mach_msg_header_t *request, int32_t value)
+{
+	valued_t reply = {
+			.Head = {
+					.msgh_bits = MACH_MSGH_BITS(
+							MACH_MSG_TYPE_MOVE_SEND_ONCE,
+							0),
+					.msgh_size = sizeof(reply),
+					.msgh_remote_port = request->msgh_remote_port,
+					.msgh_id = ANSWER_ID,
+			},
+			.value = value,
+	};
+	send_request(&reply.Head);
+}
+
+static void
 serve_peer(void)
 {
 	mach_port_t service = bootstrap_call(CHECK_IN, PEER_NAME);
 	CHECK(service != MACH_PORT_NULL);
 
+	int32_t counted = 0;
 	for (;;) {
-		struct {
+		static union {
 			mach_msg_header_t Head;
-			mach_msg_trailer_t trailer;
+			valued_t valued;
+			char bytes[PEER_ROOM];
 		} message;
 		kern_return_t kr = mach_msg(&message.Head,
 				MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
@@ -458,6 +489,14 @@ serve_peer(void)
 		CHECK(kr == MACH_MSG_SUCCESS);
 		if (message.Head.msgh_id == QUIT_ID) {
 			return;
+		}
+		if (message.Head.msgh_id == COUNT_ID) {
+			CHECK(message.Head.msgh_size == BULK_SIZE);
+			CHECK(message.valued.value == counted);
+			counted++;
+		} else if (message.Head.msgh_id == REPORT_ID) {
+			answer(&message.Head, counted);
+			counted = 0;
 		}
 	}
 }
@@ -510,6 +549,58 @@ reap(pid_t pid)
 	return status;
 }
 
+static int32_t
+ask(mach_msg_header_t *request)
+{
+	mach_port_t reply_port;
+	mach_port_allocate(
+			mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &reply_port);
+	request->msgh_bits |= MACH_MSGH_BITS(0, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+	request->msgh_local_port = reply_port;
+	send_request(request);
+
+	struct {
+		valued_t reply;
+		mach_msg_trailer_t trailer;
+	} message;
+	kern_return_t kr = mach_msg(&message.reply.Head,
+			MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(message),
+			reply_port, ANSWER_MS, MACH_PORT_NULL);
+	CHECK(kr == MACH_MSG_SUCCESS);
+	CHECK(message.reply.Head.msgh_id == ANSWER_ID);
+	kr = mach_port_mod_refs(mach_task_self(), reply_port,
+			MACH_PORT_RIGHT_RECEIVE, -1);
+	CHECK(kr == KERN_SUCCESS);
+	return message.reply.value;
+}
+
+static int32_t
+ask_report(mach_port_t port)
+{
+	mach_msg_header_t request = {
+			.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0),
+			.msgh_size = sizeof(request),
+			.msgh_remote_port = port,
+			.msgh_id = REPORT_ID,
+	};
+	return ask(&request);
+}
+
+static void
+stop(pid_t pid)
+{
+	CHECK(kill(pid, SIGSTOP) == 0);
+	int status = 0;
+	pid_t stopped = 0;
+	for (int ticks = 0; ticks != REAP_TICKS && stopped == 0; ticks++) {
+		stopped = waitpid(pid, &status, WNOHANG | WUNTRACED);
+		if (stopped == 0) {
+			usleep(100000);
+		}
+	}
+	CHECK(stopped == pid && WIFSTOPPED(status));
+}
+
 static void
 send_quit(mach_port_t port)
 {
@@ -541,6 +632,34 @@ check_oversized(mach_port_t port)
 }
 
 static void
+check_stopped_receiver(pid_t peer, mach_port_t port)
+{
+	stop(peer);
+	static union {
+		valued_t valued;
+		char bytes[BULK_SIZE];
+	} message;
+	for (int32_t i = 0; i != BULK_COUNT; i++) {
+		message.valued = (valued_t){
+				.Head = {
+						.msgh_bits = MACH_MSGH_BITS(
+								MACH_MSG_TYPE_COPY_SEND,
+								0),
+						.msgh_size = sizeof(message),
+						.msgh_remote_port = port,
+						.msgh_id = COUNT_ID,
+				},
+				.value = i,
+		};
+		send_request(&message.valued.Head);
+	}
+	CHECK(bootstrap_call(LOOK_UP, PEER_NAME) == port);
+
+	CHECK(kill(peer, SIGCONT) == 0);
+	CHECK(ask_report(port) == BULK_COUNT);
+}
+
+static void
 check_transport(void)
 {
 	pid_t peer = start(serve_peer);
@@ -548,6 +667,7 @@ check_transport(void)
 	mach_port_t port = look_up(PEER_NAME);
 
 	check_oversized(port);
+	check_stopped_receiver(peer, port);
 
 	send_quit(port);
 	int status = reap(peer);
