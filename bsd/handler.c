@@ -461,6 +461,10 @@ wait_options(int options)
 int
 sys_link(user_addr_t oldpath, user_addr_t newpath)
 {
+	if (mac_sandbox_denies(SANDBOX_FILE_WRITE_CREATE, AT_FDCWD, newpath,
+			    AT_SYMLINK_NOFOLLOW)) {
+		return _EPERM;
+	}
 	char old_buffer[PATH_MAX], new_buffer[PATH_MAX];
 	return errno_map(link(sysroot_host_path(oldpath, AT_SYMLINK_NOFOLLOW,
 					      old_buffer),
@@ -1132,6 +1136,10 @@ sys_revoke(char *path)
 int
 sys_symlink(char *path, char *link)
 {
+	if (mac_sandbox_denies(SANDBOX_FILE_WRITE_CREATE, AT_FDCWD, link,
+			    AT_SYMLINK_NOFOLLOW)) {
+		return _EPERM;
+	}
 	char buffer[PATH_MAX];
 	return errno_map(symlink(path,
 			sysroot_host_path(link, AT_SYMLINK_NOFOLLOW, buffer)));
@@ -1932,6 +1940,10 @@ sys_sys_flock(int fd, int how)
 int
 sys_mkfifo(user_addr_t path, int mode)
 {
+	if (mac_sandbox_denies(SANDBOX_FILE_WRITE_CREATE, AT_FDCWD, path,
+			    AT_SYMLINK_NOFOLLOW)) {
+		return _EPERM;
+	}
 	char buffer[PATH_MAX];
 	return errno_map(mkfifo(
 			sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer),
@@ -1982,6 +1994,10 @@ sys_socketpair(int domain, int type, int protocol, int *rsv)
 int
 sys_mkdir(user_addr_t path, int mode)
 {
+	if (mac_sandbox_denies(SANDBOX_FILE_WRITE_CREATE, AT_FDCWD, path,
+			    AT_SYMLINK_NOFOLLOW)) {
+		return _EPERM;
+	}
 	char buffer[PATH_MAX];
 	return errno_map(acl_mkdirat(AT_FDCWD,
 			sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer),
@@ -3088,6 +3104,10 @@ sys_mkdir_extended(user_addr_t path, void *uid, void *gid, int mode,
 	if (initial_list(xsecurity, &list, &initial) == -1) {
 		return _EINVAL;
 	}
+	if (mac_sandbox_denies(SANDBOX_FILE_WRITE_CREATE, AT_FDCWD, path,
+			    AT_SYMLINK_NOFOLLOW)) {
+		return _EPERM;
+	}
 	char buffer[PATH_MAX];
 	const char *host_path
 			= sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer);
@@ -3860,6 +3880,10 @@ int
 sys_clonefileat(int src_dirfd, user_addr_t src, int dst_dirfd, user_addr_t dst,
 		uint32_t flags)
 {
+	if (mac_sandbox_denies(SANDBOX_FILE_WRITE_CREATE, at_fd(dst_dirfd), dst,
+			    AT_SYMLINK_NOFOLLOW)) {
+		return _EPERM;
+	}
 	char buffer[PATH_MAX];
 	const char *host = sysroot_host_path(src,
 			(flags & _CLONE_NOFOLLOW) ? AT_SYMLINK_NOFOLLOW : 0,
@@ -3943,6 +3967,10 @@ sys_fchownat(int fd, user_addr_t path, void *uid, void *gid, int flag)
 int
 sys_linkat(int fd1, user_addr_t path, int fd2, user_addr_t link, int flag)
 {
+	if (mac_sandbox_denies(SANDBOX_FILE_WRITE_CREATE, at_fd(fd2), link,
+			    AT_SYMLINK_NOFOLLOW)) {
+		return _EPERM;
+	}
 	char path_buffer[PATH_MAX], link_buffer[PATH_MAX];
 	int flags = at_flags(flag);
 	return errno_map(linkat(at_fd(fd1),
@@ -3978,6 +4006,10 @@ sys_readlinkat(int fd, user_addr_t path, user_addr_t buf, size_t bufsize)
 int
 sys_symlinkat(user_addr_t *path1, int fd, user_addr_t path2)
 {
+	if (mac_sandbox_denies(SANDBOX_FILE_WRITE_CREATE, at_fd(fd), path2,
+			    AT_SYMLINK_NOFOLLOW)) {
+		return _EPERM;
+	}
 	char buffer[PATH_MAX];
 	return errno_map(symlinkat((const char *)path1, at_fd(fd),
 			sysroot_host_path(path2, AT_SYMLINK_NOFOLLOW, buffer)));
@@ -3988,6 +4020,10 @@ sys_mkdirat(int fd, user_addr_t path, int mode)
 {
 	if (path == NULL) {
 		return _EFAULT;
+	}
+	if (mac_sandbox_denies(SANDBOX_FILE_WRITE_CREATE, at_fd(fd), path,
+			    AT_SYMLINK_NOFOLLOW)) {
+		return _EPERM;
 	}
 	char buffer[PATH_MAX];
 	return errno_map(acl_mkdirat(at_fd(fd),
@@ -4166,6 +4202,10 @@ sys_getentropy(void *buffer, size_t size)
 int
 sys_fclonefileat(int src_fd, int dst_dirfd, user_addr_t dst, uint32_t flags)
 {
+	if (mac_sandbox_denies(SANDBOX_FILE_WRITE_CREATE, at_fd(dst_dirfd), dst,
+			    AT_SYMLINK_NOFOLLOW)) {
+		return _EPERM;
+	}
 	char buffer[PATH_MAX];
 	return clone_file(src_fd, at_fd(dst_dirfd),
 			sysroot_host_path(dst, 0, buffer), flags);
