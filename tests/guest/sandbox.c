@@ -29,6 +29,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "check.h"
@@ -41,12 +42,20 @@ extern char *sandbox_extension_issue_mach(
 extern int64_t sandbox_extension_consume(const char *token);
 extern int sandbox_extension_release(int64_t handle);
 extern int __mac_syscall(const char *policy, int call, void *arg);
+extern int sandbox_init(const char *profile, uint64_t flags, char **error);
+extern int sandbox_check(pid_t pid, const char *operation, int type, ...);
 
 #define AMFI_QUERY_BOOTARG_STATE 96
+
+static void check_entered(void);
+static void enter(void);
+static int exit_status_of(void (*body)(void));
 
 int
 main(void)
 {
+	check_entered();
+
 	char *token = sandbox_extension_issue_file(
 			APP_SANDBOX_READ_WRITE, "/tmp", 0);
 	CHECK(token != NULL);
@@ -80,4 +89,44 @@ main(void)
 			== 0);
 	CHECK(bootarg_state == 0);
 	return 0;
+}
+
+static void
+check_entered(void)
+{
+	CHECK(exit_status_of(enter) == 0);
+	CHECK(sandbox_check(getpid(), NULL, 0) == 0);
+}
+
+static void
+enter(void)
+{
+	CHECK(sandbox_check(getpid(), NULL, 0) == 0);
+	char *error = NULL;
+	CHECK(sandbox_init("(version 1) (allow default)", 0, &error) == 0);
+	CHECK(sandbox_check(getpid(), NULL, 0) == 1);
+	CHECK(sandbox_check(getpid(), "file-read-data", 0) == 0);
+	pid_t child = fork();
+	CHECK(child >= 0);
+	if (child == 0) {
+		_exit(sandbox_check(getpid(), NULL, 0) == 1 ? 0 : 1);
+	}
+	int status;
+	CHECK(waitpid(child, &status, 0) == child);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
+static int
+exit_status_of(void (*body)(void))
+{
+	pid_t child = fork();
+	CHECK(child >= 0);
+	if (child == 0) {
+		body();
+		_exit(0);
+	}
+	int status;
+	CHECK(waitpid(child, &status, 0) == child);
+	CHECK(WIFEXITED(status));
+	return WEXITSTATUS(status);
 }

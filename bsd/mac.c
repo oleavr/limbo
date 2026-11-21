@@ -33,6 +33,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "fs/device.h"
 #include "handler.h"
@@ -143,10 +144,31 @@ quarantine_handle_syscall(int call)
 	}
 }
 
-#define SANDBOX_CONTAINER_PATH 4
-#define SANDBOX_EXTENSION_ISSUE 5
-#define SANDBOX_EXTENSION_FILE  0
+#define SANDBOX_SET_PROFILE          0
+#define SANDBOX_CHECK                2
+#define SANDBOX_CONTAINER_PATH       4
+#define SANDBOX_EXTENSION_ISSUE      5
+#define SANDBOX_EXTENSION_FILE       0
 #define SANDBOX_EXTENSION_TOKEN_SIZE 0x3ff0
+
+struct sandbox_check_args {
+	uint64_t *result;
+	int64_t pid;
+	const char *operation;
+	uint64_t filter_type;
+	uint64_t filter;
+	uint64_t flags;
+};
+
+static bool sandboxed;
+
+static int
+sandbox_check(struct sandbox_check_args *args)
+{
+	bool self = args->pid == 0 || args->pid == getpid();
+	*args->result = self && sandboxed && args->operation == NULL;
+	return 0;
+}
 
 struct sandbox_extension_issue_args {
 	const char *class;
@@ -211,6 +233,11 @@ static int
 sandbox_handle_syscall(int call, void *arg)
 {
 	switch (call) {
+	case SANDBOX_SET_PROFILE:
+		sandboxed = true;
+		return 0;
+	case SANDBOX_CHECK:
+		return sandbox_check(arg);
 	case SANDBOX_CONTAINER_PATH:
 		return _ENOTSUP;
 	case SANDBOX_EXTENSION_ISSUE:
