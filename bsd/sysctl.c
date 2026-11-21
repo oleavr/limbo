@@ -226,6 +226,7 @@ static const char *system_version(const char *key, const char *otherwise,
 static int read_tcp_pcblist(void *old, size_t *oldlenp);
 static int read_udp_pcblist(void *old, size_t *oldlenp);
 static int read_tcp_stats(void *old, size_t *oldlenp);
+static int read_udp_stats(void *old, size_t *oldlenp);
 static int read_ip_ttl(void *old, size_t *oldlenp);
 static int read_pressure_level(void *old, size_t *oldlenp);
 
@@ -299,6 +300,8 @@ static const struct sysctl_node nodes[] = {
 				.reader = read_udp_pcblist},
 		{"net.inet.tcp.stats", {0, 0}, SYSCTL_READER,
 				.reader = read_tcp_stats},
+		{"net.inet.udp.stats", {0, 0}, SYSCTL_READER,
+				.reader = read_udp_stats},
 		{"net.inet.ip.ttl", {0, 0}, SYSCTL_READER,
 				.reader = read_ip_ttl},
 
@@ -749,6 +752,9 @@ oid_format(const int *oid, void *old, size_t *oldlenp)
 		} else if (node->reader == read_tcp_stats) {
 			kind = CTLTYPE_OPAQUE;
 			format = "S,tcpstat";
+		} else if (node->reader == read_udp_stats) {
+			kind = CTLTYPE_OPAQUE;
+			format = "S,udpstat";
 		} else if (node->reader == read_hostname
 				|| node->reader == read_bootsessionuuid
 				|| node->reader == read_sandbox_sentinel
@@ -1370,6 +1376,15 @@ enum {
 	TCPS_RCVBADSUM = 112,
 };
 
+enum {
+	UDPSTAT_SIZE = 104,
+	UDPS_IPACKETS = 0,
+	UDPS_BADSUM = 8,
+	UDPS_NOPORT = 16,
+	UDPS_FULLSOCK = 24,
+	UDPS_OPACKETS = 36,
+};
+
 struct snmp_counter {
 	const char *name;
 	size_t offset;
@@ -1400,6 +1415,24 @@ read_tcp_stats(void *old, size_t *oldlenp)
 		snmp_counters("Tcp", counters,
 				sizeof(counters) / sizeof(counters[0]), stats);
 	}
+	return read_truncated(stats, sizeof(stats), old, oldlenp);
+}
+
+static int
+read_udp_stats(void *old, size_t *oldlenp)
+{
+	static const struct snmp_counter counters[] = {
+			{"InDatagrams", UDPS_IPACKETS},
+			{"NoPorts", UDPS_IPACKETS},
+			{"InErrors", UDPS_IPACKETS},
+			{"InCsumErrors", UDPS_BADSUM},
+			{"NoPorts", UDPS_NOPORT},
+			{"RcvbufErrors", UDPS_FULLSOCK},
+			{"OutDatagrams", UDPS_OPACKETS},
+	};
+	uint8_t stats[UDPSTAT_SIZE] = {0};
+	snmp_counters("Udp", counters, sizeof(counters) / sizeof(counters[0]),
+			stats);
 	return read_truncated(stats, sizeof(stats), old, oldlenp);
 }
 
