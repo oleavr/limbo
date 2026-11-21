@@ -1550,7 +1550,14 @@ check_send_once_rights(void)
 			      reply, MACH_NOTIFY_SEND_ONCE, ANSWER_MS, &unused)
 			== MACH_MSG_SUCCESS);
 	destroy_port(reply);
+
+	reply = post_for(holder.port, HOLD_REPLY_ID);
+	CHECK(ask_for(holder.port, TYPE_ID) == 0);
 	end_peer(&holder);
+	CHECK(receive_notification(
+			      reply, MACH_NOTIFY_SEND_ONCE, ANSWER_MS, &unused)
+			== MACH_MSG_SUCCESS);
+	destroy_port(reply);
 }
 
 static void
