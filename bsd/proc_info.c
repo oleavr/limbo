@@ -190,6 +190,23 @@ struct proc_workqueueinfo {
 #define PROC_PIDTASKALLINFO 2
 #define PROC_PIDTASKINFO    4
 
+#define PROC_PIDTHREADINFO     5
+#define PROC_PIDTHREADID64INFO 15
+
+struct proc_threadinfo {
+	uint64_t pth_user_time;
+	uint64_t pth_system_time;
+	int32_t pth_cpu_usage;
+	int32_t pth_policy;
+	int32_t pth_run_state;
+	int32_t pth_flags;
+	int32_t pth_sleep_time;
+	int32_t pth_curpri;
+	int32_t pth_priority;
+	int32_t pth_maxpriority;
+	char pth_name[THREAD_NAME_SIZE];
+};
+
 #define PROC_PIDPATHINFO 11
 #define PROC_PIDREGIONINFO      7
 #define PROC_PIDVNODEPATHINFO   9
@@ -312,6 +329,10 @@ struct proc_regionwithpathinfo {
 
 static int pidinfo(int32_t pid, uint32_t flavor, uint64_t arg,
 		user_addr_t buffer, int32_t buffersize);
+static int threadinfo(uint64_t value, bool id, user_addr_t buffer,
+		int32_t buffersize);
+static void proc_threadinfo_of(const thread_extended_info_data_t *extended,
+		struct proc_threadinfo *info);
 static bool vnode_info_path(
 		const char *proc_link, struct vnode_info_path *info);
 static void fill_vnode_info(const char *file, const struct stat *st,
@@ -406,6 +427,13 @@ pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, user_addr_t buffer,
 		taskinfo(&process, info);
 		return sizeof(*info);
 	}
+	case PROC_PIDTHREADINFO:
+	case PROC_PIDTHREADID64INFO:
+		if (pid != getpid()) {
+			return _ESRCH;
+		}
+		return threadinfo(arg, flavor == PROC_PIDTHREADID64INFO, buffer,
+				buffersize);
 	case PROC_PIDTASKALLINFO: {
 		struct proc_taskallinfo *info = buffer;
 		if (buffersize < (int32_t)sizeof(*info)) {
@@ -561,6 +589,43 @@ pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, user_addr_t buffer,
 	default:
 		unimplemented();
 	}
+}
+
+static int
+threadinfo(uint64_t value, bool id, user_addr_t buffer, int32_t buffersize)
+{
+	struct proc_threadinfo *info = buffer;
+	if (buffersize < (int32_t)sizeof(*info)) {
+		return _ENOMEM;
+	}
+	thread_extended_info_data_t extended;
+	mach_msg_type_number_t count = THREAD_EXTENDED_INFO_COUNT;
+	if (thread_info(thread_guest_port_of(value, id), THREAD_EXTENDED_INFO,
+			    (thread_info_t)&extended, &count)
+			!= KERN_SUCCESS) {
+		return _ESRCH;
+	}
+	proc_threadinfo_of(&extended, info);
+	return sizeof(*info);
+}
+
+static void
+proc_threadinfo_of(const thread_extended_info_data_t *extended,
+		struct proc_threadinfo *info)
+{
+	*info = (struct proc_threadinfo){
+			.pth_user_time = extended->pth_user_time,
+			.pth_system_time = extended->pth_system_time,
+			.pth_cpu_usage = extended->pth_cpu_usage,
+			.pth_policy = extended->pth_policy,
+			.pth_run_state = extended->pth_run_state,
+			.pth_flags = extended->pth_flags,
+			.pth_sleep_time = extended->pth_sleep_time,
+			.pth_curpri = extended->pth_curpri,
+			.pth_priority = extended->pth_priority,
+			.pth_maxpriority = extended->pth_maxpriority,
+	};
+	memcpy(info->pth_name, extended->pth_name, sizeof(info->pth_name));
 }
 
 static void

@@ -368,6 +368,30 @@ check_thread_times(void)
 	}
 	CHECK(info.run_state == TH_STATE_WAITING);
 
+	thread_identifier_info_data_t ids = identifier_info(spinner);
+	struct proc_threadinfo by_handle, by_id;
+	CHECK(proc_pidinfo(getpid(), PROC_PIDTHREADINFO, ids.thread_handle,
+			      &by_handle, sizeof(by_handle))
+			== sizeof(by_handle));
+	CHECK(by_handle.pth_user_time + by_handle.pth_system_time >= 200000000);
+	CHECK(by_handle.pth_run_state == TH_STATE_WAITING);
+	CHECK(proc_pidinfo(getpid(), PROC_PIDTHREADID64INFO, ids.thread_id,
+			      &by_id, sizeof(by_id))
+			== sizeof(by_id));
+	CHECK(by_id.pth_user_time >= by_handle.pth_user_time);
+	CHECK(proc_pidinfo(getpid(), PROC_PIDTHREADINFO, ids.thread_handle,
+			      &by_handle, sizeof(by_handle) - 1)
+			== 0);
+	CHECK(errno == ENOMEM);
+	CHECK(proc_pidinfo(getpid(), PROC_PIDTHREADINFO, 1, &by_handle,
+			      sizeof(by_handle))
+			== 0);
+	CHECK(errno == ESRCH);
+	CHECK(proc_pidinfo(getpid(), PROC_PIDTHREADID64INFO, 1, &by_id,
+			      sizeof(by_id))
+			== 0);
+	CHECK(errno == ESRCH);
+
 	task_thread_times_info_data_t live;
 	mach_msg_type_number_t count = TASK_THREAD_TIMES_INFO_COUNT;
 	CHECK(task_info(mach_task_self(), TASK_THREAD_TIMES_INFO,
