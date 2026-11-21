@@ -518,6 +518,9 @@ sys_chmod(user_addr_t path, int mode)
 int
 sys_chown(user_addr_t path, int uid, int gid)
 {
+	if (mac_sandbox_denies(SANDBOX_FILE_WRITE_OWNER, AT_FDCWD, path, 0)) {
+		return _EPERM;
+	}
 	char buffer[PATH_MAX];
 	return errno_map(chown(sysroot_host_path(path, 0, buffer), uid, gid));
 }
@@ -1908,6 +1911,9 @@ sys_settimeofday(void *tv, void *tzp)
 int
 sys_fchown(int fd, int uid, int gid)
 {
+	if (mac_sandbox_denies_fd(SANDBOX_FILE_WRITE_OWNER, fd)) {
+		return _EPERM;
+	}
 	return errno_map(fchown(fd, uid, gid));
 }
 
@@ -2987,6 +2993,13 @@ sys_chmod_extended(user_addr_t path, void *uid, void *gid, int mode,
 	if (xsecurity != NULL && acl_from_filesec(xsecurity, &list) == -1) {
 		return _EINVAL;
 	}
+	bool owner = (uid_t)(uintptr_t)uid != KAUTH_UID_NONE
+			|| (gid_t)(uintptr_t)gid != KAUTH_GID_NONE;
+	if (owner
+			&& mac_sandbox_denies(SANDBOX_FILE_WRITE_OWNER,
+					AT_FDCWD, path, 0)) {
+		return _EPERM;
+	}
 	if (mode != -1
 			&& mac_sandbox_denies(SANDBOX_FILE_WRITE_MODE, AT_FDCWD,
 					path, 0)) {
@@ -3020,6 +3033,10 @@ sys_fchmod_extended(
 	struct acl_list list;
 	if (xsecurity != NULL && acl_from_filesec(xsecurity, &list) == -1) {
 		return _EINVAL;
+	}
+	bool owner = uid != KAUTH_UID_NONE || gid != KAUTH_GID_NONE;
+	if (owner && mac_sandbox_denies_fd(SANDBOX_FILE_WRITE_OWNER, fd)) {
+		return _EPERM;
 	}
 	if (mode != -1 && mac_sandbox_denies_fd(SANDBOX_FILE_WRITE_MODE, fd)) {
 		return _EPERM;
@@ -3553,6 +3570,10 @@ sys_auditctl(char *path)
 int
 sys_lchown(user_addr_t path, void *owner, void *group)
 {
+	if (mac_sandbox_denies(SANDBOX_FILE_WRITE_OWNER, AT_FDCWD, path,
+			    AT_SYMLINK_NOFOLLOW)) {
+		return _EPERM;
+	}
 	char buffer[PATH_MAX];
 	return errno_map(lchown(
 			sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer),
@@ -4001,6 +4022,10 @@ sys_fchmodat(int fd, user_addr_t path, int mode, int flag)
 int
 sys_fchownat(int fd, user_addr_t path, void *uid, void *gid, int flag)
 {
+	if (mac_sandbox_denies(SANDBOX_FILE_WRITE_OWNER, at_fd(fd), path,
+			    at_flags(flag) & AT_SYMLINK_NOFOLLOW)) {
+		return _EPERM;
+	}
 	char buffer[PATH_MAX];
 	int flags = at_flags(flag);
 	return errno_map(fchownat(at_fd(fd),
