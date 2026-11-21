@@ -250,8 +250,9 @@ static void
 route_send(struct broker_wire_frame *frame)
 {
 	struct broker_send send;
-	struct connection *owner
-			= broker_wire_read(frame, 0, &send, sizeof(send))
+	struct connection *owner = frame->inline_length >= sizeof(send)
+					&& broker_wire_read(frame, 0, &send,
+							sizeof(send))
 			? connection_for_guest(
 					  broker_guest_of(send.dest_global_id))
 			: NULL;

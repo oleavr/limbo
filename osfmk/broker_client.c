@@ -201,14 +201,18 @@ read_frames(void *user)
 				.type = frame->type & ~BROKER_FRAME_OOL,
 				.length = frame->length,
 		};
-		char loaded[BROKER_FRAME_MAX];
 		if (!(frame->type & BROKER_FRAME_OOL)) {
 			dispatch_frame(&header, frame->payload, frame->fds,
 					frame->fd_count);
-		} else if (broker_wire_read(frame, 0, loaded, frame->length)) {
+			broker_wire_free(frame);
+			continue;
+		}
+		char *loaded = malloc(frame->length);
+		if (broker_wire_read(frame, 0, loaded, frame->length)) {
 			dispatch_frame(&header, loaded, frame->fds,
 					frame->fd_count - 1);
 		}
+		free(loaded);
 		broker_wire_free(frame);
 	}
 }
