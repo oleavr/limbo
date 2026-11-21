@@ -28,6 +28,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <libproc.h>
 #include <netinet/in.h>
 #include <netinet/in_pcb.h>
 #include <netinet/in_systm.h>
@@ -58,6 +59,8 @@ static void check_refused_error(void);
 static void check_control_with_many_open(void);
 static void check_pcblist(void);
 static void check_statistics(void);
+static void check_inet_socket_info(void);
+static struct socket_info socket_info(int fd);
 static void read_statistics(const char *name, void *stats, size_t size);
 static uint8_t *read_list(const char *name, size_t *size);
 static const uint8_t *find_socket(const uint8_t *list, size_t size,
@@ -119,6 +122,7 @@ main(void)
 	check_control_with_many_open();
 	check_pcblist();
 	check_statistics();
+	check_inet_socket_info();
 	check_icmp();
 	return 0;
 }
@@ -464,6 +468,112 @@ read_statistics(const char *name, void *stats, size_t size)
 	needed = sizeof(start);
 	CHECK(sysctlbyname(name, &start, &needed, NULL, 0) == 0);
 	CHECK(needed == sizeof(start));
+}
+
+static void
+check_inet_socket_info(void)
+{
+	struct sockaddr_in loopback = {
+			.sin_len = sizeof(loopback),
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+	};
+	int listener = socket(AF_INET, SOCK_STREAM, 0);
+	CHECK(listener != -1);
+	CHECK(bind(listener, (struct sockaddr *)&loopback, sizeof(loopback))
+			== 0);
+	CHECK(listen(listener, 1) == 0);
+	struct sockaddr_in listening = loopback;
+	listening.sin_port = bound_port(listener);
+	int client = socket(AF_INET, SOCK_STREAM, 0);
+	CHECK(client != -1);
+	CHECK(connect(client, (struct sockaddr *)&listening, sizeof(listening))
+			== 0);
+	int accepted = accept(listener, NULL, NULL);
+	CHECK(accepted != -1 && write(client, "hello", 5) == 5);
+	char byte;
+	CHECK(recv(accepted, &byte, 1, MSG_PEEK) == 1);
+
+	struct socket_info info = socket_info(listener);
+	CHECK(info.soi_stat.vst_ino == 0 && info.soi_stat.vst_mode == 0);
+	CHECK(info.soi_so != 0 && info.soi_pcb != 0);
+	CHECK(info.soi_type == SOCK_STREAM && info.soi_family == AF_INET);
+	CHECK(info.soi_protocol == IPPROTO_TCP);
+	CHECK(info.soi_options & SO_ACCEPTCONN);
+	CHECK((info.soi_state & SOI_S_ISCONNECTED) == 0);
+	CHECK(info.soi_kind == SOCKINFO_TCP);
+	struct tcp_sockinfo *tcp = &info.soi_proto.pri_tcp;
+	CHECK(tcp->tcpsi_state == TSI_S_LISTEN);
+	CHECK(tcp->tcpsi_ini.insi_lport == listening.sin_port);
+	CHECK(tcp->tcpsi_ini.insi_fport == 0);
+	CHECK(tcp->tcpsi_ini.insi_vflag == INI_IPV4);
+	CHECK(tcp->tcpsi_ini.insi_laddr.ina_46.i46a_addr4.s_addr
+			== loopback.sin_addr.s_addr);
+
+	info = socket_info(accepted);
+	CHECK((info.soi_options & SO_ACCEPTCONN) == 0);
+	CHECK(info.soi_state & SOI_S_ISCONNECTED);
+	CHECK(info.soi_rcv.sbi_cc == 5);
+	CHECK(tcp->tcpsi_state == TSI_S_ESTABLISHED);
+	CHECK(tcp->tcpsi_ini.insi_lport == listening.sin_port);
+	CHECK(tcp->tcpsi_ini.insi_fport == bound_port(client));
+	CHECK(tcp->tcpsi_ini.insi_faddr.ina_46.i46a_addr4.s_addr
+			== loopback.sin_addr.s_addr);
+
+	int datagram = socket(AF_INET6, SOCK_DGRAM, 0);
+	CHECK(datagram != -1);
+	struct sockaddr_in6 loopback6 = {
+			.sin6_len = sizeof(loopback6),
+			.sin6_family = AF_INET6,
+			.sin6_addr = IN6ADDR_LOOPBACK_INIT,
+	};
+	CHECK(bind(datagram, (struct sockaddr *)&loopback6, sizeof(loopback6))
+			== 0);
+	socklen_t length = sizeof(loopback6);
+	CHECK(getsockname(datagram, (struct sockaddr *)&loopback6, &length)
+			== 0);
+	info = socket_info(datagram);
+	CHECK(info.soi_type == SOCK_DGRAM && info.soi_family == AF_INET6);
+	CHECK(info.soi_protocol == IPPROTO_UDP);
+	CHECK(info.soi_kind == SOCKINFO_IN);
+	struct in_sockinfo *in = &info.soi_proto.pri_in;
+	CHECK(in->insi_lport == loopback6.sin6_port);
+	CHECK(in->insi_vflag == INI_IPV6);
+	CHECK(memcmp(&in->insi_laddr.ina_6, &loopback6.sin6_addr,
+			      sizeof(loopback6.sin6_addr))
+			== 0);
+
+	struct socket_fdinfo whole;
+	CHECK(proc_pidfdinfo(getpid(), listener, PROC_PIDFDSOCKETINFO, &whole,
+			      sizeof(whole) - 1)
+			== 0);
+	CHECK(errno == ENOMEM);
+	int ends[2];
+	CHECK(pipe(ends) == 0);
+	CHECK(proc_pidfdinfo(getpid(), ends[0], PROC_PIDFDSOCKETINFO, &whole,
+			      sizeof(whole))
+			== 0);
+	CHECK(errno == ENOTSOCK);
+	CHECK(close(ends[0]) == 0 && close(ends[1]) == 0);
+	CHECK(proc_pidfdinfo(getpid(), ends[0], PROC_PIDFDSOCKETINFO, &whole,
+			      sizeof(whole))
+			== 0);
+	CHECK(errno == EBADF);
+
+	CHECK(close(datagram) == 0 && close(accepted) == 0);
+	CHECK(close(client) == 0 && close(listener) == 0);
+}
+
+static struct socket_info
+socket_info(int fd)
+{
+	struct socket_fdinfo info;
+	CHECK(proc_pidfdinfo(getpid(), fd, PROC_PIDFDSOCKETINFO, &info,
+			      sizeof(info))
+			== sizeof(info));
+	CHECK(info.pfi.fi_type == PROX_FDTYPE_SOCKET);
+	CHECK((info.pfi.fi_openflags & (FREAD | FWRITE)) == (FREAD | FWRITE));
+	return info.psi;
 }
 
 static uint8_t *
