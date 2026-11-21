@@ -1189,6 +1189,7 @@ int
 sys_getattrlistbulk(int dirfd, void *alist, void *attributeBuffer,
 		size_t bufferSize, uint64_t options)
 {
+	options |= FSOPT_ATTR_CMN_EXTENDED;
 	off_t start = lseek(dirfd, 0, SEEK_CUR);
 	if (start == -1) {
 		return err_map(errno);

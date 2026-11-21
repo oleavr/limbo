@@ -413,6 +413,25 @@ check_attributes(void)
 	CHECK(fstat(fd, &flagged) == 0);
 	CHECK(flagged.st_flags == 0);
 	CHECK(close(fd) == 0);
+
+	struct attrlist bulk_request = {
+			.bitmapcount = ATTR_BIT_MAP_COUNT,
+			.commonattr = ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_NAME,
+			.forkattr = ATTR_CMNEXT_EXT_FLAGS,
+	};
+	struct {
+		uint32_t length;
+		attribute_set_t returned;
+		attrreference_t name;
+		uint64_t ext_flags;
+		char names[1024];
+	} __attribute__((packed)) entries;
+	fd = open(".", O_RDONLY | O_DIRECTORY);
+	CHECK(fd != -1);
+	CHECK(getattrlistbulk(fd, &bulk_request, &entries, sizeof(entries), 0)
+			>= 1);
+	CHECK(entries.returned.forkattr & ATTR_CMNEXT_EXT_FLAGS);
+	CHECK(close(fd) == 0);
 	CHECK(unlink("attributes") == 0);
 }
 
