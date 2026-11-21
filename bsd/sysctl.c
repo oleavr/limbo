@@ -227,6 +227,7 @@ static int read_tcp_pcblist(void *old, size_t *oldlenp);
 static int read_udp_pcblist(void *old, size_t *oldlenp);
 static int read_tcp_stats(void *old, size_t *oldlenp);
 static int read_udp_stats(void *old, size_t *oldlenp);
+static int read_ip_stats(void *old, size_t *oldlenp);
 static int read_ip_ttl(void *old, size_t *oldlenp);
 static int read_pressure_level(void *old, size_t *oldlenp);
 
@@ -302,6 +303,8 @@ static const struct sysctl_node nodes[] = {
 				.reader = read_tcp_stats},
 		{"net.inet.udp.stats", {0, 0}, SYSCTL_READER,
 				.reader = read_udp_stats},
+		{"net.inet.ip.stats", {0, 0}, SYSCTL_READER,
+				.reader = read_ip_stats},
 		{"net.inet.ip.ttl", {0, 0}, SYSCTL_READER,
 				.reader = read_ip_ttl},
 
@@ -755,6 +758,9 @@ oid_format(const int *oid, void *old, size_t *oldlenp)
 		} else if (node->reader == read_udp_stats) {
 			kind = CTLTYPE_OPAQUE;
 			format = "S,udpstat";
+		} else if (node->reader == read_ip_stats) {
+			kind = CTLTYPE_OPAQUE;
+			format = "S,ipstat";
 		} else if (node->reader == read_hostname
 				|| node->reader == read_bootsessionuuid
 				|| node->reader == read_sandbox_sentinel
@@ -1385,6 +1391,24 @@ enum {
 	UDPS_OPACKETS = 36,
 };
 
+enum {
+	IPSTAT_SIZE = 196,
+	IPS_TOTAL = 0,
+	IPS_FRAGMENTS = 24,
+	IPS_FRAGTIMEOUT = 32,
+	IPS_FORWARD = 36,
+	IPS_NOPROTO = 52,
+	IPS_DELIVERED = 56,
+	IPS_LOCALOUT = 60,
+	IPS_ODROPPED = 64,
+	IPS_REASSEMBLED = 68,
+	IPS_FRAGMENTED = 72,
+	IPS_OFRAGMENTS = 76,
+	IPS_CANTFRAG = 80,
+	IPS_NOROUTE = 88,
+	IPS_BADADDR = 112,
+};
+
 struct snmp_counter {
 	const char *name;
 	size_t offset;
@@ -1432,6 +1456,31 @@ read_udp_stats(void *old, size_t *oldlenp)
 	};
 	uint8_t stats[UDPSTAT_SIZE] = {0};
 	snmp_counters("Udp", counters, sizeof(counters) / sizeof(counters[0]),
+			stats);
+	return read_truncated(stats, sizeof(stats), old, oldlenp);
+}
+
+static int
+read_ip_stats(void *old, size_t *oldlenp)
+{
+	static const struct snmp_counter counters[] = {
+			{"InReceives", IPS_TOTAL},
+			{"ReasmReqds", IPS_FRAGMENTS},
+			{"ReasmTimeout", IPS_FRAGTIMEOUT},
+			{"ForwDatagrams", IPS_FORWARD},
+			{"InUnknownProtos", IPS_NOPROTO},
+			{"InDelivers", IPS_DELIVERED},
+			{"OutRequests", IPS_LOCALOUT},
+			{"OutDiscards", IPS_ODROPPED},
+			{"ReasmOKs", IPS_REASSEMBLED},
+			{"FragOKs", IPS_FRAGMENTED},
+			{"FragCreates", IPS_OFRAGMENTS},
+			{"FragFails", IPS_CANTFRAG},
+			{"OutNoRoutes", IPS_NOROUTE},
+			{"InAddrErrors", IPS_BADADDR},
+	};
+	uint8_t stats[IPSTAT_SIZE] = {0};
+	snmp_counters("Ip", counters, sizeof(counters) / sizeof(counters[0]),
 			stats);
 	return read_truncated(stats, sizeof(stats), old, oldlenp);
 }

@@ -33,6 +33,7 @@
 #include <netinet/in_systm.h>
 #include <netinet/ip.h>
 #include <netinet/ip_icmp.h>
+#include <netinet/ip_var.h>
 #include <netinet/tcp.h>
 #include <netinet/tcp_fsm.h>
 #include <netinet/tcp_var.h>
@@ -398,8 +399,10 @@ check_statistics(void)
 	};
 	struct tcpstat tcp_before, tcp;
 	struct udpstat udp_before, udp;
+	struct ipstat ip_before, ip;
 	read_statistics("net.inet.tcp.stats", &tcp_before, sizeof(tcp_before));
 	read_statistics("net.inet.udp.stats", &udp_before, sizeof(udp_before));
+	read_statistics("net.inet.ip.stats", &ip_before, sizeof(ip_before));
 
 	int listener = socket(AF_INET, SOCK_STREAM, 0);
 	CHECK(listener != -1);
@@ -428,6 +431,7 @@ check_statistics(void)
 
 	read_statistics("net.inet.tcp.stats", &tcp, sizeof(tcp));
 	read_statistics("net.inet.udp.stats", &udp, sizeof(udp));
+	read_statistics("net.inet.ip.stats", &ip, sizeof(ip));
 	if (getuid() == 0) {
 		CHECK(tcp.tcps_connattempt - tcp_before.tcps_connattempt >= 1);
 		CHECK(tcp.tcps_accepts - tcp_before.tcps_accepts >= 1);
@@ -439,6 +443,9 @@ check_statistics(void)
 	}
 	CHECK(udp.udps_ipackets - udp_before.udps_ipackets >= 1);
 	CHECK(udp.udps_opackets - udp_before.udps_opackets >= 1);
+	CHECK(ip.ips_total - ip_before.ips_total >= 1);
+	CHECK(ip.ips_delivered - ip_before.ips_delivered >= 1);
+	CHECK(ip.ips_localout - ip_before.ips_localout >= 1);
 
 	CHECK(close(receiver) == 0 && close(accepted) == 0);
 	CHECK(close(client) == 0 && close(listener) == 0);
