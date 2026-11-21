@@ -50,6 +50,8 @@ int proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int size);
 #define SKIP                   77
 #define DEADLINE               60
 #define UNTOUCHED              0x5a5a5a5a
+#define FILLERS                8
+#define FILLER_SIZE            16384
 
 struct responsible_for_pid_args {
 	uint64_t pid;
@@ -83,6 +85,8 @@ static int ask_as_another(void);
 static void check_forked(void);
 static int inherits(void);
 static void check_spawned(void);
+static void check_environment(void);
+static void check_large_environment(void);
 static void check_held(char **envp);
 static pid_t spawn_self(const char *mode, int number, char **envp);
 static int exit_status_of(pid_t child);
@@ -107,6 +111,8 @@ main(int argc, char *argv[])
 	check_another_user();
 	check_forked();
 	check_spawned();
+	check_environment();
+	check_large_environment();
 	return 0;
 }
 
@@ -259,6 +265,31 @@ check_spawned(void)
 {
 	CHECK(exit_status_of(spawn_self("is", responsible, environ)) == 0);
 	check_held(environ);
+}
+
+static void
+check_environment(void)
+{
+	char *none[] = {NULL};
+	char *another[] = {"LIMBO_RESPONSIBLE=1:1", NULL};
+	CHECK(exit_status_of(spawn_self("is", responsible, none)) == 0);
+	CHECK(exit_status_of(spawn_self("is", responsible, another)) == 0);
+	check_held(another);
+}
+
+static void
+check_large_environment(void)
+{
+	static char fillers[FILLERS][FILLER_SIZE];
+	char *large[FILLERS + 1] = {NULL};
+	for (int i = 0; i != FILLERS; i++) {
+		memset(fillers[i], 'x', FILLER_SIZE - 1);
+		memcpy(fillers[i], "FILLER=", 7);
+		fillers[i][6] = (char)('0' + i);
+		fillers[i][7] = '=';
+		large[i] = fillers[i];
+	}
+	check_held(large);
 }
 
 static void

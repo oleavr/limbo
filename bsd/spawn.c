@@ -44,6 +44,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "bsd/responsibility.h"
 #include "fs/acl.h"
 #include "handler.h"
 #include "signo.h"
@@ -233,6 +234,7 @@ spawn_exec(const char *path, const struct darwin_spawnattr *attrp,
 static const char *script_path(const char *path, const char *host,
 		char **argv, char *buffer, char ***script_argv);
 static const char *limbo_path(const char *host, char ***argv);
+static bool passes_on(const char *own, char **envp);
 static bool is_own(const char *variable);
 static bool has_variable(char **envp, const char *variable);
 
@@ -264,8 +266,7 @@ exec_environment(char **envp, const char *executable)
 		count++;
 	}
 	for (char **own = environ; *own != NULL; own++) {
-		missing += strncmp(*own, "LIMBO_", 6) == 0
-				&& (is_own(*own) || !has_variable(envp, *own));
+		missing += passes_on(*own, envp);
 	}
 	if (missing == 0 && dropped == 0 && executable == NULL) {
 		return envp;
@@ -279,15 +280,18 @@ exec_environment(char **envp, const char *executable)
 		return envp;
 	}
 	size_t kept = 0;
+	for (char **own = environ; *own != NULL; own++) {
+		if (responsibility_names(*own)) {
+			result[kept++] = *own;
+		}
+	}
 	for (size_t i = 0; i != count; i++) {
 		if (!is_own(envp[i])) {
 			result[kept++] = envp[i];
 		}
 	}
 	for (char **own = environ; *own != NULL; own++) {
-		if (strncmp(*own, "LIMBO_", 6) == 0
-				&& (is_own(*own)
-						|| !has_variable(envp, *own))) {
+		if (!responsibility_names(*own) && passes_on(*own, envp)) {
 			result[kept++] = *own;
 		}
 	}
@@ -302,10 +306,18 @@ exec_environment(char **envp, const char *executable)
 }
 
 static bool
+passes_on(const char *own, char **envp)
+{
+	return strncmp(own, "LIMBO_", 6) == 0
+			&& (is_own(own) || !has_variable(envp, own));
+}
+
+static bool
 is_own(const char *variable)
 {
 	return strncmp(variable, SANDBOX_VARIABLE "=", sizeof(SANDBOX_VARIABLE))
-			== 0;
+			== 0
+			|| responsibility_names(variable);
 }
 
 static bool
