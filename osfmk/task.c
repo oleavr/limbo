@@ -168,6 +168,16 @@ task_info(task_name_t target_task, task_flavor_t flavor,
 	switch (flavor) {
 	case TASK_AUDIT_TOKEN: {
 		audit_token_t *audit_token_p = (audit_token_t *)task_info_out;
+		void *named = ipc_kobject_lookup(
+				target_task, IPC_KOBJECT_TASK_NAME);
+		if (named != NULL) {
+			if (!task_audit_token_of_pid((pid_t)(intptr_t)named,
+					    audit_token_p)) {
+				return KERN_INVALID_ARGUMENT;
+			}
+			*task_info_outCnt = TASK_AUDIT_TOKEN_COUNT;
+			break;
+		}
 		memset(audit_token_p, 0, sizeof(audit_token_t));
 		audit_token_p->val[0] = getuid();
 		audit_token_p->val[1] = geteuid();
@@ -180,6 +190,10 @@ task_info(task_name_t target_task, task_flavor_t flavor,
 		*task_info_outCnt = TASK_AUDIT_TOKEN_COUNT;
 	} break;
 	case TASK_DYLD_INFO: {
+		if (ipc_kobject_lookup(target_task, IPC_KOBJECT_TASK_NAME)
+				!= NULL) {
+			return KERN_INVALID_ARGUMENT;
+		}
 		task_dyld_info_t info = (task_dyld_info_t)task_info_out;
 		info->all_image_info_addr = dyld_all_image_info_addr;
 		info->all_image_info_size = dyld_all_image_info_size;
@@ -203,6 +217,38 @@ task_info(task_name_t target_task, task_flavor_t flavor,
 	}
 
 	return KERN_SUCCESS;
+}
+
+bool
+task_audit_token_of_pid(pid_t pid, audit_token_t *token)
+{
+	char path[32];
+	snprintf(path, sizeof(path), "/proc/%d/status", pid);
+	FILE *status = fopen(path, "re");
+	if (status == NULL) {
+		return false;
+	}
+
+	memset(token, 0, sizeof(*token));
+	char line[256];
+	char state = 0;
+	unsigned int real, effective;
+	while (state != 'Z' && fgets(line, sizeof(line), status) != NULL) {
+		if (sscanf(line, "State: %c", &state) == 1) {
+			continue;
+		}
+		if (sscanf(line, "Uid: %u %u", &real, &effective) == 2) {
+			token->val[0] = real;
+			token->val[1] = effective;
+			token->val[3] = real;
+		} else if (sscanf(line, "Gid: %u %u", &real, &effective) == 2) {
+			token->val[2] = effective;
+			token->val[4] = real;
+		}
+	}
+	fclose(status);
+	token->val[5] = pid;
+	return state != 'Z';
 }
 
 struct memory_usage {

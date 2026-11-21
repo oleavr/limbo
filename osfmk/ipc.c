@@ -376,6 +376,19 @@ ipc_kobject_alloc(ipc_kobject_type_t type, void *kobject)
 }
 
 mach_port_name_t
+ipc_kobject_alloc_send(ipc_kobject_type_t type, void *kobject)
+{
+	pthread_mutex_lock(&lock);
+	struct ipc_port *port = port_alloc(type);
+	port->kobject = kobject;
+	struct ipc_entry *entry = entry_alloc(port);
+	entry->type |= MACH_PORT_TYPE_SEND;
+	entry->urefs = 1;
+	pthread_mutex_unlock(&lock);
+	return port->name;
+}
+
+mach_port_name_t
 ipc_kobject_copy_send(mach_port_name_t name)
 {
 	pthread_mutex_lock(&lock);
@@ -392,14 +405,7 @@ ipc_fileport_alloc(int fd)
 {
 	int *kobject = malloc(sizeof(*kobject));
 	*kobject = fd;
-	pthread_mutex_lock(&lock);
-	struct ipc_port *port = port_alloc(IPC_KOBJECT_FILEPORT);
-	port->kobject = kobject;
-	struct ipc_entry *entry = entry_alloc(port);
-	entry->type |= MACH_PORT_TYPE_SEND;
-	entry->urefs++;
-	pthread_mutex_unlock(&lock);
-	return port->name;
+	return ipc_kobject_alloc_send(IPC_KOBJECT_FILEPORT, kobject);
 }
 
 /* The descriptor behind a fileport, or -1 */
@@ -2643,6 +2649,8 @@ entry_release_if_unused(struct ipc_entry *entry)
 		free(port);
 	} else if (port->kotype == IPC_KOBJECT_EVENTLINK) {
 		eventlink_port_gone(port->kobject);
+		free(port);
+	} else if (port->kotype == IPC_KOBJECT_TASK_NAME) {
 		free(port);
 	}
 	entry->port = NULL;
