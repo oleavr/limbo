@@ -72,6 +72,28 @@ typedef struct {
 	int32_t value;
 } valued_t;
 
+typedef struct {
+	uint32_t message_size;
+	mach_msg_type_name_t dest_disposition;
+	mach_msg_type_name_t reply_disposition;
+	uint64_t reply_global_id;
+	pid_t sender_pid;
+	uint32_t descriptor_count;
+} remote_header_t;
+
+typedef struct {
+	struct broker_send send;
+	remote_header_t remote;
+	struct {
+		mach_msg_header_t Head;
+		mach_msg_body_t body;
+		mach_msg_port_descriptor_t port;
+		mach_msg_ool_descriptor_t data;
+	} message;
+	uint64_t id;
+	char data[8];
+} raw_message_t;
+
 static const char SERVICE_NAME[] = "com.limbo.test.ipc";
 static const char PEER_NAME[] = "com.limbo.test.ipc.peer";
 static const mach_msg_id_t CHECK_IN = 402;
@@ -83,6 +105,8 @@ static const mach_msg_id_t ANSWER_ID = 7901;
 static const mach_msg_id_t COUNT_ID = 7902;
 static const mach_msg_id_t REPORT_ID = 7903;
 static const mach_msg_id_t LARGE_ID = 7904;
+static const mach_msg_id_t MARK_ID = 7905;
+static const mach_msg_id_t MARKED_ID = 7906;
 static const char REQUEST_DATA[] = "out of line";
 
 static mach_port_t
@@ -500,6 +524,7 @@ serve_peer(void)
 	CHECK(service != MACH_PORT_NULL);
 
 	int32_t counted = 0;
+	int32_t marked = 0;
 	for (;;) {
 		static union {
 			mach_msg_header_t Head;
@@ -521,6 +546,11 @@ serve_peer(void)
 		} else if (message.Head.msgh_id == REPORT_ID) {
 			answer(&message.Head, counted);
 			counted = 0;
+		} else if (message.Head.msgh_id == MARK_ID) {
+			marked++;
+		} else if (message.Head.msgh_id == MARKED_ID) {
+			answer(&message.Head, marked);
+			marked = 0;
 		} else if (message.Head.msgh_id == LARGE_ID) {
 			answer(&message.Head,
 					patterned(message.bytes,
@@ -603,13 +633,13 @@ ask(mach_msg_header_t *request)
 }
 
 static int32_t
-ask_report(mach_port_t port)
+ask_for(mach_port_t port, mach_msg_id_t id)
 {
 	mach_msg_header_t request = {
 			.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0),
 			.msgh_size = sizeof(request),
 			.msgh_remote_port = port,
-			.msgh_id = REPORT_ID,
+			.msgh_id = id,
 	};
 	return ask(&request);
 }
@@ -729,6 +759,92 @@ check_short_frames(mach_port_t port)
 	CHECK(bootstrap_call(LOOK_UP, PEER_NAME) == port);
 }
 
+static uint64_t
+look_up_raw(int fd, const char *name)
+{
+	struct broker_lookup request = {0};
+	strncpy(request.name, name, sizeof(request.name) - 1);
+	send_raw(fd, BROKER_LOOKUP, &request, sizeof(request));
+
+	struct {
+		struct broker_frame header;
+		struct broker_lookup_reply reply;
+	} answer;
+	CHECK(recv(fd, &answer, sizeof(answer), 0) == sizeof(answer));
+	CHECK(answer.header.type == BROKER_LOOKUP_REPLY && answer.reply.found);
+	return answer.reply.global_id;
+}
+
+static void
+check_malformed_messages(mach_port_t port)
+{
+	int fd = connect_raw();
+	const raw_message_t valid = {
+		.send = {
+			.dest_global_id = look_up_raw(fd, PEER_NAME),
+			.blob_length = sizeof(valid) - sizeof(valid.send),
+		},
+		.remote = {
+			.message_size = sizeof(valid.message),
+			.dest_disposition = MACH_MSG_TYPE_COPY_SEND,
+			.descriptor_count = 1,
+		},
+		.message = {
+			.Head = {
+				.msgh_bits = MACH_MSGH_BITS_COMPLEX,
+				.msgh_size = sizeof(valid.message),
+				.msgh_id = MARK_ID,
+			},
+			.body = {.msgh_descriptor_count = 2},
+			.port = {
+				.disposition = MACH_MSG_TYPE_PORT_SEND,
+				.type = MACH_MSG_PORT_DESCRIPTOR,
+			},
+			.data = {
+				.size = sizeof(valid.data),
+				.type = MACH_MSG_OOL_DESCRIPTOR,
+			},
+		},
+	};
+
+	raw_message_t raw = valid;
+	raw.send.blob_length = 8;
+	send_raw(fd, BROKER_SEND, &raw, sizeof(raw.send) + 8);
+	raw = valid;
+	raw.send.blob_length = 1 << 20;
+	send_raw(fd, BROKER_SEND, &raw, sizeof(raw));
+	raw = valid;
+	raw.remote.message_size = INT32_MAX;
+	send_raw(fd, BROKER_SEND, &raw, sizeof(raw));
+	raw = valid;
+	raw.remote.message_size = 8;
+	send_raw(fd, BROKER_SEND, &raw, sizeof(raw));
+	raw = valid;
+	raw.remote.descriptor_count = 1000;
+	send_raw(fd, BROKER_SEND, &raw, sizeof(raw));
+	raw = valid;
+	raw.remote.reply_global_id = raw.send.dest_global_id;
+	send_raw(fd, BROKER_SEND, &raw, sizeof(raw));
+	raw = valid;
+	raw.message.body.msgh_descriptor_count = 1 << 28;
+	send_raw(fd, BROKER_SEND, &raw, sizeof(raw));
+	raw = valid;
+	raw.message.port.disposition = 0;
+	raw.id = raw.send.dest_global_id;
+	send_raw(fd, BROKER_SEND, &raw, sizeof(raw));
+	raw = valid;
+	raw.message.port.type = 77;
+	send_raw(fd, BROKER_SEND, &raw, sizeof(raw));
+	raw = valid;
+	raw.message.data.size = INT32_MAX;
+	send_raw(fd, BROKER_SEND, &raw, sizeof(raw));
+
+	send_raw(fd, BROKER_SEND, &valid, sizeof(valid));
+	CHECK(look_up_raw(fd, PEER_NAME) == valid.send.dest_global_id);
+	close(fd);
+	CHECK(ask_for(port, MARKED_ID) == 1);
+}
+
 static void
 check_stopped_receiver(pid_t peer, mach_port_t port)
 {
@@ -754,7 +870,7 @@ check_stopped_receiver(pid_t peer, mach_port_t port)
 	CHECK(bootstrap_call(LOOK_UP, PEER_NAME) == port);
 
 	CHECK(kill(peer, SIGCONT) == 0);
-	CHECK(ask_report(port) == BULK_COUNT);
+	CHECK(ask_for(port, REPORT_ID) == BULK_COUNT);
 }
 
 static void
@@ -768,6 +884,7 @@ check_transport(void)
 	check_stopped_receiver(peer, port);
 	check_large_frames(port);
 	check_short_frames(port);
+	check_malformed_messages(port);
 
 	send_quit(port);
 	int status = reap(peer);

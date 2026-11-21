@@ -194,6 +194,13 @@ static uint32_t export_body_ports(mach_msg_header_t *header,
 		uint32_t dest_guest_id);
 static uint64_t export_body_port(mach_port_name_t name,
 		mach_msg_type_name_t disposition, uint32_t dest_guest_id);
+static bool remote_message_fits(
+		const struct remote_header *rh, uint32_t length);
+static bool remote_body_fits(const mach_msg_header_t *message,
+		mach_msg_size_t size, const uint64_t *global_ids,
+		uint32_t id_count, uint32_t room);
+static bool remote_right_fits(
+		uint64_t global_id, mach_msg_type_name_t disposition);
 static void import_body_ports(mach_msg_header_t *header,
 		const uint64_t *global_ids, const uint8_t *data);
 static mach_port_name_t import_body_port(uint64_t global_id,
@@ -855,6 +862,9 @@ void
 ipc_remote_deliver(uint64_t dest_global_id, const void *blob, uint32_t length)
 {
 	const struct remote_header *rh = blob;
+	if (!remote_message_fits(rh, length)) {
+		return;
+	}
 	const mach_msg_header_t *message
 			= (const mach_msg_header_t *)((const char *)blob
 					+ sizeof(*rh));
@@ -891,6 +901,115 @@ ipc_remote_deliver(uint64_t dest_global_id, const void *blob, uint32_t length)
 
 	enqueue(dest, kmsg);
 	unlock_and_notify_arrival(dest);
+}
+
+static bool
+remote_message_fits(const struct remote_header *rh, uint32_t length)
+{
+	if (length < sizeof(*rh)) {
+		return false;
+	}
+	uint32_t room = length - sizeof(*rh);
+	if (rh->message_size < sizeof(mach_msg_header_t)
+			|| rh->message_size > room) {
+		return false;
+	}
+	room -= rh->message_size;
+	if (rh->descriptor_count > room / sizeof(uint64_t)) {
+		return false;
+	}
+	room -= rh->descriptor_count * sizeof(uint64_t);
+
+	mach_msg_type_name_t dest_type = received_type(rh->dest_disposition);
+	mach_msg_type_name_t reply_type = received_type(rh->reply_disposition);
+	if (dest_type == MACH_MSG_TYPE_PORT_NONE
+			|| dest_type == MACH_MSG_TYPE_PORT_RECEIVE
+			|| reply_type == MACH_MSG_TYPE_PORT_RECEIVE
+			|| !remote_right_fits(rh->reply_global_id,
+					rh->reply_disposition)) {
+		return false;
+	}
+
+	const mach_msg_header_t *message = (const mach_msg_header_t *)(rh + 1);
+	const uint64_t *global_ids = (const uint64_t *)((const char *)message
+			+ rh->message_size);
+	if (!(message->msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
+		return rh->descriptor_count == 0;
+	}
+	return remote_body_fits(message, rh->message_size, global_ids,
+			rh->descriptor_count, room);
+}
+
+static bool
+remote_body_fits(const mach_msg_header_t *message, mach_msg_size_t size,
+		const uint64_t *global_ids, uint32_t id_count, uint32_t room)
+{
+	if (size < sizeof(*message) + sizeof(mach_msg_body_t)) {
+		return false;
+	}
+
+	const mach_msg_body_t *body = (const mach_msg_body_t *)(message + 1);
+	const uint8_t *cursor = (const uint8_t *)(body + 1);
+	const uint8_t *end = (const uint8_t *)message + size;
+	uint32_t count = 0;
+	for (mach_msg_size_t i = 0; i < body->msgh_descriptor_count; i++) {
+		const mach_msg_type_descriptor_t *descriptor
+				= (const mach_msg_type_descriptor_t *)cursor;
+		if ((size_t)(end - cursor) < sizeof(*descriptor)) {
+			return false;
+		}
+		if (descriptor->type == MACH_MSG_PORT_DESCRIPTOR) {
+			const mach_msg_port_descriptor_t *d
+					= (const mach_msg_port_descriptor_t *)
+							cursor;
+			if (count == id_count
+					|| !remote_right_fits(
+							global_ids[count++],
+							d->disposition)) {
+				return false;
+			}
+			cursor += sizeof(*d);
+			continue;
+		}
+		if ((size_t)(end - cursor)
+				< sizeof(mach_msg_ool_descriptor64_t)) {
+			return false;
+		}
+		if (descriptor->type == MACH_MSG_GUARDED_PORT_DESCRIPTOR) {
+			const mach_msg_guarded_port_descriptor64_t *d
+					= (const mach_msg_guarded_port_descriptor64_t
+									*)
+							cursor;
+			if (count == id_count
+					|| !remote_right_fits(
+							global_ids[count++],
+							d->disposition)) {
+				return false;
+			}
+		} else if (descriptor->type == MACH_MSG_OOL_DESCRIPTOR
+				|| descriptor->type
+						== MACH_MSG_OOL_VOLATILE_DESCRIPTOR) {
+			const mach_msg_ool_descriptor64_t *d
+					= (const mach_msg_ool_descriptor64_t *)
+							cursor;
+			if (d->size > room) {
+				return false;
+			}
+			room -= d->size;
+		} else {
+			return false;
+		}
+		cursor += sizeof(mach_msg_ool_descriptor64_t);
+	}
+	return count == id_count;
+}
+
+static bool
+remote_right_fits(uint64_t global_id, mach_msg_type_name_t disposition)
+{
+	return global_id == 0 || global_id == dead_global_id
+			|| received_type(disposition)
+			!= MACH_MSG_TYPE_PORT_NONE;
 }
 
 static void
