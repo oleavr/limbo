@@ -2569,6 +2569,7 @@ queue_no_senders_notification(struct ipc_entry *entry)
 	struct ipc_port *port = entry->port;
 	if (!(entry->type & MACH_PORT_TYPE_RECEIVE)
 			|| (entry->type & MACH_PORT_TYPE_SEND)
+			|| port->global_id != 0
 			|| port->no_senders_notify == NULL) {
 		return;
 	}
