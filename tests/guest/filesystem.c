@@ -67,6 +67,9 @@
 static void check_files(void);
 static void check_directories(void);
 static void check_dangling_links(void);
+static void check_volume_requests(void);
+static int volume_request(attrgroup_t common, attrgroup_t dir, attrgroup_t file,
+		attrgroup_t fork, unsigned long options, uint32_t *length);
 static void check_attributes(void);
 static void check_copyfile(void);
 static void check_xattrs(void);
@@ -90,6 +93,7 @@ main(int argc, char **argv)
 	check_files();
 	check_directories();
 	check_dangling_links();
+	check_volume_requests();
 	check_attributes();
 	check_copyfile();
 	check_xattrs();
@@ -186,6 +190,68 @@ check_dangling_links(void)
 		CHECK(lstat("dangling", &st) == 0 && S_ISLNK(st.st_mode));
 		CHECK(unlink("dangling") == 0);
 	}
+}
+
+static void
+check_volume_requests(void)
+{
+	uint32_t plain, with_fork, with_security;
+	CHECK(volume_request(ATTR_CMN_NAME, 0, 0, 0, 0, &plain) == 0);
+	CHECK(volume_request(ATTR_CMN_NAME, 0, 0, ATTR_CMNEXT_RELPATH,
+			      FSOPT_ATTR_CMN_EXTENDED, &with_fork)
+			== 0);
+	CHECK(with_fork == plain);
+	CHECK(volume_request(ATTR_CMN_NAME | ATTR_CMN_EXTENDED_SECURITY
+					      | ATTR_CMN_RETURNED_ATTRS,
+			      0, 0, 0, 0, &with_security)
+			== 0);
+
+	attrgroup_t paths = ATTR_CMNEXT_RELPATH | ATTR_CMNEXT_NOFIRMLINKPATH;
+	attrgroup_t named = ATTR_CMN_NAME | ATTR_CMN_EXTENDED_SECURITY
+			| ATTR_CMN_FULLPATH;
+	const struct {
+		attrgroup_t common, dir, file, fork;
+		unsigned long options;
+	} refused[] = {
+			{.common = ATTR_CMN_FULLPATH},
+			{.common = ATTR_CMN_ADDEDTIME},
+			{.common = ATTR_CMN_DATA_PROTECT_FLAGS},
+			{.common = ATTR_CMN_EXTENDED_SECURITY},
+			{.common = ATTR_CMN_FILEID},
+			{.dir = ATTR_DIR_MOUNTSTATUS},
+			{.file = ATTR_FILE_TOTALSIZE},
+			{.fork = ATTR_CMNEXT_RELPATH},
+			{named, 0, 0, paths, FSOPT_ATTR_CMN_EXTENDED},
+	};
+	for (size_t i = 0; i != sizeof(refused) / sizeof(refused[0]); i++) {
+		errno = 0;
+		CHECK(volume_request(refused[i].common, refused[i].dir,
+				      refused[i].file, refused[i].fork,
+				      refused[i].options, &plain)
+				== -1);
+		CHECK(errno == EINVAL);
+	}
+}
+
+static int
+volume_request(attrgroup_t common, attrgroup_t dir, attrgroup_t file,
+		attrgroup_t fork, unsigned long options, uint32_t *length)
+{
+	struct attrlist request = {
+			.bitmapcount = ATTR_BIT_MAP_COUNT,
+			.commonattr = common,
+			.volattr = ATTR_VOL_INFO | ATTR_VOL_MOUNTPOINT
+					| ATTR_VOL_NAME | ATTR_VOL_MOUNTEDDEVICE
+					| ATTR_VOL_FSTYPENAME,
+			.dirattr = dir,
+			.fileattr = file,
+			.forkattr = fork,
+	};
+	static char buffer[16384];
+	int result = getattrlist(
+			".", &request, buffer, sizeof(buffer), options);
+	memcpy(length, buffer, sizeof(*length));
+	return result;
 }
 
 static void

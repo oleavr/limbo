@@ -125,6 +125,13 @@ struct reference {
 #define ATTR_CMN_ERROR              0x20000000
 #define ATTR_CMN_DATA_PROTECT_FLAGS 0x40000000
 #define ATTR_CMN_RETURNED_ATTRS     0x80000000
+
+#define ATTR_CMN_VOLUME_NEVER                                                  \
+	(ATTR_CMN_GEN_COUNT | ATTR_CMN_DOCUMENT_ID | ATTR_CMN_FULLPATH         \
+			| ATTR_CMN_ADDEDTIME | ATTR_CMN_DATA_PROTECT_FLAGS)
+#define ATTR_CMN_VOLUME_WITH_RETURNED                                          \
+	(ATTR_CMN_EXTENDED_SECURITY | ATTR_CMN_UUID | ATTR_CMN_GRPUUID         \
+			| ATTR_CMN_FILEID | ATTR_CMN_PARENTID)
 #define ATTR_CMN_VALIDMASK          0xFFFFFFFF
 
 #define ATTR_VOL_FSTYPE          0x00000001
@@ -231,6 +238,8 @@ typedef struct vol_capabilities_attr {
 
 static int pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 		uint64_t options, char *buffer);
+static bool volume_request_valid(
+		const struct __darwin_attrlist *list, uint64_t options);
 static int attrlist_open(int dirfd, const char *path, uint64_t options);
 static uint32_t pack_reference(char *buffer, uint32_t offset,
 		struct reference *references, uint32_t *reference_count,
@@ -272,6 +281,11 @@ pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 		return 1;
 	}
 
+	if (alistp->volattr && !volume_request_valid(alistp, options)) {
+		errno = EINVAL;
+		return 1;
+	}
+
 	if (alistp->forkattr && !(options & FSOPT_ATTR_CMN_EXTENDED)) {
 		unimplemented();
 	}
@@ -292,7 +306,7 @@ pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 			.volattr = alistp->volattr,
 			.dirattr = alistp->dirattr,
 			.fileattr = alistp->fileattr,
-			.forkattr = alistp->forkattr,
+			.forkattr = alistp->volattr ? 0 : alistp->forkattr,
 	};
 	if (!(options & FSOPT_PACK_INVAL_ATTRS)) {
 		if (S_ISDIR(s.st_mode)) {
@@ -1226,6 +1240,18 @@ sys_setattrlistat(int dirfd, const char *path, void *alist,
 		return err_map(errno);
 	}
 	return 0;
+}
+
+static bool
+volume_request_valid(const struct __darwin_attrlist *list, uint64_t options)
+{
+	bool extended = options & FSOPT_ATTR_CMN_EXTENDED;
+	bool returned = list->commonattr & ATTR_CMN_RETURNED_ATTRS;
+	bool fits = returned
+			|| !(list->commonattr & ATTR_CMN_VOLUME_WITH_RETURNED);
+	return fits && !list->fileattr && !list->dirattr
+			&& (extended || !list->forkattr)
+			&& !(list->commonattr & ATTR_CMN_VOLUME_NEVER);
 }
 
 static int
