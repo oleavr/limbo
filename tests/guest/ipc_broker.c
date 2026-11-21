@@ -119,6 +119,7 @@ typedef struct {
 static const char SERVICE_NAME[] = "com.limbo.test.ipc";
 static const char LOST_NAME[] = "com.limbo.test.ipc.lost";
 static const char *program;
+static mach_port_t inherited;
 static const char PEER_NAME[] = "com.limbo.test.ipc.peer";
 static const char VICTIM_NAME[] = "com.limbo.test.ipc.victim";
 static const char GONE_NAME[] = "com.limbo.test.ipc.gone";
@@ -1721,6 +1722,28 @@ check_count_follows_message(mach_port_t holder)
 }
 
 static void
+destroy_inherited(void)
+{
+	bootstrap_call(LOOK_UP, HOLDER_NAME);
+	destroy_port(inherited);
+}
+
+static void
+check_fork_keeps_counts(mach_port_t holder)
+{
+	inherited = give_send_right(holder);
+	pid_t child = start(destroy_inherited);
+	pid_t guardian = guard(child);
+	int status = reap(child);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	kill(guardian, SIGKILL);
+	reap(guardian);
+	CHECK(ask_for(holder, TYPE_ID) == MACH_PORT_TYPE_SEND);
+	CHECK(ask_for(holder, DROP_ID) == KERN_SUCCESS);
+	destroy_port(inherited);
+}
+
+static void
 check_sender_counts(void)
 {
 	child_t holder = start_peer(HOLDER_NAME);
@@ -1741,6 +1764,7 @@ check_sender_counts(void)
 	destroy_port(port);
 
 	check_count_follows_message(holder.port);
+	check_fork_keeps_counts(holder.port);
 	child_t third = start_peer(THIRD_NAME);
 	port = give_send_right(holder.port);
 	notify = request_notification(port, MACH_NOTIFY_NO_SENDERS);

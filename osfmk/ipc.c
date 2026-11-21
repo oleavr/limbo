@@ -392,6 +392,23 @@ static void
 ipc_fork_child(void)
 {
 	arrival_waiters = NULL;
+	while (pending_notices != NULL) {
+		struct pending_notice *notice = pending_notices;
+		pending_notices = notice->next;
+		free(notice);
+	}
+	pending_notices_tail = &pending_notices;
+	while (remote_send_onces != NULL) {
+		struct remote_send_once *record = remote_send_onces;
+		remote_send_onces = record->next;
+		free(record);
+	}
+	for (uint32_t i = 1; i < entry_count; i++) {
+		if (entries[i].port != NULL) {
+			entries[i].port->sender_guest_count = 0;
+			entries[i].port->grants = 0;
+		}
+	}
 	pthread_mutex_unlock(&lock);
 	pthread_mutex_unlock(&notice_order);
 }
