@@ -1215,7 +1215,8 @@ receive_notice(uint64_t dest_global_id, const struct remote_notice *notice)
 	bool owned = entry != NULL && (entry->type & MACH_PORT_TYPE_RECEIVE);
 	if (owned && notice->kind == REMOTE_NOTICE_RELEASE) {
 		release_grants(entry, notice->guest_id, notice->count);
-	} else if (owned && notice->kind == REMOTE_NOTICE_ADD) {
+	} else if (owned && notice->kind == REMOTE_NOTICE_ADD
+			&& !guest_is_gone(notice->guest_id)) {
 		count_sender_guest(port, notice->guest_id, 1);
 	} else if (owned && notice->kind == REMOTE_NOTICE_SEND_ONCE) {
 		queue_send_once_notifications(entry,
