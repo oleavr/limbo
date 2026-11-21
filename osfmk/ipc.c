@@ -763,7 +763,6 @@ remote_send(mach_msg_header_t *header, mach_msg_size_t size, ipc_side_t sender,
 	memcpy(blob + sizeof(rh) + size + ids_length, data, data_length);
 	free(data);
 
-	release_unused_entries(header);
 	pthread_mutex_unlock(&lock);
 	flush_notices();
 	if (fds.failed) {
@@ -773,13 +772,14 @@ remote_send(mach_msg_header_t *header, mach_msg_size_t size, ipc_side_t sender,
 		mr = broker_client_send(dest_global_id, blob, blob_length,
 				fds.fds, fds.count);
 	}
+	pthread_mutex_lock(&lock);
 	if (mr != MACH_MSG_SUCCESS) {
-		pthread_mutex_lock(&lock);
 		count_rights(header, bits, rh.reply_global_id, global_ids,
 				broker_guest_of(dest_global_id), false);
-		pthread_mutex_unlock(&lock);
-		flush_notices();
 	}
+	release_unused_entries(header);
+	pthread_mutex_unlock(&lock);
+	flush_notices();
 	free(global_ids);
 	free(fds.fds);
 	free(blob);
