@@ -159,6 +159,9 @@ static const mach_msg_id_t FORWARD_REPLY_ID = 7924;
 static const mach_msg_id_t HOLD_BODY_ID = 7925;
 static const mach_msg_id_t STARVE_ID = 7926;
 static const mach_msg_id_t FEED_ID = 7927;
+static const mach_msg_id_t BAD_REPLY_ID = 7928;
+static const mach_msg_id_t FAIL_HOME_ID = 7929;
+static const mach_port_name_t NO_SUCH_NAME = 0x00fffe03;
 static const char FROM_SENDER[] = "from the sender";
 static const char FROM_RECEIVER[] = "from the receiver";
 
@@ -762,6 +765,51 @@ forward_reply(mach_port_t to, mach_port_t reply)
 }
 
 static int32_t
+bad_reply(mach_port_t reply)
+{
+	carrier_t carrier = carrier_of(reply, MARK_ID, NO_SUCH_NAME);
+	carrier.Head.msgh_bits
+			= MACH_MSGH_BITS_SET(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0, 0,
+					MACH_MSGH_BITS_COMPLEX);
+	return mach_msg(&carrier.Head, MACH_SEND_MSG, sizeof(carrier), 0,
+			MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+}
+
+static int32_t
+fail_home(mach_port_t home, mach_port_t reply)
+{
+	mach_port_t fileport;
+	CHECK(fileport_makeport(STDIN_FILENO, &fileport) == 0);
+	struct {
+		mach_msg_header_t Head;
+		mach_msg_body_t body;
+		mach_msg_port_descriptor_t ports[2];
+	} message = {
+		.Head = {
+			.msgh_bits = MACH_MSGH_BITS_SET(MACH_MSG_TYPE_MOVE_SEND,
+					0, 0, MACH_MSGH_BITS_COMPLEX),
+			.msgh_size = sizeof(message),
+			.msgh_remote_port = home,
+			.msgh_id = MARK_ID,
+		},
+		.body = {.msgh_descriptor_count = 2},
+		.ports = {
+			{
+				.name = reply,
+				.disposition = MACH_MSG_TYPE_MOVE_SEND_ONCE,
+				.type = MACH_MSG_PORT_DESCRIPTOR,
+			},
+			{
+				.name = fileport,
+				.disposition = MACH_MSG_TYPE_MOVE_SEND,
+				.type = MACH_MSG_PORT_DESCRIPTOR,
+			},
+		},
+	};
+	return send_starved(&message.Head);
+}
+
+static int32_t
 send_last(mach_port_t right)
 {
 	mach_msg_header_t last = {
@@ -899,6 +947,12 @@ serve_peer(void)
 			answer(&message.Head, setrlimit(RLIMIT_NOFILE, &none));
 		} else if (message.Head.msgh_id == FEED_ID) {
 			answer(&message.Head, setrlimit(RLIMIT_NOFILE, &files));
+		} else if (message.Head.msgh_id == BAD_REPLY_ID) {
+			answer(&message.Head, bad_reply(held_reply));
+		} else if (message.Head.msgh_id == FAIL_HOME_ID) {
+			answer(&message.Head,
+					fail_home(message.carrier.port.name,
+							held_reply));
 		} else if (message.Head.msgh_id == LARGE_ID) {
 			answer(&message.Head,
 					patterned(message.bytes,
@@ -1930,6 +1984,25 @@ check_failed_send(mach_port_t to)
 	destroy_port(reply);
 	CHECK(close(read_end) == 0);
 	CHECK(ask_for(to, FEED_ID) == 0);
+
+	reply = post_for(to, HOLD_REPLY_ID);
+	CHECK(ask_for(to, BAD_REPLY_ID) == MACH_SEND_INVALID_RIGHT);
+	CHECK(receive_notification(
+			      reply, MACH_NOTIFY_SEND_ONCE, ANSWER_MS, &unused)
+			== MACH_MSG_SUCCESS);
+	destroy_port(reply);
+
+	reply = post_for(to, HOLD_REPLY_ID);
+	mach_port_t home;
+	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &home);
+	carrier = carrier_of(to, FAIL_HOME_ID, home);
+	carrier.port.disposition = MACH_MSG_TYPE_MAKE_SEND;
+	CHECK(ask(&carrier.Head) == MACH_SEND_NO_BUFFER);
+	CHECK(receive_notification(
+			      reply, MACH_NOTIFY_SEND_ONCE, ANSWER_MS, &unused)
+			== MACH_MSG_SUCCESS);
+	destroy_port(reply);
+	destroy_port(home);
 
 	reply = post_for(to, HOLD_REPLY_ID);
 	CHECK(ask_for(to, FAIL_REPLY_ID) == MACH_SEND_NO_BUFFER);

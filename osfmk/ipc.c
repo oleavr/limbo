@@ -259,6 +259,7 @@ static void count_sender_guest(
 static void release_grants(
 		struct ipc_entry *entry, uint32_t guest_id, uint64_t count);
 static void give_back_grants(struct ipc_port *port);
+static void queue_send_once_gone(uint64_t global_id, uint32_t guest_id);
 static void tell_holders_dead(struct ipc_port *port);
 
 static void remember_send_once(mach_port_name_t port, uint32_t guest_id);
@@ -752,6 +753,11 @@ remote_send(mach_msg_header_t *header, mach_msg_size_t size, ipc_side_t sender,
 	}
 
 	mach_msg_return_t mr = remote_copyin(header, sender);
+	if (mr == MACH_SEND_INVALID_RIGHT
+			&& received_type(MACH_MSGH_BITS_REMOTE(bits))
+					== MACH_MSG_TYPE_PORT_SEND_ONCE) {
+		queue_send_once_gone(dest_global_id, broker_client_guest_id());
+	}
 	if (mr != MACH_MSG_SUCCESS) {
 		release_unused_entries(header);
 		pthread_mutex_unlock(&lock);
@@ -814,14 +820,7 @@ remote_send(mach_msg_header_t *header, mach_msg_size_t size, ipc_side_t sender,
 	if (mr != MACH_MSG_SUCCESS
 			&& received_type(rh.dest_disposition)
 					== MACH_MSG_TYPE_PORT_SEND_ONCE) {
-		queue_notice((struct pending_notice){
-				.global_id = dest_global_id,
-				.notice = {
-						.kind = REMOTE_NOTICE_SEND_ONCE,
-						.guest_id = broker_client_guest_id(),
-						.count = 1,
-				},
-		});
+		queue_send_once_gone(dest_global_id, broker_client_guest_id());
 	}
 	release_unused_entries(header);
 	pthread_mutex_unlock(&lock);
@@ -1096,6 +1095,9 @@ count_right(mach_port_name_t name, mach_msg_type_name_t type,
 	} else if (owned && type == MACH_MSG_TYPE_PORT_SEND_ONCE) {
 		queue_send_once_notifications(entry,
 				forget_send_onces(name, dest_guest_id, 1));
+	} else if (!sent && type == MACH_MSG_TYPE_PORT_SEND_ONCE
+			&& global_id != 0 && owner == dest_guest_id) {
+		queue_send_once_gone(global_id, broker_client_guest_id());
 	} else if (elsewhere && type == MACH_MSG_TYPE_PORT_SEND_ONCE) {
 		queue_notice((struct pending_notice){
 				.global_id = global_id,
@@ -1232,6 +1234,19 @@ move_send_once(struct ipc_entry *entry, uint32_t from, uint32_t to)
 	} else {
 		remember_send_once(entry->port->name, to);
 	}
+}
+
+static void
+queue_send_once_gone(uint64_t global_id, uint32_t guest_id)
+{
+	queue_notice((struct pending_notice){
+			.global_id = global_id,
+			.notice = {
+					.kind = REMOTE_NOTICE_SEND_ONCE,
+					.guest_id = guest_id,
+					.count = 1,
+			},
+	});
 }
 
 static void
