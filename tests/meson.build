@@ -28,6 +28,7 @@ guest_tests = [
   'credentials.c',
   'cxx.cpp',
   'dispatch.c',
+  'eventlink.c',
   'filesystem.c',
   'fsevents.c',
   'hello.c',
