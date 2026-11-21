@@ -4223,7 +4223,7 @@ sys_sys_fileport_makefd(mach_port_name_t port)
 	if (fd == -1) {
 		return _EINVAL;
 	}
-	return errno_map(fcntl(fd, F_DUPFD, 0));
+	return errno_map(fcntl(fd, F_DUPFD_CLOEXEC, 0));
 }
 
 int
