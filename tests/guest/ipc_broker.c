@@ -1082,36 +1082,6 @@ stop(pid_t pid)
 }
 
 static void
-lose_connection(void)
-{
-	bool open_before[FDS_SEEN];
-	for (int fd = 0; fd != FDS_SEEN; fd++) {
-		open_before[fd] = fcntl(fd, F_GETFD) != -1;
-	}
-	CHECK(bootstrap_call(LOOK_UP, LOST_NAME) != MACH_PORT_NULL);
-	int violated = 0;
-	for (int fd = 0; fd != FDS_SEEN; fd++) {
-		if (!open_before[fd] && fcntl(fd, F_GETFD) != -1) {
-			violated += write(fd, "", 1) == 1;
-		}
-	}
-	CHECK(violated == 1);
-	CHECK(bootstrap_call(LOOK_UP, LOST_NAME) == MACH_PORT_NULL);
-}
-
-static void
-check_lost_connection(void)
-{
-	CHECK(bootstrap_call(CHECK_IN, LOST_NAME) != MACH_PORT_NULL);
-	pid_t child = start(lose_connection);
-	pid_t guardian = guard(child);
-	int status = reap(child);
-	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
-	kill(guardian, SIGKILL);
-	reap(guardian);
-}
-
-static void
 check_exec(void)
 {
 	pid_t child = start(connect_and_exec);
@@ -2105,6 +2075,43 @@ check_forwarded_send_once(void)
 			== MACH_MSG_SUCCESS);
 	destroy_port(reply);
 	end_peer(&third);
+}
+
+static void
+lose_connection(void)
+{
+	bool open_before[FDS_SEEN];
+	for (int fd = 0; fd != FDS_SEEN; fd++) {
+		open_before[fd] = fcntl(fd, F_GETFD) != -1;
+	}
+	mach_port_t port = bootstrap_call(LOOK_UP, LOST_NAME);
+	CHECK(port != MACH_PORT_NULL);
+	mach_port_t reply = post_for(port, MARK_ID);
+	int violated = 0;
+	for (int fd = 0; fd != FDS_SEEN; fd++) {
+		if (!open_before[fd] && fcntl(fd, F_GETFD) != -1) {
+			violated += write(fd, "", 1) == 1;
+		}
+	}
+	CHECK(violated == 1);
+	mach_port_name_t unused;
+	CHECK(receive_notification(
+			      reply, MACH_NOTIFY_SEND_ONCE, ANSWER_MS, &unused)
+			== MACH_MSG_SUCCESS);
+	CHECK(type_of(port) == MACH_PORT_TYPE_DEAD_NAME);
+	CHECK(bootstrap_call(LOOK_UP, LOST_NAME) == MACH_PORT_NULL);
+}
+
+static void
+check_lost_connection(void)
+{
+	CHECK(bootstrap_call(CHECK_IN, LOST_NAME) != MACH_PORT_NULL);
+	pid_t child = start(lose_connection);
+	pid_t guardian = guard(child);
+	int status = reap(child);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	kill(guardian, SIGKILL);
+	reap(guardian);
 }
 
 static void

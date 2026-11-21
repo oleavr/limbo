@@ -1739,6 +1739,28 @@ ipc_remote_guest_gone(uint32_t guest_id)
 	flush_notices();
 }
 
+void
+ipc_remote_all_gone(void)
+{
+	pthread_mutex_lock(&lock);
+	while (remote_send_onces != NULL) {
+		send_onces_gone(remote_send_onces->guest_id);
+	}
+	for (uint32_t i = 1; i < entry_count; i++) {
+		struct ipc_port *port = entries[i].port;
+		if (port != NULL && port->remote) {
+			turn_dead(&entries[i]);
+		}
+		if (port != NULL
+				&& (entries[i].type & MACH_PORT_TYPE_RECEIVE)) {
+			port->sender_guest_count = 0;
+			queue_no_senders_notification(&entries[i]);
+		}
+	}
+	pthread_mutex_unlock(&lock);
+	flush_notices();
+}
+
 static void
 send_onces_gone(uint32_t guest_id)
 {

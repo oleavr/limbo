@@ -188,6 +188,7 @@ read_until_end(void *user)
 	pending_lookup_reply = (struct broker_lookup_reply){0};
 	pthread_cond_signal(&reply_ready);
 	pthread_mutex_unlock(&reply_lock);
+	ipc_remote_all_gone();
 	return NULL;
 }
 
