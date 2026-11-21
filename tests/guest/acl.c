@@ -307,6 +307,26 @@ check_inherited(void)
 			== -1);
 	CHECK(errno == EEXIST);
 
+	CHECK(mkdir("parent/folder", 0) == 0);
+	CHECK(entries("parent/folder") == 2);
+	CHECK(stat("parent/folder", &st) == 0 && (st.st_mode & 0777) == 0);
+	CHECK(entry_for("parent/folder", USER, &found));
+	CHECK(found.flags
+			== (ACL_EXTENDED_ALLOW | INHERITED | FILE_INHERIT
+					| DIRECTORY_INHERIT));
+	CHECK(found.rights == perms[0]);
+	CHECK(entry_for("parent/folder", USER + 1, &found));
+	CHECK(found.flags == (ACL_EXTENDED_ALLOW | INHERITED));
+	CHECK(!entry_for("parent/folder", USER + 2, &found));
+
+	CHECK(chmod("parent/folder", 0700) == 0);
+	fd = open("parent/folder/grandchild", O_CREAT | O_WRONLY, 0644);
+	CHECK(fd != -1 && close(fd) == 0);
+	CHECK(entries("parent/folder/grandchild") == 1);
+	CHECK(entry_for("parent/folder/grandchild", USER, &found));
+	CHECK(mkdirat(AT_FDCWD, "parent/folder/deeper", 0755) == 0);
+	CHECK(entries("parent/folder/deeper") == 1);
+
 	CHECK(symlink("parent/through", "dangling") == 0);
 	fd = open("dangling", O_CREAT | O_WRONLY, 0644);
 	CHECK(fd != -1 && close(fd) == 0);
@@ -318,9 +338,15 @@ check_inherited(void)
 	fd = open("plain/file", O_CREAT | O_WRONLY, 0644);
 	CHECK(fd != -1 && close(fd) == 0);
 	CHECK(entries("plain/file") == -1);
+	CHECK(mkdir("plain/folder", 0755) == 0);
+	CHECK(entries("plain/folder") == -1);
 
+	CHECK(rmdir("plain/folder") == 0);
 	CHECK(unlink("plain/file") == 0);
 	CHECK(rmdir("plain") == 0);
+	CHECK(rmdir("parent/folder/deeper") == 0);
+	CHECK(unlink("parent/folder/grandchild") == 0);
+	CHECK(rmdir("parent/folder") == 0);
 	CHECK(unlink("parent/exclusive") == 0);
 	CHECK(unlink("parent/file") == 0);
 	CHECK(rmdir("parent") == 0);
