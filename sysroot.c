@@ -52,6 +52,8 @@
 #define RESOLVE_NOFOLLOW_ANY 0x1
 #define LINKS_MAX            32
 
+#define DATA_VOLUME "/System/Volumes/Data"
+
 static char root[PATH_MAX];
 static dev_t root_dev;
 static ino_t root_ino;
@@ -61,6 +63,7 @@ static char too_long[PATH_MAX + 1];
 static bool leads_on(
 		int dirfd, const char *path, const char *host, char *target);
 static const char *host_path(const char *path, int flags, char *buffer);
+static bool under(const char *path, const char *prefix);
 static bool covers(const char *path);
 static const char *in_root(const char *path, char *buffer);
 static int open_in_root(const char *path, int flags, uint64_t resolve);
@@ -170,6 +173,13 @@ host_path(const char *path, int flags, char *buffer)
 		}
 	}
 
+	if (under(path, DATA_VOLUME)) {
+		path += strlen(DATA_VOLUME);
+		if (path[0] == '\0') {
+			path = "/";
+		}
+	}
+
 	if (strncmp(path, "/dev", 4) == 0
 			&& (path[4] == '/' || path[4] == '\0')) {
 		return path;
@@ -219,6 +229,14 @@ host_path(const char *path, int flags, char *buffer)
 	snprintf(buffer + length, PATH_MAX - length, "/%.*s",
 			(int)name_length, name);
 	return buffer;
+}
+
+static bool
+under(const char *path, const char *prefix)
+{
+	size_t length = strlen(prefix);
+	return strncmp(path, prefix, length) == 0
+			&& (path[length] == '\0' || path[length] == '/');
 }
 
 static bool

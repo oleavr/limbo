@@ -62,6 +62,7 @@ guest_tests = [
   'sysinfo.c',
   'threads.c',
   'vm_copy_after_main.c',
+  'volumes.c',
   'xpc.c',
 ]
 

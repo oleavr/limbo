@@ -86,6 +86,11 @@ main(void)
 	check_creation_path("/dangling-outside", 0, "/new");
 	check_creation_path("/absolute/file", 0, "/System/Library/file");
 	check_creation_path("dangling-absolute", 0, "/private/etc/new");
+	check_host_path("/System/Volumes/Data", 0, "");
+	check_host_path("/System/Volumes/Data/System/Library/file", 0,
+			"/System/Library/file");
+	check_host_path("/System/Volumes/Data/etc/new", 0, "/private/etc/new");
+	check_host_path("/System/Volumes/DataX", 0, "/System/Volumes/DataX");
 	check_host_path("/proc/self", 0, "/proc/self");
 	check_host_path("/proc/self/status", 0, "/proc/self/status");
 
