@@ -126,6 +126,7 @@ static const char HOME_NAME[] = "com.limbo.test.ipc.home";
 static const char HOLDER_NAME[] = "com.limbo.test.ipc.holder";
 static const char THIRD_NAME[] = "com.limbo.test.ipc.third";
 static const char DOOMED_NAME[] = "com.limbo.test.ipc.doomed";
+static const char RAW_NAME[] = "com.limbo.test.ipc.raw";
 static const mach_msg_id_t CHECK_IN = 402;
 static const mach_msg_id_t LOOK_UP = 404;
 static const mach_msg_id_t REQUEST_ID = 7777;
@@ -1512,6 +1513,71 @@ receive_raw_port(mach_port_t home)
 	return message.port.name;
 }
 
+static uint64_t
+receive_raw_id(int fd)
+{
+	struct {
+		struct broker_frame frame;
+		struct broker_send send;
+		struct remote_header remote;
+		carrier_t carrier;
+		uint64_t id;
+	} delivered;
+	CHECK(recv(fd, &delivered, sizeof(delivered), 0) == sizeof(delivered));
+	CHECK(delivered.frame.type == BROKER_DELIVER);
+	return delivered.id;
+}
+
+static void
+check_late_add(int fd, uint32_t gone_guest_id)
+{
+	struct {
+		struct broker_frame frame;
+		struct broker_welcome welcome;
+	} welcomed;
+	send_raw(fd, BROKER_HELLO, NULL, 0);
+	do {
+		CHECK(recv(fd, &welcomed, sizeof(welcomed), 0)
+				== sizeof(welcomed));
+	} while (welcomed.frame.type != BROKER_WELCOME);
+	struct broker_register registration = {
+			.global_id
+			= broker_global_id(welcomed.welcome.guest_id, 1),
+	};
+	strncpy(registration.name, RAW_NAME, sizeof(registration.name) - 1);
+	send_raw(fd, BROKER_REGISTER, &registration, sizeof(registration));
+
+	mach_port_t port;
+	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
+	carrier_t carrier = carrier_of(look_up(RAW_NAME), KEEP_ID, port);
+	carrier.port.disposition = MACH_MSG_TYPE_MAKE_SEND;
+	send_request(&carrier.Head);
+	struct {
+		struct broker_send send;
+		struct remote_header remote;
+		struct remote_notice notice;
+	} add = {
+		.send = {
+			.dest_global_id = receive_raw_id(fd),
+			.blob_length = sizeof(add) - sizeof(add.send),
+		},
+		.notice = {
+			.kind = REMOTE_NOTICE_ADD,
+			.guest_id = gone_guest_id,
+		},
+	};
+	send_raw(fd, BROKER_SEND, &add, sizeof(add));
+	mach_port_t notify = request_notification(port, MACH_NOTIFY_NO_SENDERS);
+	CHECK(close(fd) == 0);
+	mach_port_name_t count;
+	CHECK(receive_notification(
+			      notify, MACH_NOTIFY_NO_SENDERS, ANSWER_MS, &count)
+			== MACH_MSG_SUCCESS);
+	mach_port_mod_refs(
+			mach_task_self(), notify, MACH_PORT_RIGHT_RECEIVE, -1);
+	mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_RECEIVE, -1);
+}
+
 static void
 check_gone_process(void)
 {
@@ -1552,7 +1618,7 @@ check_gone_process(void)
 	raw.id++;
 	send_raw(fd, BROKER_SEND, &raw, sizeof(raw));
 	CHECK(receive_raw_port(home) == MACH_PORT_DEAD);
-	CHECK(close(fd) == 0);
+	check_late_add(fd, broker_guest_of(raw.id));
 	kr = mach_port_mod_refs(mach_task_self(), gone.port,
 			MACH_PORT_RIGHT_DEAD_NAME, -2);
 	CHECK(kr == KERN_SUCCESS);
