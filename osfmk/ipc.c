@@ -47,6 +47,7 @@
 #include "broker_client.h"
 #include "bsd/kevent.h"
 #include "bsd/signals.h"
+#include "eventlink.h"
 #include "ipc.h"
 #include "libinfo.h"
 #include "mach_vm.h"
@@ -134,6 +135,7 @@ struct is_iokit_subsystem;
 struct processor_set_subsystem;
 struct mach_voucher_subsystem;
 struct memory_entry_subsystem;
+struct mach_eventlink_subsystem;
 
 extern const struct task_subsystem task_subsystem;
 extern const struct mach_vm_subsystem mach_vm_subsystem;
@@ -147,6 +149,7 @@ extern const struct is_iokit_subsystem is_iokit_subsystem;
 extern const struct processor_set_subsystem processor_set_subsystem;
 extern const struct mach_voucher_subsystem mach_voucher_subsystem;
 extern const struct memory_entry_subsystem memory_entry_subsystem;
+extern const struct mach_eventlink_subsystem mach_eventlink_subsystem;
 extern const struct mig_subsystem x_bootstrap_subsystem;
 
 static const struct mig_subsystem *const kobject_subsystems[] = {
@@ -163,6 +166,7 @@ static const struct mig_subsystem *const kobject_subsystems[] = {
 		(const struct mig_subsystem *)&processor_set_subsystem,
 		(const struct mig_subsystem *)&mach_voucher_subsystem,
 		(const struct mig_subsystem *)&memory_entry_subsystem,
+		(const struct mig_subsystem *)&mach_eventlink_subsystem,
 };
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -198,6 +202,7 @@ static struct ipc_port *port_for_global_id(uint64_t global_id);
 static mach_port_name_t import_remote_send(
 		uint64_t global_id, mach_msg_type_name_t type);
 
+static void kill_kobject_port(struct ipc_entry *entry);
 static mach_port_name_t kobject_send_right(ipc_kobject_type_t type);
 static struct ipc_port *kobject_port(ipc_kobject_type_t type);
 static mach_msg_return_t send(mach_msg_header_t *msg, mach_msg_size_t size,
@@ -421,7 +426,29 @@ void
 ipc_kobject_destroy(mach_port_name_t name)
 {
 	pthread_mutex_lock(&lock);
+	kill_kobject_port(lookup(name));
+	pthread_mutex_unlock(&lock);
+	flush_notices();
+}
+
+void *
+ipc_kobject_detach(mach_port_name_t name, ipc_kobject_type_t type)
+{
+	pthread_mutex_lock(&lock);
 	struct ipc_entry *entry = lookup(name);
+	void *kobject = NULL;
+	if (entry != NULL && entry->port->kotype == type) {
+		kobject = entry->port->kobject;
+		kill_kobject_port(entry);
+	}
+	pthread_mutex_unlock(&lock);
+	flush_notices();
+	return kobject;
+}
+
+static void
+kill_kobject_port(struct ipc_entry *entry)
+{
 	entry->port->kotype = IPC_KOBJECT_NONE;
 	entry->port->kobject = NULL;
 	if (entry->type & MACH_PORT_TYPE_SEND) {
@@ -429,8 +456,6 @@ ipc_kobject_destroy(mach_port_name_t name)
 		queue_dead_name_notification(entry);
 	}
 	entry_release_if_unused(entry);
-	pthread_mutex_unlock(&lock);
-	flush_notices();
 }
 
 bool
@@ -2599,6 +2624,9 @@ entry_release_if_unused(struct ipc_entry *entry)
 	} else if (port->kotype == IPC_KOBJECT_FILEPORT) {
 		close(*(int *)port->kobject);
 		free(port->kobject);
+		free(port);
+	} else if (port->kotype == IPC_KOBJECT_EVENTLINK) {
+		eventlink_port_gone(port->kobject);
 		free(port);
 	}
 	entry->port = NULL;

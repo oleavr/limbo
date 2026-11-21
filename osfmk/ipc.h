@@ -68,6 +68,7 @@ typedef enum {
 	IPC_KOBJECT_MEMORY_ENTRY,
 	/* A file descriptor as a port, which goes to other processes */
 	IPC_KOBJECT_FILEPORT,
+	IPC_KOBJECT_EVENTLINK,
 } ipc_kobject_type_t;
 
 mach_port_name_t ipc_task_self(void);
@@ -80,6 +81,7 @@ mach_port_name_t ipc_kobject_alloc(ipc_kobject_type_t type, void *kobject);
 mach_port_name_t ipc_kobject_copy_send(mach_port_name_t name);
 void *ipc_kobject_lookup(mach_port_name_t name, ipc_kobject_type_t type);
 void ipc_kobject_destroy(mach_port_name_t name);
+void *ipc_kobject_detach(mach_port_name_t name, ipc_kobject_type_t type);
 
 bool ipc_port_peek(mach_port_name_t name);
 
