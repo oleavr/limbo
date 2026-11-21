@@ -29,6 +29,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <libproc.h>
+#include <limits.h>
 #include <netinet/in.h>
 #include <netinet/in_pcb.h>
 #include <netinet/in_systm.h>
@@ -60,6 +61,7 @@ static void check_control_with_many_open(void);
 static void check_pcblist(void);
 static void check_statistics(void);
 static void check_inet_socket_info(void);
+static void check_unix_socket_info(void);
 static struct socket_info socket_info(int fd);
 static void read_statistics(const char *name, void *stats, size_t size);
 static uint8_t *read_list(const char *name, size_t *size);
@@ -123,6 +125,7 @@ main(void)
 	check_pcblist();
 	check_statistics();
 	check_inet_socket_info();
+	check_unix_socket_info();
 	check_icmp();
 	return 0;
 }
@@ -562,6 +565,62 @@ check_inet_socket_info(void)
 
 	CHECK(close(datagram) == 0 && close(accepted) == 0);
 	CHECK(close(client) == 0 && close(listener) == 0);
+}
+
+static void
+check_unix_socket_info(void)
+{
+	char folder[PATH_MAX];
+	CHECK(realpath("/tmp", folder) != NULL);
+	strlcat(folder, "/sockets.XXXXXX", sizeof(folder));
+	CHECK(mkdtemp(folder) != NULL);
+	int start = open(".", O_RDONLY);
+	CHECK(start != -1 && chdir(folder) == 0);
+
+	struct sockaddr_un address = {.sun_family = AF_UNIX};
+	char absolute[sizeof(address.sun_path)];
+	char longest[sizeof(address.sun_path)];
+	snprintf(absolute, sizeof(absolute), "%s/bound", folder);
+	memset(longest, 'n', sizeof(longest));
+	memcpy(longest, folder, strlen(folder));
+	longest[strlen(folder)] = '/';
+	longest[sizeof(longest) - 1] = '\0';
+	const char *paths[] = {absolute, "relative", longest};
+	for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+		strlcpy(address.sun_path, paths[i], sizeof(address.sun_path));
+		socklen_t length = i == 0 ? (socklen_t)SUN_LEN(&address)
+					  : sizeof(address);
+		address.sun_len = (uint8_t)length;
+		int listener = socket(AF_UNIX, SOCK_STREAM, 0);
+		CHECK(listener != -1);
+		CHECK(bind(listener, (struct sockaddr *)&address, length) == 0);
+		CHECK(listen(listener, 1) == 0);
+
+		struct socket_info info = socket_info(listener);
+		CHECK(info.soi_type == SOCK_STREAM);
+		CHECK(info.soi_family == AF_UNIX);
+		CHECK(info.soi_kind == SOCKINFO_UN);
+		CHECK(info.soi_options & SO_ACCEPTCONN);
+		CHECK((info.soi_state & SOI_S_ISCONNECTED) == 0);
+		struct sockaddr_un *bound
+				= &info.soi_proto.pri_un.unsi_addr.ua_sun;
+		CHECK(bound->sun_family == AF_UNIX);
+		CHECK(bound->sun_len == length);
+		CHECK(strcmp(bound->sun_path, paths[i]) == 0);
+		CHECK(close(listener) == 0 && unlink(paths[i]) == 0);
+	}
+
+	int pair[2];
+	CHECK(socketpair(AF_UNIX, SOCK_DGRAM, 0, pair) == 0);
+	struct socket_info info = socket_info(pair[0]);
+	CHECK(info.soi_type == SOCK_DGRAM && info.soi_family == AF_UNIX);
+	CHECK(info.soi_kind == SOCKINFO_UN);
+	CHECK(info.soi_state & SOI_S_ISCONNECTED);
+	CHECK(info.soi_proto.pri_un.unsi_addr.ua_sun.sun_path[0] == '\0');
+
+	CHECK(close(pair[0]) == 0 && close(pair[1]) == 0);
+	CHECK(fchdir(start) == 0 && close(start) == 0);
+	CHECK(rmdir(folder) == 0);
 }
 
 static struct socket_info

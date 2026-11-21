@@ -424,6 +424,7 @@ enum {
 #define INI_IPV6             0x2
 #define SOI_S_ISCONNECTED    0x2
 #define DARWIN_SO_ACCEPTCONN 0x2
+#define DARWIN_AF_UNIX       1
 #define DARWIN_AF_INET       2
 #define DARWIN_AF_INET6      30
 #define DARWIN_SOCK_STREAM   1
@@ -492,6 +493,8 @@ static int socket_fdinfo(
 static bool inet_socket_info(const char *proc_dir, unsigned long inode,
 		struct socket_info *info);
 static void put_address(uint32_t address[4], const char *hex, bool v6);
+static bool unix_socket_info(const char *proc_dir, unsigned long inode,
+		struct socket_info *info);
 static int pipe_fdinfo(
 		int32_t pid, int32_t fd, void *buffer, int32_t buffersize);
 static int kqueue_fdinfo(
@@ -1257,7 +1260,9 @@ socket_fdinfo(int32_t pid, int32_t fd, void *buffer, int32_t buffersize)
 	info->pfi.fi_type = PROX_FDTYPE_SOCKET;
 	info->psi.soi_so = inode;
 	info->psi.soi_pcb = inode;
-	inet_socket_info(proc_dir, inode, &info->psi);
+	if (!inet_socket_info(proc_dir, inode, &info->psi)) {
+		unix_socket_info(proc_dir, inode, &info->psi);
+	}
 	return sizeof(*info);
 }
 
@@ -1358,6 +1363,60 @@ put_address(uint32_t address[4], const char *hex, bool v6)
 	} else {
 		sscanf(hex, "%8x", &address[3]);
 	}
+}
+
+#define LINUX_UNIX_ACCEPTCON 0x10000
+#define LINUX_SS_CONNECTED   3
+
+static bool
+unix_socket_info(const char *proc_dir, unsigned long inode,
+		struct socket_info *info)
+{
+	char path[96 + NAME_MAX];
+	snprintf(path, sizeof(path), "%s/net/unix", proc_dir);
+	FILE *file = fopen(path, "re");
+	if (file == NULL) {
+		return false;
+	}
+	char line[PATH_MAX + 128];
+	unsigned int flags, type, state;
+	unsigned long found = 0;
+	int name;
+	while (found != inode && fgets(line, sizeof(line), file) != NULL) {
+		name = 0;
+		if (sscanf(line, "%*x: %*x %*x %x %x %x %lu %n", &flags, &type,
+				    &state, &found, &name)
+				< 4) {
+			found = 0;
+		}
+	}
+	fclose(file);
+	if (found != inode) {
+		return false;
+	}
+	info->soi_type = (int32_t)type;
+	info->soi_family = DARWIN_AF_UNIX;
+	info->soi_kind = SOCKINFO_UN;
+	if (flags & LINUX_UNIX_ACCEPTCON) {
+		info->soi_options = DARWIN_SO_ACCEPTCONN;
+	}
+	if (state == LINUX_SS_CONNECTED) {
+		info->soi_state = SOI_S_ISCONNECTED;
+	}
+	line[strcspn(line, "\n")] = '\0';
+	struct darwin_sockaddr_un *bound
+			= &info->soi_proto.pri_un.unsi_addr.ua_sun;
+	if (name != 0 && line[name] != '\0'
+			&& !unix_bound_address(inode, bound, sizeof(*bound))
+			&& line[name] == '/') {
+		bound->sun_family = DARWIN_AF_UNIX;
+		snprintf(bound->sun_path, sizeof(bound->sun_path), "%s",
+				sysroot_guest_path(line + name));
+		bound->sun_len = (uint8_t)(offsetof(struct darwin_sockaddr_un,
+							   sun_path)
+				+ strlen(bound->sun_path));
+	}
+	return true;
 }
 
 static int
