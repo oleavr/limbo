@@ -203,7 +203,6 @@ static size_t gone_guest_count;
 static const uint64_t dead_global_id = UINT64_MAX;
 static const uint64_t fileport_global_id = UINT64_MAX - 1;
 static const uint64_t memory_entry_global_id = UINT64_MAX - 2;
-static const size_t fds_lost = SIZE_MAX;
 
 static void ipc_fork_prepare(void);
 static void ipc_fork_parent(void);
@@ -227,13 +226,13 @@ static uint64_t export_memory_entry(const struct ipc_port *port,
 static bool export_fd(struct remote_fds *fds, int fd);
 static void close_fds(const struct remote_fds *fds);
 static bool remote_message_fits(const struct remote_header *rh, uint32_t length,
-		size_t fd_count);
+		size_t fd_count, bool lost);
 static bool remote_body_fits(const mach_msg_header_t *message,
 		mach_msg_size_t size, const uint64_t *global_ids,
-		uint32_t id_count, uint32_t room, size_t fd_count);
+		uint32_t id_count, uint32_t room, size_t fd_count, bool lost);
 static bool remote_port_fits(uint64_t global_id,
 		mach_msg_type_name_t disposition, size_t *fd_count,
-		uint32_t *room);
+		uint32_t *room, bool lost);
 static bool remote_right_fits(
 		uint64_t global_id, mach_msg_type_name_t disposition);
 static void import_body_ports(mach_msg_header_t *header,
@@ -270,7 +269,7 @@ static void move_send_once(struct ipc_entry *entry, uint32_t from, uint32_t to);
 static void receive_notice(
 		uint64_t dest_global_id, const struct remote_notice *notice);
 static void deliver(uint64_t dest_global_id, const void *blob, uint32_t length,
-		const int *fds, size_t fd_count);
+		const int *fds, size_t fd_count, bool lost);
 static void send_remote_notice(const struct pending_notice *notice);
 static uint64_t export_local_port(mach_port_name_t name);
 static struct ipc_port *port_for_global_id(uint64_t global_id);
@@ -1391,21 +1390,21 @@ void
 ipc_remote_deliver(uint64_t dest_global_id, const void *blob, uint32_t length,
 		const int *fds, size_t fd_count)
 {
-	deliver(dest_global_id, blob, length, fds, fd_count);
+	deliver(dest_global_id, blob, length, fds, fd_count, false);
 }
 
 void
 ipc_remote_lost(uint64_t dest_global_id, const void *blob, uint32_t length)
 {
-	deliver(dest_global_id, blob, length, NULL, fds_lost);
+	deliver(dest_global_id, blob, length, NULL, 0, true);
 }
 
 static void
 deliver(uint64_t dest_global_id, const void *blob, uint32_t length,
-		const int *fds, size_t fd_count)
+		const int *fds, size_t fd_count, bool lost)
 {
 	const struct remote_header *rh = blob;
-	if (!remote_message_fits(rh, length, fd_count)) {
+	if (!remote_message_fits(rh, length, fd_count, lost)) {
 		return;
 	}
 	if (rh->message_size == 0) {
@@ -1421,7 +1420,6 @@ deliver(uint64_t dest_global_id, const void *blob, uint32_t length,
 			+ rh->message_size);
 
 	pthread_mutex_lock(&lock);
-	bool lost = fd_count == fds_lost;
 	struct ipc_port *dest = port_for_global_id(dest_global_id);
 	struct ipc_kmsg *kmsg = malloc(sizeof(*kmsg) + rh->message_size
 			+ sizeof(mach_msg_max_trailer_t));
@@ -1467,7 +1465,7 @@ deliver(uint64_t dest_global_id, const void *blob, uint32_t length,
 
 static bool
 remote_message_fits(const struct remote_header *rh, uint32_t length,
-		size_t fd_count)
+		size_t fd_count, bool lost)
 {
 	if (length < sizeof(*rh)) {
 		return false;
@@ -1476,7 +1474,6 @@ remote_message_fits(const struct remote_header *rh, uint32_t length,
 	if (rh->message_size == 0) {
 		return room == sizeof(struct remote_notice) && fd_count == 0;
 	}
-	bool lost = fd_count == fds_lost;
 	if (rh->message_size < sizeof(mach_msg_header_t)
 			|| rh->message_size > room) {
 		return false;
@@ -1505,19 +1502,18 @@ remote_message_fits(const struct remote_header *rh, uint32_t length,
 		return rh->descriptor_count == 0 && (fd_count == 0 || lost);
 	}
 	return remote_body_fits(message, rh->message_size, global_ids,
-			rh->descriptor_count, room, fd_count);
+			rh->descriptor_count, room, fd_count, lost);
 }
 
 static bool
 remote_body_fits(const mach_msg_header_t *message, mach_msg_size_t size,
 		const uint64_t *global_ids, uint32_t id_count, uint32_t room,
-		size_t fd_count)
+		size_t fd_count, bool lost)
 {
 	if (size < sizeof(*message) + sizeof(mach_msg_body_t)) {
 		return false;
 	}
 
-	bool lost = fd_count == fds_lost;
 	const mach_msg_body_t *body = (const mach_msg_body_t *)(message + 1);
 	const uint8_t *cursor = (const uint8_t *)(body + 1);
 	const uint8_t *end = (const uint8_t *)message + size;
@@ -1536,7 +1532,8 @@ remote_body_fits(const mach_msg_header_t *message, mach_msg_size_t size,
 					|| !remote_port_fits(
 							global_ids[count++],
 							d->disposition,
-							&fd_count, &room)) {
+							&fd_count, &room,
+							lost)) {
 				return false;
 			}
 			cursor += sizeof(*d);
@@ -1555,7 +1552,8 @@ remote_body_fits(const mach_msg_header_t *message, mach_msg_size_t size,
 					|| !remote_port_fits(
 							global_ids[count++],
 							d->disposition,
-							&fd_count, &room)) {
+							&fd_count, &room,
+							lost)) {
 				return false;
 			}
 		} else if (descriptor->type == MACH_MSG_OOL_DESCRIPTOR
@@ -1578,18 +1576,17 @@ remote_body_fits(const mach_msg_header_t *message, mach_msg_size_t size,
 
 static bool
 remote_port_fits(uint64_t global_id, mach_msg_type_name_t disposition,
-		size_t *fd_count, uint32_t *room)
+		size_t *fd_count, uint32_t *room, bool lost)
 {
 	if (global_id != fileport_global_id
 			&& global_id != memory_entry_global_id) {
 		return remote_right_fits(global_id, disposition);
 	}
-	if (*fd_count == 0
-			|| received_type(disposition)
-					!= MACH_MSG_TYPE_PORT_SEND) {
+	if (received_type(disposition) != MACH_MSG_TYPE_PORT_SEND
+			|| (!lost && *fd_count == 0)) {
 		return false;
 	}
-	(*fd_count)--;
+	*fd_count -= !lost;
 	if (global_id == memory_entry_global_id) {
 		if (*room < sizeof(struct remote_memory_entry)) {
 			return false;
