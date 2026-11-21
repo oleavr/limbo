@@ -152,6 +152,7 @@ static const mach_msg_id_t DESTROY_ID = 7918;
 static const mach_msg_id_t WATCH_ID = 7919;
 static const mach_msg_id_t WATCHED_ID = 7920;
 static const mach_msg_id_t NOTIFY_ID = 7921;
+static const mach_msg_id_t SEND_LAST_ID = 7922;
 static const char FROM_SENDER[] = "from the sender";
 static const char FROM_RECEIVER[] = "from the receiver";
 
@@ -715,6 +716,19 @@ watch_death(mach_port_t name, mach_port_t notify)
 	return type_of(previous) == MACH_PORT_TYPE_SEND_ONCE ? 2 : -2;
 }
 
+static int32_t
+send_last(mach_port_t right)
+{
+	mach_msg_header_t last = {
+			.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND, 0),
+			.msgh_size = sizeof(last),
+			.msgh_remote_port = right,
+			.msgh_id = MARK_ID,
+	};
+	return mach_msg(&last, MACH_SEND_MSG, sizeof(last), 0, MACH_PORT_NULL,
+			MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+}
+
 static void
 forward(mach_port_t to, mach_port_t right)
 {
@@ -823,6 +837,8 @@ serve_peer(void)
 					watch_death(kept,
 							message.carrier.port
 									.name));
+		} else if (message.Head.msgh_id == SEND_LAST_ID) {
+			answer(&message.Head, send_last(kept));
 		} else if (message.Head.msgh_id == LARGE_ID) {
 			answer(&message.Head,
 					patterned(message.bytes,
@@ -1544,6 +1560,52 @@ give_send_right(mach_port_t to)
 	return port;
 }
 
+static mach_msg_id_t
+receive_id(mach_port_t port)
+{
+	struct {
+		carrier_t carrier;
+		mach_msg_trailer_t trailer;
+	} message;
+	kern_return_t kr = mach_msg(&message.carrier.Head,
+			MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(message),
+			port, ANSWER_MS, MACH_PORT_NULL);
+	CHECK(kr == MACH_MSG_SUCCESS);
+	return message.carrier.Head.msgh_id;
+}
+
+static void
+check_count_follows_message(mach_port_t holder)
+{
+	mach_port_t port = give_send_right(holder);
+	mach_port_t notify = request_notification(port, MACH_NOTIFY_NO_SENDERS);
+	mach_port_t back;
+	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &back);
+	carrier_t carrier = carrier_of(holder, FORWARD_ID, back);
+	carrier.port.disposition = MACH_MSG_TYPE_MAKE_SEND;
+	CHECK(ask(&carrier.Head) == 1);
+	CHECK(receive_id(back) == KEEP_ID);
+	CHECK(ask_for(holder, TYPE_ID) == 0);
+	mach_port_name_t count;
+	CHECK(receive_notification(notify, MACH_NOTIFY_NO_SENDERS, 0, &count)
+			== MACH_RCV_TIMED_OUT);
+	CHECK(has_senders(port));
+	destroy_port(back);
+	destroy_port(notify);
+	destroy_port(port);
+
+	port = give_send_right(holder);
+	mach_port_t previous = MACH_PORT_NULL;
+	kern_return_t kr = mach_port_request_notification(mach_task_self(),
+			port, MACH_NOTIFY_NO_SENDERS, 0, port,
+			MACH_MSG_TYPE_MAKE_SEND_ONCE, &previous);
+	CHECK(kr == KERN_SUCCESS);
+	CHECK(ask_for(holder, SEND_LAST_ID) == MACH_MSG_SUCCESS);
+	CHECK(receive_id(port) == MARK_ID);
+	CHECK(receive_id(port) == MACH_NOTIFY_NO_SENDERS);
+	destroy_port(port);
+}
+
 static void
 check_sender_counts(void)
 {
@@ -1564,6 +1626,7 @@ check_sender_counts(void)
 	destroy_port(notify);
 	destroy_port(port);
 
+	check_count_follows_message(holder.port);
 	child_t third = start_peer(THIRD_NAME);
 	port = give_send_right(holder.port);
 	notify = request_notification(port, MACH_NOTIFY_NO_SENDERS);
