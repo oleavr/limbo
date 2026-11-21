@@ -43,6 +43,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/wait.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
 #include "check.h"
@@ -100,6 +101,7 @@ static void denied_mode(void);
 static void denied_owner(void);
 static void denied_flags(void);
 static void denied_times(void);
+static void denied_xattr(void);
 static void in_denied_folder(void (*body)(void));
 static void in_sandbox(const char *profile, void (*body)(void));
 static int remove_entry(const char *path, const struct stat *st, int type,
@@ -269,6 +271,7 @@ check_enforced(void)
 	in_sandbox(DENY("file-write-owner"), denied_owner);
 	in_sandbox(DENY("file-write-flags"), denied_flags);
 	in_sandbox(DENY("file-write-times"), denied_times);
+	in_sandbox(DENY("file-write-xattr"), denied_xattr);
 }
 
 static void
@@ -584,6 +587,29 @@ denied_times(void)
 }
 
 static void
+denied_xattr(void)
+{
+	errno = 0;
+	CHECK(setxattr(DENIED "/existing", "test.new", "x", 1, 0, 0) == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(fsetxattr(denied_fd, "test.new", "x", 1, 0, 0) == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(removexattr(DENIED "/existing", "test.kept", 0) == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(fremovexattr(denied_fd, "test.kept", 0) == -1);
+	CHECK(errno == EPERM);
+	char value;
+	CHECK(getxattr(DENIED "/existing", "test.kept", &value, 1, 0, 0) == 1);
+
+	CHECK(setxattr(ALLOWED, "test.new", "x", 1, 0, 0) == 0);
+	CHECK(removexattr(ALLOWED, "test.new", 0) == 0);
+	CHECK(chmod(DENIED "/existing", 0600) == 0);
+}
+
+static void
 in_denied_folder(void (*body)(void))
 {
 	in_sandbox(DENY_FOLDER, body);
@@ -595,6 +621,7 @@ in_sandbox(const char *profile, void (*body)(void))
 	clean_up();
 	CHECK(mkdir(DENIED, 0755) == 0);
 	make_file(DENIED "/existing");
+	CHECK(setxattr(DENIED "/existing", "test.kept", "x", 1, 0, 0) == 0);
 	make_file(ALLOWED);
 	denied_fd = open(DENIED "/existing", O_RDWR);
 	CHECK(denied_fd >= 0);

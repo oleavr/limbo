@@ -42,6 +42,7 @@
 #include <sys/xattr.h>
 
 #include "acl.h"
+#include "bsd/mac.h"
 #include "bsd/xnu-errno.h"
 #include "bsd_flags.h"
 #include "protection.h"
@@ -94,6 +95,11 @@ int
 sys_setxattr(user_addr_t path, user_addr_t attrname, user_addr_t value,
 		size_t size, uint32_t position, int options)
 {
+	if (mac_sandbox_denies(SANDBOX_FILE_WRITE_XATTR, AT_FDCWD, path,
+			    (options & _XATTR_NOFOLLOW) ? AT_SYMLINK_NOFOLLOW
+							: 0)) {
+		return _EPERM;
+	}
 	char path_buffer[PATH_MAX], name[XATTR_NAME_MAX + 1];
 	const char *p = host_path(path, options, path_buffer);
 	const char *n = host_name(attrname, name);
@@ -109,6 +115,9 @@ int
 sys_fsetxattr(int fd, user_addr_t attrname, user_addr_t value, size_t size,
 		uint32_t position, int options)
 {
+	if (mac_sandbox_denies_fd(SANDBOX_FILE_WRITE_XATTR, fd)) {
+		return _EPERM;
+	}
 	char name[XATTR_NAME_MAX + 1];
 	const char *n = host_name(attrname, name);
 	if (is_record(n)) {
@@ -120,6 +129,11 @@ sys_fsetxattr(int fd, user_addr_t attrname, user_addr_t value, size_t size,
 int
 sys_removexattr(user_addr_t path, user_addr_t attrname, int options)
 {
+	if (mac_sandbox_denies(SANDBOX_FILE_WRITE_XATTR, AT_FDCWD, path,
+			    (options & _XATTR_NOFOLLOW) ? AT_SYMLINK_NOFOLLOW
+							: 0)) {
+		return _EPERM;
+	}
 	char path_buffer[PATH_MAX], name[XATTR_NAME_MAX + 1];
 	const char *p = host_path(path, options, path_buffer);
 	const char *n = host_name(attrname, name);
@@ -133,6 +147,9 @@ sys_removexattr(user_addr_t path, user_addr_t attrname, int options)
 int
 sys_fremovexattr(int fd, user_addr_t attrname, int options)
 {
+	if (mac_sandbox_denies_fd(SANDBOX_FILE_WRITE_XATTR, fd)) {
+		return _EPERM;
+	}
 	char name[XATTR_NAME_MAX + 1];
 	const char *n = host_name(attrname, name);
 	if (is_record(n)) {
