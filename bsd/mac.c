@@ -380,8 +380,14 @@ mac_sandbox_denies_fd(int operation, int fd)
 		return false;
 	}
 	host[length] = '\0';
-	return sandbox_profile_decide(
-			       &profile, operation, sysroot_guest_path(host))
+	char pty[32];
+	unsigned number;
+	const char *guest = sysroot_guest_path(host);
+	if (sscanf(host, "/dev/pts/%u", &number) == 1) {
+		snprintf(pty, sizeof(pty), "/dev/ttys%03u", number);
+		guest = pty;
+	}
+	return sandbox_profile_decide(&profile, operation, guest)
 			== SANDBOX_DENY;
 }
 

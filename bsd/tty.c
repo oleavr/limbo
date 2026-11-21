@@ -80,6 +80,7 @@
 
 #define DARWIN_NCCS 20
 #define DARWIN_VDISABLE 0xff
+#define DARWIN_PTY_NAME_SIZE 128
 
 struct darwin_termios {
 	uint64_t c_iflag;
@@ -393,11 +394,11 @@ tty_ioctl(int fd, uint64_t command, void *data)
 	case TIOCPTYUNLK:
 		return errno_map(unlockpt(fd));
 	case TIOCPTYGNAME: {
-		char name[128];
-		if (ptsname_r(fd, name, sizeof(name)) != 0) {
+		unsigned int number;
+		if (ioctl(fd, TIOCGPTN, &number) != 0) {
 			return err_map(errno);
 		}
-		strncpy(data, name, 128);
+		snprintf(data, DARWIN_PTY_NAME_SIZE, "/dev/ttys%03u", number);
 		return 0;
 	}
 	default:

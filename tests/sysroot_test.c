@@ -118,6 +118,17 @@ main(int argc, char *argv[])
 
 	char buffer[PATH_MAX];
 	CHECK(strcmp(sysroot_host_path("/tmp", 0, buffer), "/tmp") == 0);
+	CHECK(strcmp(sysroot_host_path("/dev/ttys004", 0, buffer), "/dev/pts/4")
+			== 0);
+	CHECK(strcmp(sysroot_host_path("/dev/ttys012/x", 0, buffer),
+			      "/dev/pts/12/x")
+			== 0);
+	CHECK(strcmp(sysroot_host_path("/dev/ttys", 0, buffer), "/dev/ttys")
+			== 0);
+	CHECK(strcmp(sysroot_host_path("/dev/ttys1a", 0, buffer), "/dev/ttys1a")
+			== 0);
+	CHECK(strcmp(sysroot_host_path("/dev/null", 0, buffer), "/dev/null")
+			== 0);
 	CHECK(strcmp(sysroot_host_path("/missing/new", 0, buffer),
 			      "/missing/new")
 			== 0);
