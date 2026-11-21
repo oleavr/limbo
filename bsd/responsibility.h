@@ -34,6 +34,11 @@
 
 #define RESPONSIBILITY_VARIABLE "LIMBO_RESPONSIBLE"
 
+enum responsibility_told {
+	RESPONSIBILITY_INHERITED,
+	RESPONSIBILITY_DISCLAIMED,
+};
+
 bool responsibility_names(const char *variable);
 bool responsibility_named(void);
 char **responsibility_environment(char **envp);

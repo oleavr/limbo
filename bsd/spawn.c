@@ -42,6 +42,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #include "bsd/responsibility.h"
@@ -101,11 +102,41 @@ struct darwin_file_actions {
 	struct darwin_file_action actions[];
 };
 
+struct darwin_mac_extension {
+	char policyname[128];
+	uint64_t data;
+	uint64_t datalen;
+};
+
+struct darwin_mac_extensions {
+	int32_t alloc;
+	int32_t count;
+	struct darwin_mac_extension extensions[];
+};
+
+#ifdef __x86_64__
+#define MAC_EXTENSION_SIZE_MAX 4096
+#else
+#define MAC_EXTENSION_SIZE_MAX 16384
+#endif
+#define QUARANTINE_SPAWN_DISCLAIM 0x1
+
+struct darwin_quarantine_spawn {
+	uint32_t version;
+	uint32_t size;
+	uint32_t flags;
+	uint32_t reserved[3];
+};
+
 struct darwin_spawn_args {
 	size_t attr_size;
 	const struct darwin_spawnattr *attrp;
 	size_t file_actions_size;
 	const struct darwin_file_actions *file_actions;
+	size_t port_actions_size;
+	const void *port_actions;
+	size_t mac_extensions_size;
+	const struct darwin_mac_extensions *mac_extensions;
 };
 
 static void convert_attr(
@@ -118,9 +149,11 @@ static int apply_file_actions(const struct darwin_file_actions *actions,
 static void close_unlisted(const struct darwin_file_actions *src,
 		posix_spawn_file_actions_t *dst);
 static bool fd_listed(const struct darwin_file_actions *actions, int fd);
+static int read_quarantine(const struct darwin_spawn_args *args,
+		enum responsibility_told *told);
 static int spawn_exec(const char *path, const struct darwin_spawnattr *attrp,
-		const struct darwin_file_actions *file_actions, char **argv,
-		char **envp);
+		const struct darwin_file_actions *file_actions,
+		enum responsibility_told told, char **argv, char **envp);
 
 int
 sys_posix_spawn(void *pid, const char *path, void *adesc, char **argv,
@@ -131,8 +164,13 @@ sys_posix_spawn(void *pid, const char *path, void *adesc, char **argv,
 			= (args != NULL) ? args->attrp : NULL;
 	const struct darwin_file_actions *file_actions
 			= (args != NULL) ? args->file_actions : NULL;
+	enum responsibility_told told = RESPONSIBILITY_INHERITED;
+	int invalid = args != NULL ? read_quarantine(args, &told) : 0;
+	if (invalid != 0) {
+		return invalid;
+	}
 	if (attrp != NULL && (attrp->psa_flags & _POSIX_SPAWN_SETEXEC)) {
-		return spawn_exec(path, attrp, file_actions, argv, envp);
+		return spawn_exec(path, attrp, file_actions, told, argv, envp);
 	}
 
 	posix_spawnattr_t attr;
@@ -159,7 +197,7 @@ sys_posix_spawn(void *pid, const char *path, void *adesc, char **argv,
 	const char *executable;
 	const char *host = exec_path(
 			path, argv, buffer, &script_argv, &executable);
-	char **env = exec_environment(envp, executable);
+	char **env = exec_environment(envp, executable, told);
 	pid_t child;
 	int result = posix_spawn(&child, host, &actions, &attr,
 			(script_argv != NULL) ? script_argv : argv, env);
@@ -179,9 +217,60 @@ sys_posix_spawn(void *pid, const char *path, void *adesc, char **argv,
 }
 
 static int
+read_quarantine(const struct darwin_spawn_args *args,
+		enum responsibility_told *told)
+{
+	const struct darwin_mac_extensions *extensions = args->mac_extensions;
+	size_t size = args->mac_extensions_size;
+	size_t each = sizeof(extensions->extensions[0]);
+	if (size == 0) {
+		return 0;
+	}
+	if (size < sizeof(*extensions) + each || size > MAC_EXTENSION_SIZE_MAX
+			|| extensions->count < 0
+			|| (size_t)extensions->count
+					> (size - sizeof(*extensions)) / each) {
+		return _EINVAL;
+	}
+	const struct darwin_mac_extension *quarantine = NULL;
+	for (int32_t i = 0; i != extensions->count; i++) {
+		const struct darwin_mac_extension *extension
+				= &extensions->extensions[i];
+		if (extension->datalen == 0
+				|| extension->datalen
+						> MAC_EXTENSION_SIZE_MAX) {
+			return _EINVAL;
+		}
+		if (strncmp(extension->policyname, "Quarantine",
+				    sizeof(extension->policyname))
+						== 0
+				&& quarantine == NULL) {
+			quarantine = extension;
+		}
+	}
+	if (quarantine == NULL) {
+		return 0;
+	}
+	struct darwin_quarantine_spawn data;
+	size_t length = quarantine->datalen < sizeof(data) ? quarantine->datalen
+							   : sizeof(data);
+	struct iovec local = {&data, length};
+	struct iovec remote = {(void *)(uintptr_t)quarantine->data, length};
+	if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0)
+			!= (ssize_t)length) {
+		return _ENOMEM;
+	}
+	if (length == sizeof(data) && data.size <= quarantine->datalen
+			&& (data.flags & QUARANTINE_SPAWN_DISCLAIM)) {
+		*told = RESPONSIBILITY_DISCLAIMED;
+	}
+	return 0;
+}
+
+static int
 spawn_exec(const char *path, const struct darwin_spawnattr *attrp,
-		const struct darwin_file_actions *file_actions, char **argv,
-		char **envp)
+		const struct darwin_file_actions *file_actions,
+		enum responsibility_told told, char **argv, char **envp)
 {
 	if (attrp->psa_flags & _POSIX_SPAWN_START_SUSPENDED) {
 		unimplemented();
@@ -217,7 +306,7 @@ spawn_exec(const char *path, const struct darwin_spawnattr *attrp,
 	const char *executable;
 	const char *host = exec_path(
 			path, argv, buffer, &script_argv, &executable);
-	char **env = exec_environment(envp, executable);
+	char **env = exec_environment(envp, executable, told);
 	execve(host, (script_argv != NULL) ? script_argv : argv, env);
 	int err = errno;
 	if (env != envp) {
@@ -234,7 +323,8 @@ spawn_exec(const char *path, const struct darwin_spawnattr *attrp,
 static const char *script_path(const char *path, const char *host,
 		char **argv, char *buffer, char ***script_argv);
 static const char *limbo_path(const char *host, char ***argv);
-static bool passes_on(const char *own, char **envp);
+static bool passes_on(
+		const char *own, char **envp, enum responsibility_told told);
 static bool is_own(const char *variable);
 static bool has_variable(char **envp, const char *variable);
 
@@ -257,7 +347,8 @@ exec_path(const char *path, char **argv, char *buffer, char ***script_argv,
 }
 
 char **
-exec_environment(char **envp, const char *executable)
+exec_environment(char **envp, const char *executable,
+		enum responsibility_told told)
 {
 	extern char **environ;
 	size_t count = 0, missing = 0, dropped = 0;
@@ -266,7 +357,7 @@ exec_environment(char **envp, const char *executable)
 		count++;
 	}
 	for (char **own = environ; *own != NULL; own++) {
-		missing += passes_on(*own, envp);
+		missing += passes_on(*own, envp, told);
 	}
 	if (missing == 0 && dropped == 0 && executable == NULL) {
 		return envp;
@@ -281,7 +372,7 @@ exec_environment(char **envp, const char *executable)
 	}
 	size_t kept = 0;
 	for (char **own = environ; *own != NULL; own++) {
-		if (responsibility_names(*own)) {
+		if (responsibility_names(*own) && passes_on(*own, envp, told)) {
 			result[kept++] = *own;
 		}
 	}
@@ -291,7 +382,8 @@ exec_environment(char **envp, const char *executable)
 		}
 	}
 	for (char **own = environ; *own != NULL; own++) {
-		if (!responsibility_names(*own) && passes_on(*own, envp)) {
+		if (!responsibility_names(*own)
+				&& passes_on(*own, envp, told)) {
 			result[kept++] = *own;
 		}
 	}
@@ -306,10 +398,15 @@ exec_environment(char **envp, const char *executable)
 }
 
 static bool
-passes_on(const char *own, char **envp)
+passes_on(const char *own, char **envp, enum responsibility_told told)
 {
-	return strncmp(own, "LIMBO_", 6) == 0
-			&& (is_own(own) || !has_variable(envp, own));
+	if (strncmp(own, "LIMBO_", 6) != 0) {
+		return false;
+	}
+	if (responsibility_names(own)) {
+		return told == RESPONSIBILITY_INHERITED;
+	}
+	return is_own(own) || !has_variable(envp, own);
 }
 
 static bool
