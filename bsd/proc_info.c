@@ -49,6 +49,7 @@
 #include "osfmk/task.h"
 #include "process.h"
 #include "sysroot.h"
+#include "thread.h"
 #include "xnu-errno.h"
 
 #define PROC_INFO_CALL_LISTPIDS        0x1
@@ -743,6 +744,12 @@ setcontrol(uint32_t flavor, user_addr_t buffer, int32_t buffersize)
 	if (flavor != PROC_SELFSET_THREADNAME) {
 		return 0;
 	}
+	if (buffersize < 0 || buffersize >= THREAD_NAME_SIZE) {
+		return _ENAMETOOLONG;
+	}
+	struct thread *thread = thread_current();
+	memset(thread->name, 0, sizeof(thread->name));
+	memcpy(thread->name, buffer, buffersize);
 
 	char name[16];
 	snprintf(name, sizeof(name), "%.*s", buffersize, (char *)buffer);

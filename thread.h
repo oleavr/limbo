@@ -69,6 +69,8 @@ struct thread;
 typedef bool (*thread_continuation_t)(
 		struct thread *thread, struct thread_state *state);
 
+#define THREAD_NAME_SIZE 64
+
 struct thread {
 	mach_port_name_t port;
 	pid_t tid;
@@ -98,6 +100,7 @@ struct thread {
 	struct thread *all_next;
 	bool guest;
 	_Atomic uint32_t restart_acks;
+	char name[THREAD_NAME_SIZE];
 };
 
 struct thread *thread_current(void);

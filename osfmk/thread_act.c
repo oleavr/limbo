@@ -504,6 +504,7 @@ thread_info(thread_inspect_t target_act, thread_flavor_t flavor,
 				.pth_priority = 31,
 				.pth_maxpriority = 63,
 		};
+		memcpy(info->pth_name, thread->name, sizeof(info->pth_name));
 		*thread_info_outCnt = THREAD_EXTENDED_INFO_COUNT;
 		return KERN_SUCCESS;
 	}
