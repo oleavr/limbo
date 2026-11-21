@@ -285,6 +285,8 @@ static int initial_list(user_addr_t xsecurity, struct acl_list *list,
 static uid_t kept_or(void *id);
 static struct timeval *convert_timevals(
 		const void *tptr, struct timeval *times);
+static bool sandbox_denies_rename(
+		int from_dir, const char *from, int to_dir, const char *to);
 static unsigned int rename_flags(uint32_t flags);
 static int clone_file(int src_fd, int dst_dirfd, const char *dst_host,
 		uint32_t flags);
@@ -1929,10 +1931,23 @@ sys_setregid(void *rgid, void *egid)
 int
 sys_rename(char *from, char *to)
 {
+	if (sandbox_denies_rename(AT_FDCWD, from, AT_FDCWD, to)) {
+		return _EPERM;
+	}
 	char from_buffer[PATH_MAX], to_buffer[PATH_MAX];
 	return errno_map(rename(sysroot_host_path(from, AT_SYMLINK_NOFOLLOW,
 						from_buffer),
 			sysroot_host_path(to, AT_SYMLINK_NOFOLLOW, to_buffer)));
+}
+
+static bool
+sandbox_denies_rename(
+		int from_dir, const char *from, int to_dir, const char *to)
+{
+	return mac_sandbox_denies(SANDBOX_FILE_WRITE_UNLINK, from_dir, from,
+			       AT_SYMLINK_NOFOLLOW)
+			|| mac_sandbox_denies(SANDBOX_FILE_WRITE_CREATE, to_dir,
+					to, AT_SYMLINK_NOFOLLOW);
 }
 
 int
@@ -4115,6 +4130,9 @@ sys_guarded_writev_np(int fd, void *guard, void *iovp, int iovcnt)
 int
 sys_renameatx_np(int fromfd, char *from, int tofd, char *to, uint32_t flags)
 {
+	if (sandbox_denies_rename(at_fd(fromfd), from, at_fd(tofd), to)) {
+		return _EPERM;
+	}
 	char from_buffer[PATH_MAX], to_buffer[PATH_MAX];
 	return errno_map(renameat2(at_fd(fromfd),
 			sysroot_host_path(
