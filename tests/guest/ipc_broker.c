@@ -2109,6 +2109,84 @@ lose_connection(void)
 	CHECK(bootstrap_call(LOOK_UP, LOST_NAME) == MACH_PORT_NULL);
 }
 
+static volatile sig_atomic_t signalled;
+static volatile sig_atomic_t taken;
+
+static void
+on_signal(int sig)
+{
+	signalled = sig;
+}
+
+static void
+on_unwoken(int sig)
+{
+	static const char message[]
+			= "a blocked signal never woke its waiter\n";
+	write(STDERR_FILENO, message, sizeof(message) - 1);
+	_exit(1);
+}
+
+static void *
+suspend_for_signal(void *arg)
+{
+	sigset_t none;
+	sigemptyset(&none);
+	while (!signalled) {
+		sigsuspend(&none);
+	}
+	return NULL;
+}
+
+static void *
+wait_for_signal(void *arg)
+{
+	int sig = 0;
+	sigwait(arg, &sig);
+	taken = sig;
+	return NULL;
+}
+
+static void
+await_blocked_signals(void)
+{
+	bootstrap_call(LOOK_UP, SERVICE_NAME);
+	signal(SIGUSR1, on_signal);
+	signal(SIGALRM, on_unwoken);
+	alarm(20);
+	sigset_t set;
+	sigemptyset(&set);
+	sigaddset(&set, SIGUSR1);
+	sigaddset(&set, SIGUSR2);
+	CHECK(pthread_sigmask(SIG_BLOCK, &set, NULL) == 0);
+
+	pthread_t waiter;
+	CHECK(pthread_create(&waiter, NULL, suspend_for_signal, NULL) == 0);
+	usleep(100000);
+	CHECK(kill(getpid(), SIGUSR1) == 0);
+	pthread_join(waiter, NULL);
+	CHECK(signalled == SIGUSR1);
+
+	sigdelset(&set, SIGUSR1);
+	CHECK(pthread_create(&waiter, NULL, wait_for_signal, &set) == 0);
+	usleep(100000);
+	CHECK(kill(getpid(), SIGUSR2) == 0);
+	pthread_join(waiter, NULL);
+	CHECK(taken == SIGUSR2);
+	alarm(0);
+}
+
+static void
+check_blocked_signals(void)
+{
+	pid_t child = start(await_blocked_signals);
+	pid_t guardian = guard(child);
+	int status = reap(child);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	kill(guardian, SIGKILL);
+	reap(guardian);
+}
+
 static void
 check_lost_connection(void)
 {
@@ -2155,6 +2233,7 @@ main(int argc, char *argv[])
 	program = argv[0];
 	check_exec();
 	check_lost_connection();
+	check_blocked_signals();
 
 	pid_t pid = fork();
 	CHECK(pid >= 0);
