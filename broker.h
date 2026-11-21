@@ -115,6 +115,7 @@ int broker_wire_receive(int fd, struct broker_wire_ahead *ahead,
 void broker_wire_forget(struct broker_wire_ahead *ahead);
 bool broker_wire_read(const struct broker_wire_frame *frame, uint32_t offset,
 		void *buffer, uint32_t length);
+bool broker_wire_carries(uint64_t length, size_t fd_count);
 void broker_wire_free(struct broker_wire_frame *frame);
 
 static inline uint32_t broker_guest_of(uint64_t global_id)

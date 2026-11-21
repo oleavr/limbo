@@ -153,6 +153,7 @@ static const mach_msg_id_t WATCH_ID = 7919;
 static const mach_msg_id_t WATCHED_ID = 7920;
 static const mach_msg_id_t NOTIFY_ID = 7921;
 static const mach_msg_id_t SEND_LAST_ID = 7922;
+static const mach_msg_id_t FAIL_REPLY_ID = 7923;
 static const char FROM_SENDER[] = "from the sender";
 static const char FROM_RECEIVER[] = "from the receiver";
 
@@ -716,6 +717,35 @@ watch_death(mach_port_t name, mach_port_t notify)
 	return type_of(previous) == MACH_PORT_TYPE_SEND_ONCE ? 2 : -2;
 }
 
+static kern_return_t
+send_starved(mach_msg_header_t *message)
+{
+	struct rlimit files;
+	CHECK(getrlimit(RLIMIT_NOFILE, &files) == 0);
+	struct rlimit none = {.rlim_cur = 0, .rlim_max = files.rlim_max};
+	CHECK(setrlimit(RLIMIT_NOFILE, &none) == 0);
+	kern_return_t kr = mach_msg(message, MACH_SEND_MSG, message->msgh_size,
+			0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+			MACH_PORT_NULL);
+	CHECK(setrlimit(RLIMIT_NOFILE, &files) == 0);
+	return kr;
+}
+
+static int32_t
+fail_reply(mach_port_t reply)
+{
+	mach_port_t fileport;
+	CHECK(fileport_makeport(STDIN_FILENO, &fileport) == 0);
+	carrier_t carrier = carrier_of(reply, MARK_ID, fileport);
+	carrier.Head.msgh_bits
+			= MACH_MSGH_BITS_SET(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0, 0,
+					MACH_MSGH_BITS_COMPLEX);
+	carrier.port.disposition = MACH_MSG_TYPE_COPY_SEND;
+	kern_return_t kr = send_starved(&carrier.Head);
+	mach_port_deallocate(mach_task_self(), fileport);
+	return kr;
+}
+
 static int32_t
 send_last(mach_port_t right)
 {
@@ -839,6 +869,8 @@ serve_peer(void)
 									.name));
 		} else if (message.Head.msgh_id == SEND_LAST_ID) {
 			answer(&message.Head, send_last(kept));
+		} else if (message.Head.msgh_id == FAIL_REPLY_ID) {
+			answer(&message.Head, fail_reply(held_reply));
 		} else if (message.Head.msgh_id == LARGE_ID) {
 			answer(&message.Head,
 					patterned(message.bytes,
@@ -1670,11 +1702,25 @@ check_sender_counts(void)
 	destroy_port(port);
 }
 
+static mach_port_t
+post_for(mach_port_t port, mach_msg_id_t id)
+{
+	mach_msg_header_t request = {
+			.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0),
+			.msgh_size = sizeof(request),
+			.msgh_remote_port = port,
+			.msgh_id = id,
+	};
+	return post(&request);
+}
+
 static void
-check_failed_send(mach_port_t to)
+check_refused_send(mach_port_t to)
 {
 	mach_port_t port;
 	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
+	mach_port_insert_right(
+			mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND);
 	mach_port_t reply;
 	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &reply);
 	static union {
@@ -1686,11 +1732,60 @@ check_failed_send(mach_port_t to)
 			|= MACH_MSGH_BITS(0, MACH_MSG_TYPE_MAKE_SEND_ONCE);
 	message.carrier.Head.msgh_local_port = reply;
 	message.carrier.Head.msgh_size = sizeof(message);
-	message.carrier.port.disposition = MACH_MSG_TYPE_MAKE_SEND;
 	kern_return_t kr = mach_msg(&message.carrier.Head, MACH_SEND_MSG,
 			sizeof(message), 0, MACH_PORT_NULL,
 			MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
 	CHECK(kr == MACH_SEND_TOO_LARGE);
+
+	mach_port_urefs_t refs;
+	kr = mach_port_get_refs(
+			mach_task_self(), port, MACH_PORT_RIGHT_SEND, &refs);
+	CHECK(kr == KERN_SUCCESS && refs == 1);
+	mach_port_name_t unused;
+	CHECK(receive_notification(reply, MACH_NOTIFY_SEND_ONCE, 0, &unused)
+			== MACH_RCV_TIMED_OUT);
+	destroy_port(reply);
+	mach_port_destruct(mach_task_self(), port, -1, 0);
+}
+
+static void
+check_failed_send(mach_port_t to)
+{
+	mach_port_t port;
+	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
+	mach_port_t reply;
+	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &reply);
+	mach_port_t fileport;
+	CHECK(fileport_makeport(STDIN_FILENO, &fileport) == 0);
+	struct {
+		mach_msg_header_t Head;
+		mach_msg_body_t body;
+		mach_msg_port_descriptor_t ports[2];
+	} message = {
+		.Head = {
+			.msgh_bits = MACH_MSGH_BITS_SET(MACH_MSG_TYPE_COPY_SEND,
+					MACH_MSG_TYPE_MAKE_SEND_ONCE, 0,
+					MACH_MSGH_BITS_COMPLEX),
+			.msgh_size = sizeof(message),
+			.msgh_remote_port = to,
+			.msgh_local_port = reply,
+			.msgh_id = MARK_ID,
+		},
+		.body = {.msgh_descriptor_count = 2},
+		.ports = {
+			{
+				.name = port,
+				.disposition = MACH_MSG_TYPE_MAKE_SEND,
+				.type = MACH_MSG_PORT_DESCRIPTOR,
+			},
+			{
+				.name = fileport,
+				.disposition = MACH_MSG_TYPE_MOVE_SEND,
+				.type = MACH_MSG_PORT_DESCRIPTOR,
+			},
+		},
+	};
+	CHECK(send_starved(&message.Head) == MACH_SEND_NO_BUFFER);
 
 	CHECK(!has_senders(port));
 	mach_port_name_t unused;
@@ -1699,18 +1794,13 @@ check_failed_send(mach_port_t to)
 			== MACH_MSG_SUCCESS);
 	destroy_port(reply);
 	destroy_port(port);
-}
 
-static mach_port_t
-post_for(mach_port_t port, mach_msg_id_t id)
-{
-	mach_msg_header_t request = {
-			.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0),
-			.msgh_size = sizeof(request),
-			.msgh_remote_port = port,
-			.msgh_id = id,
-	};
-	return post(&request);
+	reply = post_for(to, HOLD_REPLY_ID);
+	CHECK(ask_for(to, FAIL_REPLY_ID) == MACH_SEND_NO_BUFFER);
+	CHECK(receive_notification(
+			      reply, MACH_NOTIFY_SEND_ONCE, ANSWER_MS, &unused)
+			== MACH_MSG_SUCCESS);
+	destroy_port(reply);
 }
 
 static void
@@ -1727,6 +1817,7 @@ check_send_once_rights(void)
 			== MACH_MSG_SUCCESS);
 	destroy_port(reply);
 
+	check_refused_send(holder.port);
 	check_failed_send(holder.port);
 	CHECK(ask_for(holder.port, CHECK_IN_ID) == 1);
 	mach_port_t doomed = look_up(DOOMED_NAME);
