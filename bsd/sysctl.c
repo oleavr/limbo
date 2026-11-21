@@ -31,10 +31,13 @@
 #define _GNU_SOURCE
 #endif
 
+#include <arpa/inet.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <limits.h>
 #include <mach/mach.h>
+#include <netinet/ip.h>
+#include <netinet/tcp.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -220,6 +223,7 @@ static int read_osversion(void *old, size_t *oldlenp);
 static int read_osproductversion(void *old, size_t *oldlenp);
 static const char *system_version(const char *key, const char *otherwise,
 		char *value, size_t size);
+static int read_tcp_pcblist(void *old, size_t *oldlenp);
 static int read_ip_ttl(void *old, size_t *oldlenp);
 static int read_pressure_level(void *old, size_t *oldlenp);
 
@@ -287,6 +291,8 @@ static const struct sysctl_node nodes[] = {
 				.reader = read_swapusage},
 		{"vm.self_region_footprint", {0, 0}, SYSCTL_INT, .number = 0},
 		{"vm.self_region_info_flags", {0, 0}, SYSCTL_INT, .number = 0},
+		{"net.inet.tcp.pcblist_n", {0, 0}, SYSCTL_READER,
+				.reader = read_tcp_pcblist},
 		{"net.inet.ip.ttl", {0, 0}, SYSCTL_READER,
 				.reader = read_ip_ttl},
 
@@ -728,6 +734,9 @@ oid_format(const int *oid, void *old, size_t *oldlenp)
 		} else if (node->reader == read_swapusage) {
 			kind = CTLTYPE_OPAQUE;
 			format = "S,xsw_usage";
+		} else if (node->reader == read_tcp_pcblist) {
+			kind = CTLTYPE_OPAQUE;
+			format = "S,xtcpcb_n";
 		} else if (node->reader == read_hostname
 				|| node->reader == read_bootsessionuuid
 				|| node->reader == read_sandbox_sentinel
@@ -1017,14 +1026,336 @@ read_swapusage(void *old, size_t *oldlenp)
 	return read_bytes(&usage, sizeof(usage), old, oldlenp);
 }
 
+#pragma pack(push, 4)
+struct xnu_xinpgen {
+	uint32_t xig_len;
+	uint32_t xig_count;
+	uint64_t xig_gen;
+	uint64_t xig_sogen;
+};
+
+struct xnu_xinpcb_n {
+	uint32_t xi_len;
+	uint32_t xi_kind;
+	uint64_t xi_inpp;
+	uint16_t inp_fport;
+	uint16_t inp_lport;
+	uint64_t inp_ppcb;
+	uint64_t inp_gencnt;
+	int32_t inp_flags;
+	uint32_t inp_flow;
+	uint8_t inp_vflag;
+	uint8_t inp_ip_ttl;
+	uint8_t inp_ip_p;
+	uint32_t inp_faddr[4];
+	uint32_t inp_laddr[4];
+	uint8_t inp4_ip_tos;
+	struct {
+		uint8_t inp6_hlim;
+		int32_t inp6_cksum;
+		uint16_t inp6_ifindex;
+		int16_t inp6_hops;
+	} inp_depend6;
+	uint32_t inp_flowhash;
+	uint32_t inp_flags2;
+};
+
+struct xnu_xsocket_n {
+	uint32_t xso_len;
+	uint32_t xso_kind;
+	uint64_t xso_so;
+	int16_t so_type;
+	uint32_t so_options;
+	int16_t so_linger;
+	int16_t so_state;
+	uint64_t so_pcb;
+	int32_t xso_protocol;
+	int32_t xso_family;
+	int16_t so_qlen;
+	int16_t so_incqlen;
+	int16_t so_qlimit;
+	int16_t so_timeo;
+	uint16_t so_error;
+	int32_t so_pgid;
+	uint32_t so_oobmark;
+	uint32_t so_uid;
+	int32_t so_last_pid;
+	int32_t so_e_pid;
+	uint64_t so_gencnt;
+	uint32_t so_flags;
+	uint32_t so_flags1;
+	int32_t so_usecount;
+	int32_t so_retaincnt;
+	uint32_t xso_filter_flags;
+};
+
+struct xnu_xsockbuf_n {
+	uint32_t xsb_len;
+	uint32_t xsb_kind;
+	uint32_t sb_cc;
+	uint32_t sb_hiwat;
+	uint32_t sb_mbcnt;
+	uint32_t sb_mbmax;
+	int32_t sb_lowat;
+	int16_t sb_flags;
+	int16_t sb_timeo;
+};
+
+struct xnu_xsockstat_n {
+	uint32_t xst_len;
+	uint32_t xst_kind;
+	uint64_t xst_tc_stats[4][4];
+};
+
+struct xnu_xtcpcb_n {
+	uint32_t xt_len;
+	uint32_t xt_kind;
+	uint64_t t_segq;
+	int32_t t_dupacks;
+	int32_t t_timer[4];
+	int32_t t_state;
+	uint32_t t_rest[41];
+};
+
+struct pcblist_item {
+	struct xnu_xinpcb_n inpcb;
+	struct xnu_xsocket_n socket;
+	struct xnu_xsockbuf_n receive;
+	struct xnu_xsockbuf_n send;
+	struct xnu_xsockstat_n stats;
+	struct xnu_xtcpcb_n tcpcb;
+	uint32_t padding;
+};
+#pragma pack(pop)
+_Static_assert(sizeof(struct xnu_xinpgen) == 24, "xinpgen");
+_Static_assert(sizeof(struct xnu_xinpcb_n) == 104, "xinpcb_n");
+_Static_assert(sizeof(struct xnu_xsocket_n) == 104, "xsocket_n");
+_Static_assert(sizeof(struct xnu_xsockbuf_n) == 32, "xsockbuf_n");
+_Static_assert(sizeof(struct xnu_xsockstat_n) == 136, "xsockstat_n");
+_Static_assert(sizeof(struct xnu_xtcpcb_n) == 204, "xtcpcb_n");
+_Static_assert(sizeof(struct pcblist_item) == 616, "a TCP socket's records");
+
+#define XSO_SOCKET 0x001
+#define XSO_RCVBUF 0x002
+#define XSO_SNDBUF 0x004
+#define XSO_STATS  0x008
+#define XSO_INPCB  0x010
+#define XSO_TCPCB  0x020
+
+#define DARWIN_INP_IPV4      0x1
+#define DARWIN_INP_IPV6      0x2
+#define DARWIN_AF_INET       2
+#define DARWIN_AF_INET6      30
+#define DARWIN_SOCK_STREAM   1
+#define DARWIN_SOCK_DGRAM    2
+#define DARWIN_SO_ACCEPTCONN 0x2
+
+enum {
+	DARWIN_TCPS_CLOSED,
+	DARWIN_TCPS_LISTEN,
+	DARWIN_TCPS_SYN_SENT,
+	DARWIN_TCPS_SYN_RECEIVED,
+	DARWIN_TCPS_ESTABLISHED,
+	DARWIN_TCPS_CLOSE_WAIT,
+	DARWIN_TCPS_FIN_WAIT_1,
+	DARWIN_TCPS_CLOSING,
+	DARWIN_TCPS_LAST_ACK,
+	DARWIN_TCPS_FIN_WAIT_2,
+	DARWIN_TCPS_TIME_WAIT,
+};
+
+struct pcblist {
+	bool tcp;
+	uint8_t ttl;
+	struct pcblist_item *items;
+	size_t count, capacity;
+};
+
+static int pcblist_answer(bool tcp, void *old, size_t *oldlenp);
+static bool pcblist_table(struct pcblist *list, const char *table, bool v6);
+static void pcblist_address(uint32_t address[4], const char *hex, bool v6);
+static int default_ttl(void);
+
+static int
+read_tcp_pcblist(void *old, size_t *oldlenp)
+{
+	return pcblist_answer(true, old, oldlenp);
+}
+
+static int
+pcblist_answer(bool tcp, void *old, size_t *oldlenp)
+{
+	struct pcblist list = {.tcp = tcp, .ttl = (uint8_t)default_ttl()};
+	if (!pcblist_table(&list, tcp ? "tcp" : "udp", false)
+			|| !pcblist_table(&list, tcp ? "tcp6" : "udp6", true)) {
+		free(list.items);
+		return _ENOMEM;
+	}
+	size_t item_size = tcp ? sizeof(struct pcblist_item)
+			       : offsetof(struct pcblist_item, tcpcb);
+	struct xnu_xinpgen header = {
+			.xig_len = sizeof(header),
+			.xig_count = (uint32_t)list.count,
+	};
+	if (old == NULL) {
+		*oldlenp = 2 * sizeof(header)
+				+ (list.count + list.count / 8 + 1) * item_size;
+		free(list.items);
+		return 0;
+	}
+	uint8_t *out = old;
+	size_t room = *oldlenp, length = 0, copied = 0;
+	bool complete = false;
+	if (room >= sizeof(header)) {
+		memcpy(out, &header, sizeof(header));
+		length = sizeof(header);
+		while (copied < list.count && length + item_size <= room) {
+			memcpy(out + length, &list.items[copied++], item_size);
+			length += item_size;
+		}
+		complete = list.count == 0;
+		if (!complete && copied == list.count
+				&& length + sizeof(header) <= room) {
+			memcpy(out + length, &header, sizeof(header));
+			length += sizeof(header);
+			complete = true;
+		}
+	}
+	*oldlenp = length;
+	free(list.items);
+	return complete ? 0 : _ENOMEM;
+}
+
+static bool
+pcblist_table(struct pcblist *list, const char *table, bool v6)
+{
+	static const int32_t tcp_states[] = {
+			[TCP_ESTABLISHED] = DARWIN_TCPS_ESTABLISHED,
+			[TCP_SYN_SENT] = DARWIN_TCPS_SYN_SENT,
+			[TCP_SYN_RECV] = DARWIN_TCPS_SYN_RECEIVED,
+			[TCP_FIN_WAIT1] = DARWIN_TCPS_FIN_WAIT_1,
+			[TCP_FIN_WAIT2] = DARWIN_TCPS_FIN_WAIT_2,
+			[TCP_TIME_WAIT] = DARWIN_TCPS_TIME_WAIT,
+			[TCP_CLOSE] = DARWIN_TCPS_CLOSED,
+			[TCP_CLOSE_WAIT] = DARWIN_TCPS_CLOSE_WAIT,
+			[TCP_LAST_ACK] = DARWIN_TCPS_LAST_ACK,
+			[TCP_LISTEN] = DARWIN_TCPS_LISTEN,
+			[TCP_CLOSING] = DARWIN_TCPS_CLOSING,
+	};
+	char path[32];
+	snprintf(path, sizeof(path), "/proc/net/%s", table);
+	FILE *file = fopen(path, "re");
+	if (file == NULL) {
+		return true;
+	}
+	bool tcp = list->tcp;
+	char line[512];
+	while (fgets(line, sizeof(line), file) != NULL) {
+		char local[33], remote[33];
+		unsigned int local_port, remote_port, state, uid;
+		unsigned long sending, receiving, inode;
+		if (sscanf(line,
+				    " %*d: %32[0-9A-Fa-f]:%x %32[0-9A-Fa-f]:%x "
+				    "%x "
+				    "%lx:%lx %*x:%*x %*x %u %*u %lu",
+				    local, &local_port, remote, &remote_port,
+				    &state, &sending, &receiving, &uid, &inode)
+				!= 9) {
+			continue;
+		}
+		if (list->count == list->capacity) {
+			size_t capacity = list->capacity == 0
+					? 64
+					: list->capacity * 2;
+			struct pcblist_item *grown = realloc(
+					list->items, capacity * sizeof(*grown));
+			if (grown == NULL) {
+				fclose(file);
+				return false;
+			}
+			list->items = grown;
+			list->capacity = capacity;
+		}
+		bool listening = tcp && state == TCP_LISTEN;
+		struct pcblist_item *item = &list->items[list->count++];
+		memset(item, 0, sizeof(*item));
+		item->inpcb = (struct xnu_xinpcb_n){
+				.xi_len = sizeof(item->inpcb),
+				.xi_kind = XSO_INPCB,
+				.xi_inpp = inode,
+				.inp_fport = htons(remote_port),
+				.inp_lport = htons(local_port),
+				.inp_ppcb = tcp ? inode : 0,
+				.inp_vflag
+				= v6 ? DARWIN_INP_IPV6 : DARWIN_INP_IPV4,
+				.inp_ip_ttl = list->ttl,
+		};
+		item->socket = (struct xnu_xsocket_n){
+				.xso_len = sizeof(item->socket),
+				.xso_kind = XSO_SOCKET,
+				.xso_so = inode,
+				.so_type
+				= tcp ? DARWIN_SOCK_STREAM : DARWIN_SOCK_DGRAM,
+				.so_options
+				= listening ? DARWIN_SO_ACCEPTCONN : 0,
+				.so_pcb = inode,
+				.xso_protocol = tcp ? IPPROTO_TCP : IPPROTO_UDP,
+				.xso_family
+				= v6 ? DARWIN_AF_INET6 : DARWIN_AF_INET,
+				.so_qlen = listening ? (int16_t)receiving : 0,
+				.so_uid = uid,
+		};
+		item->receive = (struct xnu_xsockbuf_n){
+				.xsb_len = sizeof(item->receive),
+				.xsb_kind = XSO_RCVBUF,
+				.sb_cc
+				= tcp && !listening ? (uint32_t)receiving : 0,
+		};
+		item->send = (struct xnu_xsockbuf_n){
+				.xsb_len = sizeof(item->send),
+				.xsb_kind = XSO_SNDBUF,
+				.sb_cc = tcp ? (uint32_t)sending : 0,
+		};
+		item->stats.xst_len = sizeof(item->stats);
+		item->stats.xst_kind = XSO_STATS;
+		item->tcpcb.xt_len = sizeof(item->tcpcb);
+		item->tcpcb.xt_kind = XSO_TCPCB;
+		item->tcpcb.t_state = state <= TCP_CLOSING ? tcp_states[state]
+							   : DARWIN_TCPS_CLOSED;
+		pcblist_address(item->inpcb.inp_faddr, remote, v6);
+		pcblist_address(item->inpcb.inp_laddr, local, v6);
+	}
+	fclose(file);
+	return true;
+}
+
+static void
+pcblist_address(uint32_t address[4], const char *hex, bool v6)
+{
+	if (v6) {
+		sscanf(hex, "%8x%8x%8x%8x", &address[0], &address[1],
+				&address[2], &address[3]);
+	} else {
+		sscanf(hex, "%8x", &address[3]);
+	}
+}
+
 static int
 read_ip_ttl(void *old, size_t *oldlenp)
 {
-	int ttl;
+	return read_number(default_ttl(), sizeof(int32_t), old, oldlenp);
+}
+
+static int
+default_ttl(void)
+{
+	int ttl = IPDEFTTL;
 	FILE *file = fopen("/proc/sys/net/ipv4/ip_default_ttl", "re");
-	fscanf(file, "%d", &ttl);
-	fclose(file);
-	return read_number(ttl, sizeof(int32_t), old, oldlenp);
+	if (file != NULL) {
+		fscanf(file, "%d", &ttl);
+		fclose(file);
+	}
+	return ttl;
 }
 
 static int

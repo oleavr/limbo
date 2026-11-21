@@ -196,6 +196,7 @@ main(void)
 	check_sysctl_walk();
 	check_structure("vm.loadavg", "S,loadavg");
 	check_structure("vm.swapusage", "S,xsw_usage");
+	check_structure("net.inet.tcp.pcblist_n", "S,xtcpcb_n");
 	check_pipe_info();
 	check_kqueue_info();
 	check_workqueue();
