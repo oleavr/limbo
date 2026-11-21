@@ -2520,6 +2520,9 @@ sys_lseek(int fd, off_t offset, int whence)
 int
 sys_truncate(char *path, off_t length)
 {
+	if (mac_sandbox_denies(SANDBOX_FILE_WRITE_DATA, AT_FDCWD, path, 0)) {
+		return _EPERM;
+	}
 	char buffer[PATH_MAX];
 	return errno_map(truncate(sysroot_host_path(path, 0, buffer), length));
 }
