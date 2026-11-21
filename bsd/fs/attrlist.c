@@ -45,6 +45,7 @@
 #include <sys/xattr.h>
 #include <unistd.h>
 
+#include "acl.h"
 #include "at.h"
 #include "bsd/xnu-errno.h"
 #include "bsd_flags.h"
@@ -82,6 +83,7 @@ typedef struct attrreference {
 struct reference {
 	uint32_t offset;
 	const char *value;
+	uint32_t length;
 };
 
 #define FSOPT_NOFOLLOW          1
@@ -235,7 +237,8 @@ typedef struct vol_capabilities_attr {
 	vol_capabilities_set_t valid;
 } vol_capabilities_attr_t;
 
-#define ATTRIBUTES_SIZE_MAX (2 * PATH_MAX + 4096)
+#define ATTRIBUTES_SIZE_MAX (2 * PATH_MAX + 4096 + ACL_FILESEC_SIZE_MAX)
+#define REFERENCES_MAX      9
 #define GUID_SIZE           16
 
 static int pack_attributes(int fd, const struct __darwin_attrlist *alistp,
@@ -331,7 +334,8 @@ pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 
 	/* The buffer begins with a uint32_t size */
 	uint32_t offset = sizeof(uint32_t);
-	struct reference references[8];
+	struct reference references[REFERENCES_MAX];
+	char filesec[ACL_FILESEC_SIZE_MAX];
 	uint32_t reference_count = 0;
 
 	if (returned.commonattr & ATTR_CMN_RETURNED_ATTRS) {
@@ -493,9 +497,17 @@ pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 	}
 
 	if (returned.commonattr & ATTR_CMN_EXTENDED_SECURITY) {
-		attrreference_t none = {0, 0};
-		memcpy(buffer + offset, &none, sizeof(none));
-		offset += sizeof(none);
+		uint32_t length = acl_filesec_at(fd, "", AT_EMPTY_PATH, filesec,
+				sizeof(filesec));
+		if (length != 0) {
+			offset = pack_reference(buffer, offset, references,
+					&reference_count, filesec);
+			references[reference_count - 1].length = length;
+		} else {
+			attrreference_t none = {0, 0};
+			memcpy(buffer + offset, &none, sizeof(none));
+			offset += sizeof(none);
+		}
 		commonattr &= ~ATTR_CMN_EXTENDED_SECURITY;
 	}
 
@@ -929,7 +941,8 @@ pack_reference(char *buffer, uint32_t offset, struct reference *references,
 {
 	attrreference_t reference = {0, 0};
 	memcpy(buffer + offset, &reference, sizeof(reference));
-	references[(*reference_count)++] = (struct reference){offset, value};
+	references[(*reference_count)++]
+			= (struct reference){offset, value, strlen(value) + 1};
 	return offset + sizeof(reference);
 }
 
@@ -939,7 +952,7 @@ pack_reference_data(char *buffer, uint32_t offset,
 {
 	attrreference_t *ref = (attrreference_t *)(buffer + reference->offset);
 	ref->attr_dataoffset = offset - reference->offset;
-	ref->attr_length = strlen(reference->value) + 1;
+	ref->attr_length = reference->length;
 	memcpy(buffer + offset, reference->value, ref->attr_length);
 	return offset + ((ref->attr_length + 3) & ~3);
 }

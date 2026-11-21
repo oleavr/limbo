@@ -47,6 +47,9 @@ struct filesec_header {
 	uint32_t flags;
 };
 
+_Static_assert(sizeof(struct filesec_header) == ACL_FILESEC_HEADER_SIZE,
+		"kauth_filesec");
+
 static int object_open(int dirfd, const char *host_path, int at_flags);
 static void object_path(int fd, char *buffer, size_t size);
 static bool may_set(const struct stat *s);
