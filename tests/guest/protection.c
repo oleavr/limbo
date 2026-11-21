@@ -63,6 +63,7 @@ static void user_sets(void);
 static int class_of(const char *path);
 static int attrlist_class_of(const char *path);
 static int set_class(const char *path, int dpclass);
+static int set_attrlist_class(const char *path, uint32_t dpclass);
 static void make_file(const char *path);
 static int as_user(void (*body)(void));
 
@@ -175,6 +176,16 @@ check_attrlist(void)
 	CHECK(set_class("listed/file", CLASS_B) == 0);
 	CHECK(attrlist_class_of("listed/file") == CLASS_B);
 
+	CHECK(set_attrlist_class("listed/file", CLASS_A) == 0);
+	CHECK(class_of("listed/file") == CLASS_A);
+	CHECK(attrlist_class_of("listed/file") == CLASS_A);
+	CHECK(set_attrlist_class("listed", CLASS_B) == 0);
+	CHECK(class_of("listed") == CLASS_B);
+	errno = 0;
+	CHECK(set_attrlist_class("listed/file", CLASS_E) == -1
+			&& errno == EINVAL);
+	CHECK(class_of("listed/file") == CLASS_A);
+
 	CHECK(unlink("listed/file") == 0);
 	CHECK(rmdir("listed") == 0);
 }
@@ -267,6 +278,16 @@ set_class(const char *path, int dpclass)
 	CHECK(close(fd) == 0);
 	errno = saved;
 	return r;
+}
+
+static int
+set_attrlist_class(const char *path, uint32_t dpclass)
+{
+	struct attrlist list = {
+			.bitmapcount = ATTR_BIT_MAP_COUNT,
+			.commonattr = ATTR_CMN_DATA_PROTECT_FLAGS,
+	};
+	return setattrlist(path, &list, &dpclass, sizeof(dpclass), 0);
 }
 
 static void
