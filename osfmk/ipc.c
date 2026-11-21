@@ -410,9 +410,11 @@ ipc_kobject_destroy(mach_port_name_t name)
 	entry->port->kobject = NULL;
 	if (entry->type & MACH_PORT_TYPE_SEND) {
 		entry->type = MACH_PORT_TYPE_DEAD_NAME;
+		queue_dead_name_notification(entry);
 	}
 	entry_release_if_unused(entry);
 	pthread_mutex_unlock(&lock);
+	flush_notices();
 }
 
 bool
