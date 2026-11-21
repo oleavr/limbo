@@ -155,6 +155,7 @@ static const mach_msg_id_t CHECK_IN_ID = 7917;
 static const mach_msg_id_t DESTROY_ID = 7918;
 static const mach_msg_id_t WATCH_ID = 7919;
 static const mach_msg_id_t WATCHED_ID = 7920;
+static const mach_msg_id_t NOTIFY_ID = 7921;
 static const char FROM_SENDER[] = "from the sender";
 static const char FROM_RECEIVER[] = "from the receiver";
 
@@ -702,6 +703,22 @@ type_of(mach_port_t name)
 	return (int32_t)type;
 }
 
+static int32_t
+watch_death(mach_port_t name, mach_port_t notify)
+{
+	mach_port_t previous = MACH_PORT_NULL;
+	kern_return_t kr = mach_port_request_notification(mach_task_self(),
+			name, MACH_NOTIFY_DEAD_NAME, 0, notify,
+			MACH_MSG_TYPE_MOVE_SEND_ONCE, &previous);
+	if (kr != KERN_SUCCESS) {
+		return -1;
+	}
+	if (previous == MACH_PORT_NULL) {
+		return 1;
+	}
+	return type_of(previous) == MACH_PORT_TYPE_SEND_ONCE ? 2 : -2;
+}
+
 static void
 forward(mach_port_t to, mach_port_t right)
 {
@@ -805,6 +822,11 @@ serve_peer(void)
 							MACH_NOTIFY_NO_SENDERS,
 							200, &seen)
 							== MACH_MSG_SUCCESS);
+		} else if (message.Head.msgh_id == NOTIFY_ID) {
+			answer(&message.Head,
+					watch_death(kept,
+							message.carrier.port
+									.name));
 		} else if (message.Head.msgh_id == LARGE_ID) {
 			answer(&message.Head,
 					patterned(message.bytes,
@@ -1637,6 +1659,41 @@ check_send_once_rights(void)
 	destroy_port(reply);
 }
 
+static int32_t
+ask_to_watch(mach_port_t holder, mach_port_t notify)
+{
+	carrier_t carrier = carrier_of(holder, NOTIFY_ID, notify);
+	carrier.port.disposition = MACH_MSG_TYPE_MAKE_SEND_ONCE;
+	return ask(&carrier.Head);
+}
+
+static void
+check_remote_notify_port(void)
+{
+	child_t holder = start_peer(HOLDER_NAME);
+	mach_port_t watched = give_send_right(holder.port);
+	mach_port_t first;
+	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &first);
+	mach_port_t second;
+	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &second);
+	CHECK(ask_to_watch(holder.port, first) == 1);
+	CHECK(ask_to_watch(holder.port, second) == 2);
+
+	destroy_port(watched);
+	mach_port_name_t name;
+	CHECK(receive_notification(
+			      second, MACH_NOTIFY_DEAD_NAME, ANSWER_MS, &name)
+			== MACH_MSG_SUCCESS);
+	CHECK(receive_notification(first, MACH_NOTIFY_DEAD_NAME, 100, &name)
+			== MACH_RCV_TIMED_OUT);
+	end_peer(&holder);
+	CHECK(receive_notification(
+			      first, MACH_NOTIFY_SEND_ONCE, ANSWER_MS, &name)
+			== MACH_MSG_SUCCESS);
+	destroy_port(first);
+	destroy_port(second);
+}
+
 static void
 check_transport(void)
 {
@@ -1689,5 +1746,6 @@ main(int argc, char *argv[])
 	check_gone_process();
 	check_sender_counts();
 	check_send_once_rights();
+	check_remote_notify_port();
 	return 0;
 }
