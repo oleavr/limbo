@@ -192,6 +192,8 @@ static uint32_t entry_count;
 static struct ipc_port *kobjects[IPC_KOBJECT_VOUCHER + 1];
 static uint32_t export_counter;
 static uint32_t transfer_counter;
+static uint32_t *gone_guests;
+static size_t gone_guest_count;
 static const uint64_t dead_global_id = UINT64_MAX;
 static const uint64_t fileport_global_id = UINT64_MAX - 1;
 static const uint64_t memory_entry_global_id = UINT64_MAX - 2;
@@ -233,6 +235,9 @@ static mach_port_name_t import_body_port(uint64_t global_id,
 		const uint8_t **data);
 static mach_port_name_t import_fileport(int fd);
 static void turn_dead(struct ipc_entry *entry);
+static void remember_gone(uint32_t guest_id);
+static bool guest_is_gone(uint32_t guest_id);
+static size_t gone_guest_index(uint32_t guest_id);
 static mach_port_name_t import_memory_entry(int fd, const uint8_t *record);
 static struct ipc_entry *adopt_object(ipc_kobject_type_t kotype, void *kobject);
 static uint64_t export_local_port(mach_port_name_t name);
@@ -923,7 +928,8 @@ port_for_global_id(uint64_t global_id)
 static mach_port_name_t
 import_remote_send(uint64_t global_id, mach_msg_type_name_t type)
 {
-	if (global_id == dead_global_id) {
+	if (global_id == dead_global_id
+			|| guest_is_gone(broker_guest_of(global_id))) {
 		return MACH_PORT_DEAD;
 	}
 
@@ -1248,6 +1254,7 @@ void
 ipc_remote_guest_gone(uint32_t guest_id)
 {
 	pthread_mutex_lock(&lock);
+	remember_gone(guest_id);
 	for (uint32_t i = 1; i < entry_count; i++) {
 		struct ipc_port *port = entries[i].port;
 		if (port != NULL && port->remote
@@ -1271,6 +1278,45 @@ turn_dead(struct ipc_entry *entry)
 	entry->urefs += entry->sorights;
 	entry->sorights = 0;
 	queue_dead_name_notification(entry);
+}
+
+static void
+remember_gone(uint32_t guest_id)
+{
+	if (guest_is_gone(guest_id)) {
+		return;
+	}
+
+	size_t index = gone_guest_index(guest_id);
+	gone_guests = realloc(gone_guests,
+			(gone_guest_count + 1) * sizeof(*gone_guests));
+	memmove(&gone_guests[index + 1], &gone_guests[index],
+			(gone_guest_count - index) * sizeof(*gone_guests));
+	gone_guests[index] = guest_id;
+	gone_guest_count++;
+}
+
+static bool
+guest_is_gone(uint32_t guest_id)
+{
+	size_t index = gone_guest_index(guest_id);
+	return index != gone_guest_count && gone_guests[index] == guest_id;
+}
+
+static size_t
+gone_guest_index(uint32_t guest_id)
+{
+	size_t low = 0;
+	size_t high = gone_guest_count;
+	while (low != high) {
+		size_t middle = low + (high - low) / 2;
+		if (gone_guests[middle] < guest_id) {
+			low = middle + 1;
+		} else {
+			high = middle;
+		}
+	}
+	return low;
 }
 
 mach_port_name_t

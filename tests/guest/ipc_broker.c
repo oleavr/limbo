@@ -125,6 +125,7 @@ static const char *program;
 static const char PEER_NAME[] = "com.limbo.test.ipc.peer";
 static const char VICTIM_NAME[] = "com.limbo.test.ipc.victim";
 static const char GONE_NAME[] = "com.limbo.test.ipc.gone";
+static const char HOME_NAME[] = "com.limbo.test.ipc.home";
 static const mach_msg_id_t CHECK_IN = 402;
 static const mach_msg_id_t LOOK_UP = 404;
 static const mach_msg_id_t REQUEST_ID = 7777;
@@ -956,13 +957,12 @@ look_up_raw(int fd, const char *name)
 	return answer.reply.global_id;
 }
 
-static void
-check_malformed_messages(mach_port_t port)
+static raw_message_t
+raw_message(uint64_t dest_global_id)
 {
-	int fd = connect_raw();
-	const raw_message_t valid = {
+	raw_message_t valid = {
 		.send = {
-			.dest_global_id = look_up_raw(fd, PEER_NAME),
+			.dest_global_id = dest_global_id,
 			.blob_length = sizeof(valid) - sizeof(valid.send),
 		},
 		.remote = {
@@ -987,6 +987,14 @@ check_malformed_messages(mach_port_t port)
 			},
 		},
 	};
+	return valid;
+}
+
+static void
+check_malformed_messages(mach_port_t port)
+{
+	int fd = connect_raw();
+	const raw_message_t valid = raw_message(look_up_raw(fd, PEER_NAME));
 
 	raw_message_t raw = valid;
 	raw.send.blob_length = 8;
@@ -1318,10 +1326,32 @@ receive_notification(mach_port_t notify, mach_msg_id_t id,
 	return kr;
 }
 
+static mach_port_name_t
+receive_raw_port(mach_port_t home)
+{
+	struct {
+		mach_msg_header_t Head;
+		mach_msg_body_t body;
+		mach_msg_port_descriptor_t port;
+		mach_msg_ool_descriptor_t data;
+		mach_msg_trailer_t trailer;
+	} message;
+	kern_return_t kr = mach_msg(&message.Head,
+			MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(message),
+			home, ANSWER_MS, MACH_PORT_NULL);
+	CHECK(kr == MACH_MSG_SUCCESS);
+	return message.port.name;
+}
+
 static void
 check_gone_process(void)
 {
+	mach_port_t home = bootstrap_call(CHECK_IN, HOME_NAME);
+	CHECK(home != MACH_PORT_NULL);
 	child_t gone = start_peer(GONE_NAME);
+	int fd = connect_raw();
+	raw_message_t raw = raw_message(look_up_raw(fd, HOME_NAME));
+	raw.id = look_up_raw(fd, GONE_NAME);
 	mach_port_t notify = request_notification(
 			gone.port, MACH_NOTIFY_DEAD_NAME);
 	mach_port_name_t name;
@@ -1347,6 +1377,13 @@ check_gone_process(void)
 	kern_return_t kr = mach_msg(&message, MACH_SEND_MSG, sizeof(message), 0,
 			MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
 	CHECK(kr == MACH_SEND_INVALID_DEST);
+
+	send_raw(fd, BROKER_SEND, &raw, sizeof(raw));
+	CHECK(receive_raw_port(home) == MACH_PORT_DEAD);
+	raw.id++;
+	send_raw(fd, BROKER_SEND, &raw, sizeof(raw));
+	CHECK(receive_raw_port(home) == MACH_PORT_DEAD);
+	CHECK(close(fd) == 0);
 	kr = mach_port_mod_refs(mach_task_self(), gone.port,
 			MACH_PORT_RIGHT_DEAD_NAME, -2);
 	CHECK(kr == KERN_SUCCESS);
