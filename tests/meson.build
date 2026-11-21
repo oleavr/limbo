@@ -58,6 +58,7 @@ guest_tests = [
   'sandbox.c',
   'sandbox_kept.c',
   'semaphore.c',
+  'shared_cache.c',
   'signals.c',
   'sockets.c',
   'spawn.c',
