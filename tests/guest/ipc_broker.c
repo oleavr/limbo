@@ -1333,6 +1333,7 @@ check_gone_process(void)
 			      notify, MACH_NOTIFY_DEAD_NAME, ANSWER_MS, &name)
 			== MACH_MSG_SUCCESS);
 	CHECK(name == gone.port);
+	CHECK(bootstrap_call(LOOK_UP, GONE_NAME) == MACH_PORT_NULL);
 	mach_port_type_t type;
 	CHECK(mach_port_type(mach_task_self(), gone.port, &type)
 			== KERN_SUCCESS);

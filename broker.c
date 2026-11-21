@@ -70,6 +70,7 @@ static void route_send(struct broker_wire_frame *frame);
 static struct connection *connection_for_fd(int fd);
 static struct connection *connection_for_guest(uint32_t guest_id);
 static struct service *service_named(const char *name);
+static void forget_services(uint32_t guest_id);
 static void add_connection(int fd);
 static void remove_connection(size_t index);
 static void send_frame(struct connection *conn, uint32_t type,
@@ -297,6 +298,18 @@ service_named(const char *name)
 }
 
 static void
+forget_services(uint32_t guest_id)
+{
+	size_t kept = 0;
+	for (size_t i = 0; i != service_count; i++) {
+		if (broker_guest_of(services[i].global_id) != guest_id) {
+			services[kept++] = services[i];
+		}
+	}
+	service_count = kept;
+}
+
+static void
 add_connection(int fd)
 {
 	connections = reallocarray(connections, connection_count + 1,
@@ -319,6 +332,7 @@ remove_connection(size_t index)
 	};
 	connections[index] = connections[--connection_count];
 
+	forget_services(gone.guest_id);
 	for (size_t i = 0; gone.guest_id != 0 && i != connection_count; i++) {
 		send_frame(&connections[i], BROKER_GUEST_GONE, &gone,
 				sizeof(gone));
