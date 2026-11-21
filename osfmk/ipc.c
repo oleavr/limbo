@@ -34,6 +34,7 @@
 #include <mach/mach.h>
 #include <mach/mig.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,6 +45,7 @@
 #include "broker.h"
 #include "broker_client.h"
 #include "bsd/kevent.h"
+#include "bsd/signals.h"
 #include "ipc.h"
 #include "libinfo.h"
 #include "mach_vm.h"
@@ -85,6 +87,12 @@ struct ipc_entry {
 	mach_port_urefs_t urefs;
 	mach_port_urefs_t sorights;
 	uint32_t generation;
+};
+
+struct arrival_waiter {
+	struct arrival_waiter *next;
+	const struct ipc_port *port;
+	_Atomic uint32_t woken;
 };
 
 struct remote_header {
@@ -140,7 +148,7 @@ static const struct mig_subsystem *const kobject_subsystems[] = {
 };
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t arrival = PTHREAD_COND_INITIALIZER;
+static struct arrival_waiter *arrival_waiters;
 static struct ipc_entry *entries;
 static uint32_t entry_count;
 static struct ipc_port *kobjects[IPC_KOBJECT_VOUCHER + 1];
@@ -200,8 +208,11 @@ static mach_msg_return_t receive(mach_msg_header_t *msg,
 		mach_msg_option64_t options, mach_msg_size_t rcv_size,
 		mach_port_name_t rcv_name, mach_msg_timeout_t timeout);
 static struct ipc_port *port_with_message(struct ipc_entry *entry);
-static int wait_for_arrival(mach_msg_option64_t options,
-		mach_msg_timeout_t timeout, struct timespec *deadline);
+static int wait_for_arrival(const struct ipc_port *port,
+		mach_msg_option64_t options, mach_msg_timeout_t timeout,
+		struct timespec *deadline);
+static void wake_waiters_for(const struct ipc_port *port);
+static void wake_all_waiters(void);
 static void write_trailer(mach_msg_header_t *msg, struct ipc_port *port,
 		pid_t sender_pid);
 static void destroy_receive_right(struct ipc_entry *entry);
@@ -244,6 +255,7 @@ ipc_fork_parent(void)
 static void
 ipc_fork_child(void)
 {
+	arrival_waiters = NULL;
 	pthread_mutex_unlock(&lock);
 }
 
@@ -1172,7 +1184,7 @@ enqueue(struct ipc_port *port, struct ipc_kmsg *kmsg)
 	}
 	*port->messages_tail = kmsg;
 	port->messages_tail = &kmsg->next;
-	pthread_cond_broadcast(&arrival);
+	wake_waiters_for(port);
 }
 
 static void
@@ -1338,7 +1350,7 @@ receive(mach_msg_header_t *msg, mach_msg_option64_t options,
 			break;
 		}
 
-		if (wait_for_arrival(options, timeout, &deadline)
+		if (wait_for_arrival(entry->port, options, timeout, &deadline)
 				== ETIMEDOUT) {
 			pthread_mutex_unlock(&lock);
 			return MACH_RCV_TIMED_OUT;
@@ -1394,18 +1406,15 @@ port_with_message(struct ipc_entry *entry)
 }
 
 static int
-wait_for_arrival(mach_msg_option64_t options, mach_msg_timeout_t timeout,
-		struct timespec *deadline)
+wait_for_arrival(const struct ipc_port *port, mach_msg_option64_t options,
+		mach_msg_timeout_t timeout, struct timespec *deadline)
 {
-	if (!(options & MACH_RCV_TIMEOUT)) {
-		return pthread_cond_wait(&arrival, &lock);
-	}
-
-	if (timeout == 0) {
+	bool timed = options & MACH_RCV_TIMEOUT;
+	if (timed && timeout == 0) {
 		return ETIMEDOUT;
 	}
 
-	if (deadline->tv_sec == 0) {
+	if (timed && deadline->tv_sec == 0) {
 		clock_gettime(CLOCK_REALTIME, deadline);
 		deadline->tv_sec += timeout / 1000;
 		deadline->tv_nsec += (timeout % 1000) * 1000000;
@@ -1414,7 +1423,40 @@ wait_for_arrival(mach_msg_option64_t options, mach_msg_timeout_t timeout,
 			deadline->tv_nsec -= 1000000000;
 		}
 	}
-	return pthread_cond_timedwait(&arrival, &lock, deadline);
+
+	struct arrival_waiter waiter = {
+			.next = arrival_waiters,
+			.port = port,
+	};
+	arrival_waiters = &waiter;
+	int error = signals_futex_wait(
+			&waiter.woken, &lock, timed ? deadline : NULL);
+	struct arrival_waiter **link = &arrival_waiters;
+	while (*link != &waiter) {
+		link = &(*link)->next;
+	}
+	*link = waiter.next;
+	return error;
+}
+
+static void
+wake_waiters_for(const struct ipc_port *port)
+{
+	for (struct arrival_waiter *waiter = arrival_waiters; waiter != NULL;
+			waiter = waiter->next) {
+		if (waiter->port == port || port_in_set(port, waiter->port)) {
+			signals_futex_wake(&waiter->woken);
+		}
+	}
+}
+
+static void
+wake_all_waiters(void)
+{
+	for (struct arrival_waiter *waiter = arrival_waiters; waiter != NULL;
+			waiter = waiter->next) {
+		signals_futex_wake(&waiter->woken);
+	}
 }
 
 static void
@@ -1842,7 +1884,7 @@ ipc_port_insert_member(mach_port_name_t member, mach_port_name_t pset)
 		kr = KERN_ALREADY_IN_SET;
 	} else if (kr == KERN_SUCCESS) {
 		port_join_set(port, set);
-		pthread_cond_broadcast(&arrival);
+		wake_all_waiters();
 		if (port->messages != NULL) {
 			unlock_and_notify_arrival(port);
 			return kr;
@@ -1875,7 +1917,7 @@ ipc_port_move_member(mach_port_name_t member, mach_port_name_t pset)
 		port_leave_all_sets(port);
 		if (set != NULL) {
 			port_join_set(port, set);
-			pthread_cond_broadcast(&arrival);
+			wake_all_waiters();
 			if (port->messages != NULL) {
 				unlock_and_notify_arrival(port);
 				return kr;
@@ -1951,7 +1993,7 @@ destroy_receive_right(struct ipc_entry *entry)
 		entry->urefs += entry->sorights;
 		entry->sorights = 0;
 	}
-	pthread_cond_broadcast(&arrival);
+	wake_all_waiters();
 	entry_release_if_unused(entry);
 
 	while (queued != NULL) {
