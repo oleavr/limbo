@@ -30,6 +30,7 @@
 #define _GNU_SOURCE
 #endif
 
+#include <errno.h>
 #include <fcntl.h>
 #include <ftw.h>
 #include <limits.h>
@@ -45,6 +46,7 @@
 static char root[PATH_MAX];
 
 static void populate(void);
+static void check_too_long(void);
 static void make_dir(const char *path);
 static void make_file(const char *path);
 static void make_link(const char *target, const char *path);
@@ -84,12 +86,15 @@ main(void)
 	check_creation_path("/dangling-outside", 0, "/new");
 	check_creation_path("/absolute/file", 0, "/System/Library/file");
 	check_creation_path("dangling-absolute", 0, "/private/etc/new");
+	check_host_path("/proc/self", 0, "/proc/self");
+	check_host_path("/proc/self/status", 0, "/proc/self/status");
 
 	char buffer[PATH_MAX];
 	CHECK(strcmp(sysroot_host_path("/tmp", 0, buffer), "/tmp") == 0);
 	CHECK(strcmp(sysroot_host_path("/missing/new", 0, buffer),
 			      "/missing/new")
 			== 0);
+	check_too_long();
 	CHECK(strcmp(sysroot_host_path("relative", 0, buffer), "relative")
 			== 0);
 
@@ -120,6 +125,7 @@ populate(void)
 	make_link("/etc/new", "/dangling-absolute");
 	make_link("dangling", "/dangling-chain");
 	make_link("../../new", "/dangling-outside");
+	make_dir("/proc");
 }
 
 static void
@@ -137,6 +143,21 @@ check_creation_path(const char *path, int flags, const char *expected)
 				host_path);
 		exit(1);
 	}
+}
+
+static void
+check_too_long(void)
+{
+	char path[PATH_MAX] = "/System", buffer[PATH_MAX];
+	size_t top = strlen(path);
+	size_t fitting_alone = PATH_MAX - strlen(root) / 2;
+	for (size_t i = top; i < fitting_alone; i++) {
+		path[i] = ((i - top) % 100 == 0) ? '/' : 'a';
+	}
+	path[fitting_alone] = '\0';
+	errno = 0;
+	CHECK(open(sysroot_host_path(path, 0, buffer), O_RDONLY) == -1);
+	CHECK(errno == ENAMETOOLONG);
 }
 
 static void

@@ -56,10 +56,13 @@ static char root[PATH_MAX];
 static dev_t root_dev;
 static ino_t root_ino;
 static size_t root_length;
+static char too_long[PATH_MAX + 1];
 
 static bool leads_on(
 		int dirfd, const char *path, const char *host, char *target);
 static const char *host_path(const char *path, int flags, char *buffer);
+static bool covers(const char *path);
+static const char *in_root(const char *path, char *buffer);
 static int open_in_root(const char *path, int flags, uint64_t resolve);
 static ssize_t read_fd_path(int fd, char *buffer);
 
@@ -77,6 +80,7 @@ sysroot_open(void)
 	}
 	root_length = strlen(root);
 	struct stat s;
+	memset(too_long, 'x', PATH_MAX);
 	if (stat(root, &s) == 0) {
 		root_dev = s.st_dev;
 		root_ino = s.st_ino;
@@ -176,8 +180,13 @@ host_path(const char *path, int flags, char *buffer)
 		return (read_fd_path(fd, buffer) != -1) ? buffer : path;
 	}
 
-	if (errno != ENOENT
-			|| faccessat(AT_FDCWD, path, F_OK, AT_SYMLINK_NOFOLLOW)
+	bool missing = errno == ENOENT;
+	bool covered = covers(path);
+	if (!missing) {
+		return covered ? in_root(path, buffer) : path;
+	}
+	if (!covered
+			&& faccessat(AT_FDCWD, path, F_OK, AT_SYMLINK_NOFOLLOW)
 					== 0) {
 		return path;
 	}
@@ -193,23 +202,48 @@ host_path(const char *path, int flags, char *buffer)
 	size_t name_length = (path + path_length) - name;
 	if (name_length == 0 || (name_length == 1 && name[0] == '.')
 			|| (name_length == 2 && name[0] == '.' && name[1] == '.')) {
-		return path;
+		return covered ? in_root(path, buffer) : path;
 	}
 
 	char parent[PATH_MAX];
 	snprintf(parent, sizeof(parent), "%.*s", (int)(name - path), path);
 	fd = open_in_root(parent, 0, resolve);
 	if (fd == -1) {
-		return path;
+		return covered ? in_root(path, buffer) : path;
 	}
 
 	ssize_t length = read_fd_path(fd, buffer);
 	if (length == -1) {
-		return path;
+		return covered ? in_root(path, buffer) : path;
 	}
 	snprintf(buffer + length, PATH_MAX - length, "/%.*s",
 			(int)name_length, name);
 	return buffer;
+}
+
+static bool
+covers(const char *path)
+{
+	const char *name = path + strspn(path, "/");
+	size_t length = strcspn(name, "/");
+	if (length == 0) {
+		return true;
+	}
+	char top[NAME_MAX + 2];
+	snprintf(top, sizeof(top), "/%.*s", (int)length, name);
+	int fd = open_in_root(top, AT_SYMLINK_NOFOLLOW, 0);
+	if (fd == -1) {
+		return false;
+	}
+	close(fd);
+	return true;
+}
+
+static const char *
+in_root(const char *path, char *buffer)
+{
+	int length = snprintf(buffer, PATH_MAX, "%s%s", root, path);
+	return length < PATH_MAX ? buffer : too_long;
 }
 
 const char *
