@@ -3248,15 +3248,22 @@ _Static_assert(sizeof(struct darwin_aiocb) == 80, "struct aiocb");
 #define DARWIN_SIGKILL         9
 #define DARWIN_SIGSTOP         17
 #define DARWIN_NSIG            32
+#define DARWIN_LIO_NOP         0
+#define DARWIN_LIO_READ        1
+#define DARWIN_LIO_WRITE       2
+#define DARWIN_LIO_NOWAIT      1
+#define DARWIN_LIO_WAIT        2
 #define DARWIN_AIO_ALLDONE     1
 #define DARWIN_AIO_NOTCANCELED 4
 #define DARWIN_O_SYNC          0x80
 #define DARWIN_O_DSYNC         0x400000
+#define DARWIN_AIO_LISTIO_MAX  32
 #define DARWIN_AIO_PROCESS_MAX 256
 
 enum aio_kind {
-	AIO_READ,
-	AIO_WRITE,
+	AIO_NOP = DARWIN_LIO_NOP,
+	AIO_READ = DARWIN_LIO_READ,
+	AIO_WRITE = DARWIN_LIO_WRITE,
 	AIO_FSYNC,
 	AIO_DSYNC,
 };
@@ -3461,7 +3468,55 @@ aio_submit(user_addr_t aiocbp, enum aio_kind kind)
 int
 sys_lio_listio(int mode, user_addr_t aiocblist, int nent, user_addr_t sigp)
 {
-	unimplemented();
+	if ((mode != DARWIN_LIO_WAIT && mode != DARWIN_LIO_NOWAIT) || nent < 1
+			|| nent > DARWIN_AIO_LISTIO_MAX) {
+		return _EINVAL;
+	}
+	struct darwin_sigevent list_event = {.notify = DARWIN_SIGEV_NONE};
+	if (sigp != NULL) {
+		memcpy(&list_event, sigp, sizeof(list_event));
+		if (!aio_sigevent_valid(&list_event)) {
+			return _EINVAL;
+		}
+	}
+	uint64_t list[DARWIN_AIO_LISTIO_MAX];
+	memcpy(list, aiocblist, nent * sizeof(list[0]));
+	struct darwin_aiocb cbs[DARWIN_AIO_LISTIO_MAX];
+	for (int i = 0; i < nent; i++) {
+		if (list[i] == 0) {
+			continue;
+		}
+		memcpy(&cbs[i], (const void *)(uintptr_t)list[i],
+				sizeof(cbs[i]));
+		if (cbs[i].aio_lio_opcode < AIO_NOP
+				|| cbs[i].aio_lio_opcode > AIO_WRITE) {
+			return _EINVAL;
+		}
+		int error = aio_validate(&cbs[i], cbs[i].aio_lio_opcode);
+		if (error != 0) {
+			return error;
+		}
+		if (mode == DARWIN_LIO_NOWAIT) {
+			cbs[i].aio_sigevent = list_event;
+		}
+	}
+	int result = 0;
+	const struct darwin_aiocb *last = NULL;
+	for (int i = 0; i < nent; i++) {
+		if (list[i] == 0) {
+			continue;
+		}
+		if (!aio_begin(list[i], cbs[i].aio_fildes)) {
+			result = _EAGAIN;
+			continue;
+		}
+		aio_complete(list[i], &cbs[i], cbs[i].aio_lio_opcode);
+		last = &cbs[i];
+	}
+	if (last != NULL) {
+		aio_notify(&last->aio_sigevent);
+	}
+	return result;
 }
 
 static int
@@ -3475,11 +3530,11 @@ aio_validate(const struct darwin_aiocb *cb, enum aio_kind kind)
 	if (!aio_sigevent_valid(&cb->aio_sigevent)) {
 		return _EINVAL;
 	}
+	bool reads = kind == AIO_READ || kind == AIO_NOP;
 	int flags = fcntl(cb->aio_fildes, F_GETFL);
 	if (flags == -1
 			|| (flags & O_ACCMODE)
-					== (kind == AIO_READ ? O_WRONLY
-							     : O_RDONLY)) {
+					== (reads ? O_WRONLY : O_RDONLY)) {
 		return _EBADF;
 	}
 	return aio_is_vnode(cb->aio_fildes) ? 0 : _ESPIPE;
@@ -3523,6 +3578,8 @@ aio_complete(uint64_t aiocb, const struct darwin_aiocb *cb, enum aio_kind kind)
 {
 	ssize_t result = 0;
 	switch (kind) {
+	case AIO_NOP:
+		break;
 	case AIO_READ:
 		result = aio_transfer(cb, false);
 		break;

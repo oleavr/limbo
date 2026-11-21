@@ -52,6 +52,7 @@ static void check_suspend(void);
 static void check_cancel(void);
 static void check_fsync(void);
 static void check_signal(void);
+static void check_list(void);
 static void check_limit(void);
 static void wait_for(struct aiocb *cb);
 static void on_signal(int sig);
@@ -72,6 +73,7 @@ main(void)
 	check_refused();
 	check_fsync();
 	check_signal();
+	check_list();
 	check_limit();
 	printf("aio: ok\n");
 	return 0;
@@ -345,6 +347,10 @@ check_fsync(void)
 	cb.aio_fildes = open("/dev/null", O_RDONLY);
 	CHECK(cb.aio_fildes != -1);
 	CHECK(aio_fsync(O_SYNC, &cb) == -1 && errno == EBADF);
+	cb.aio_lio_opcode = LIO_NOP;
+	struct aiocb *list[1] = {&cb};
+	CHECK(lio_listio(LIO_WAIT, list, 1, NULL) == 0);
+	CHECK(aio_return(&cb) == 0);
 	CHECK(close(cb.aio_fildes) == 0);
 }
 
@@ -363,6 +369,64 @@ check_signal(void)
 		usleep(1000);
 	}
 	CHECK(signals == 1 && aio_return(&cb) == 2);
+}
+
+static void
+check_list(void)
+{
+	struct aiocb first = {.aio_fildes = file,
+			.aio_buf = "ab",
+			.aio_nbytes = 2,
+			.aio_lio_opcode = LIO_WRITE};
+	struct aiocb second = {.aio_fildes = file,
+			.aio_offset = 2,
+			.aio_buf = "cd",
+			.aio_nbytes = 2,
+			.aio_lio_opcode = LIO_WRITE};
+	struct aiocb nothing = {.aio_fildes = file, .aio_lio_opcode = LIO_NOP};
+	enum { TOO_MANY = 2 * AIO_LISTIO_MAX + 1 };
+	struct aiocb *list[TOO_MANY] = {&first, NULL, &second, &nothing};
+	CHECK(lio_listio(LIO_WAIT, list, 4, NULL) == 0);
+	CHECK(aio_error(&nothing) == 0 && aio_return(&nothing) == 0);
+	CHECK(aio_return(&first) == 2 && aio_return(&second) == 2);
+	char start[5] = {0};
+	CHECK(pread(file, start, 4, 0) == 4 && strcmp(start, "abcd") == 0);
+
+	CHECK(lio_listio(LIO_WAIT | LIO_NOWAIT, list, 4, NULL) == -1);
+	CHECK(errno == EINVAL);
+	CHECK(lio_listio(LIO_WAIT, list, 0, NULL) == -1 && errno == EINVAL);
+	CHECK(lio_listio(LIO_WAIT, list, TOO_MANY, NULL) == -1);
+	CHECK(errno == EINVAL);
+
+	int read_only = open("/dev/null", O_RDONLY);
+	CHECK(read_only != -1);
+	struct aiocb wrong = {.aio_fildes = read_only,
+			.aio_buf = text,
+			.aio_nbytes = 1,
+			.aio_lio_opcode = LIO_WRITE};
+	list[3] = &wrong;
+	CHECK(lio_listio(LIO_WAIT, list, 4, NULL) == -1 && errno == EBADF);
+	CHECK(aio_error(&first) == -1 && errno == EINVAL);
+	wrong.aio_fildes = file;
+	wrong.aio_lio_opcode = INT_MAX;
+	CHECK(lio_listio(LIO_WAIT, list, 4, NULL) == -1 && errno == EINVAL);
+	CHECK(aio_error(&first) == -1 && errno == EINVAL);
+	CHECK(close(read_only) == 0);
+
+	struct sigevent event = {
+			.sigev_notify = SIGEV_SIGNAL, .sigev_signo = SIGKILL};
+	CHECK(lio_listio(LIO_NOWAIT, list, 3, &event) == -1);
+	CHECK(errno == EINVAL);
+	event.sigev_signo = SIGUSR1;
+	signals = 0;
+	CHECK(lio_listio(LIO_NOWAIT, list, 3, &event) == 0);
+	wait_for(&first);
+	wait_for(&second);
+	for (int i = 0; signals == 0 && i < 5000; i++) {
+		usleep(1000);
+	}
+	CHECK(signals == 1);
+	CHECK(aio_return(&first) == 2 && aio_return(&second) == 2);
 }
 
 static void
