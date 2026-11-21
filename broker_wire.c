@@ -214,7 +214,7 @@ broker_wire_receive(int fd, struct broker_wire_ahead *ahead,
 	do {
 		n = recvmsg(fd, &msg, MSG_CMSG_CLOEXEC);
 	} while (n == -1 && errno == EINTR);
-	if (n < (ssize_t)sizeof(header)) {
+	if (n <= 0) {
 		free(frame);
 		return -1;
 	}
@@ -224,6 +224,10 @@ broker_wire_receive(int fd, struct broker_wire_ahead *ahead,
 	if (frame->fd_count != 0) {
 		frame->fds = malloc(sizeof(int) * frame->fd_count);
 		memcpy(frame->fds, fds, sizeof(int) * frame->fd_count);
+	}
+	if (n < (ssize_t)sizeof(header)) {
+		broker_wire_free(frame);
+		return -1;
 	}
 	if (msg.msg_flags & MSG_CTRUNC) {
 		ahead->lost = true;

@@ -27,6 +27,12 @@ sandbox_profile_test = executable('sandbox_profile_test',
 )
 test('sandbox_profile', sandbox_profile_test, suite: 'unit')
 
+broker_wire_test = executable('broker_wire_test',
+  sources: ['broker_wire_test.c', '../broker_wire.c'],
+  include_directories: include_dir,
+)
+test('broker_wire', broker_wire_test, suite: 'unit')
+
 python = import('python').find_installation('python3')
 runner = files('run-guest.py')
 
