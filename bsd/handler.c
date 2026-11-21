@@ -537,13 +537,13 @@ sys_setuid(void *uid)
 	return credentials_setuid((uid_t)(uintptr_t)uid);
 }
 
-int
+uint32_t
 sys_getuid(void)
 {
 	return getuid();
 }
 
-int
+uint32_t
 sys_geteuid(void)
 {
 	return geteuid();
@@ -944,13 +944,13 @@ sys_pipe2(int pipefd[2], int flags)
 	return fds[0];
 }
 
-int
+uint32_t
 sys_getegid(void)
 {
 	return getegid();
 }
 
-int
+uint32_t
 sys_getgid(void)
 {
 	return getgid();
