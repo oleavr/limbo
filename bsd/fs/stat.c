@@ -384,9 +384,21 @@ sys_fstatat(int fd, user_addr_t path, user_addr_t ub, int flag)
 int
 sys_fstatat64(int fd, user_addr_t path, user_addr_t ub, int flag)
 {
-	enum { _AT_FDONLY = 0x400 };
-	if (flag & _AT_FDONLY) {
-		return stat_at(fd, "", AT_EMPTY_PATH, ub);
+	enum { _AT_REALDEV = 0x200, _AT_FDONLY = 0x400 };
+	bool fd_only = flag & _AT_FDONLY;
+	int result = fd_only ? stat_at(fd, "", AT_EMPTY_PATH, ub)
+			     : stat_at(at_fd(fd), path, at_flags(flag), ub);
+	struct __darwin_user64_stat64 *st = ub;
+	dev_t root_device = sysroot_root_device();
+	if (result != 0 || !(flag & _AT_REALDEV)
+			|| st->st_dev != darwin_device(root_device)) {
+		return result;
 	}
-	return stat_at(at_fd(fd), path, at_flags(flag), ub);
+	char buffer[PATH_MAX];
+	const char *host_path = sysroot_host_path(path, at_flags(flag), buffer);
+	bool data = fd_only
+			? sysroot_fd_on_data_volume(fd)
+			: sysroot_at_on_data_volume(at_fd(fd), path, host_path);
+	st->st_dev = darwin_fsid(root_device, root_device, data);
+	return 0;
 }

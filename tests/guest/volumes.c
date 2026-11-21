@@ -36,6 +36,9 @@
 
 #define DATA_VOLUME "/System/Volumes/Data"
 
+#ifndef AT_REALDEV
+#define AT_REALDEV 0x0200
+#endif
 #ifndef MNT_EXT_ROOT_DATA_VOL
 #define MNT_EXT_ROOT_DATA_VOL 0x00000001
 #endif
@@ -43,6 +46,7 @@
 static void check_paths(void);
 static void check_statfs(void);
 static void check_mounts(void);
+static void check_real_device(void);
 
 int
 main(void)
@@ -50,6 +54,7 @@ main(void)
 	check_paths();
 	check_statfs();
 	check_mounts();
+	check_real_device();
 	return 0;
 }
 
@@ -127,4 +132,25 @@ check_mounts(void)
 	CHECK(system && data);
 	CHECK(getfsstat(mounts, sizeof(mounts[0]), MNT_NOWAIT) == 1);
 	CHECK(strcmp(mounts[0].f_mntonname, "/") == 0);
+}
+
+static void
+check_real_device(void)
+{
+	struct statfs system, data;
+	CHECK(statfs("/", &system) == 0);
+	CHECK(statfs("/private/tmp", &data) == 0);
+	struct stat shown, real;
+	CHECK(stat("/usr", &shown) == 0);
+	CHECK(fstatat(AT_FDCWD, "/usr", &real, AT_REALDEV) == 0);
+	CHECK(shown.st_dev == data.f_fsid.val[0]);
+	CHECK(real.st_dev == system.f_fsid.val[0]);
+	CHECK(real.st_ino == shown.st_ino);
+	CHECK(fstatat(AT_FDCWD, "/private/tmp", &real, AT_REALDEV) == 0);
+	CHECK(real.st_dev == data.f_fsid.val[0]);
+	int fd = open("/usr", O_RDONLY);
+	CHECK(fd != -1);
+	CHECK(fstatat(fd, "bin", &real, AT_REALDEV) == 0);
+	CHECK(real.st_dev == system.f_fsid.val[0]);
+	CHECK(close(fd) == 0);
 }
