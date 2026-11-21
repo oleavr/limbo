@@ -114,6 +114,7 @@ struct dead_name_request {
 
 enum remote_notice_kind {
 	REMOTE_NOTICE_RELEASE,
+	REMOTE_NOTICE_ADD,
 };
 
 struct remote_notice {
@@ -985,6 +986,15 @@ count_right(mach_port_name_t name, mach_msg_type_name_t type,
 	if (type == MACH_MSG_TYPE_PORT_SEND
 			&& (entry->type & MACH_PORT_TYPE_RECEIVE)) {
 		count_sender_guest(entry->port, dest_guest_id, 1);
+	} else if (type == MACH_MSG_TYPE_PORT_SEND && entry->port->remote
+			&& broker_guest_of(global_id) != dest_guest_id) {
+		queue_notice((struct pending_notice){
+				.global_id = global_id,
+				.notice = {
+						.kind = REMOTE_NOTICE_ADD,
+						.guest_id = dest_guest_id,
+				},
+		});
 	}
 }
 
@@ -1053,9 +1063,11 @@ receive_notice(uint64_t dest_global_id, const struct remote_notice *notice)
 	pthread_mutex_lock(&lock);
 	struct ipc_port *port = port_for_global_id(dest_global_id);
 	struct ipc_entry *entry = port != NULL ? lookup(port->name) : NULL;
-	if (entry != NULL && (entry->type & MACH_PORT_TYPE_RECEIVE)
-			&& notice->kind == REMOTE_NOTICE_RELEASE) {
+	bool owned = entry != NULL && (entry->type & MACH_PORT_TYPE_RECEIVE);
+	if (owned && notice->kind == REMOTE_NOTICE_RELEASE) {
 		release_grants(entry, notice->guest_id, notice->count);
+	} else if (owned && notice->kind == REMOTE_NOTICE_ADD) {
+		count_sender_guest(port, notice->guest_id, 1);
 	}
 	pthread_mutex_unlock(&lock);
 	flush_notices();

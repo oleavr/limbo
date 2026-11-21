@@ -127,6 +127,7 @@ static const char VICTIM_NAME[] = "com.limbo.test.ipc.victim";
 static const char GONE_NAME[] = "com.limbo.test.ipc.gone";
 static const char HOME_NAME[] = "com.limbo.test.ipc.home";
 static const char HOLDER_NAME[] = "com.limbo.test.ipc.holder";
+static const char THIRD_NAME[] = "com.limbo.test.ipc.third";
 static const mach_msg_id_t CHECK_IN = 402;
 static const mach_msg_id_t LOOK_UP = 404;
 static const mach_msg_id_t REQUEST_ID = 7777;
@@ -144,6 +145,7 @@ static const mach_msg_id_t ENTRY_ID = 7909;
 static const mach_msg_id_t DATA_ENTRY_ID = 7910;
 static const mach_msg_id_t KEEP_ID = 7911;
 static const mach_msg_id_t DROP_ID = 7912;
+static const mach_msg_id_t FORWARD_ID = 7913;
 static const char FROM_SENDER[] = "from the sender";
 static const char FROM_RECEIVER[] = "from the receiver";
 
@@ -550,6 +552,9 @@ call(void)
 static void
 answer(const mach_msg_header_t *request, int32_t value)
 {
+	if (request->msgh_remote_port == MACH_PORT_NULL) {
+		return;
+	}
 	valued_t reply = {
 			.Head = {
 					.msgh_bits = MACH_MSGH_BITS(
@@ -629,6 +634,34 @@ write_to_entry(mach_port_t entry, int flags)
 	return 1;
 }
 
+static carrier_t
+carrier_of(mach_port_t port, mach_msg_id_t id, mach_port_t carried)
+{
+	return (carrier_t){
+		.Head = {
+			.msgh_bits = MACH_MSGH_BITS_SET(MACH_MSG_TYPE_COPY_SEND,
+					0, 0, MACH_MSGH_BITS_COMPLEX),
+			.msgh_size = sizeof(carrier_t),
+			.msgh_remote_port = port,
+			.msgh_id = id,
+		},
+		.body = {.msgh_descriptor_count = 1},
+		.port = {
+			.name = carried,
+			.disposition = MACH_MSG_TYPE_MOVE_SEND,
+			.type = MACH_MSG_PORT_DESCRIPTOR,
+		},
+	};
+}
+
+static void
+forward(mach_port_t to, mach_port_t right)
+{
+	carrier_t carrier = carrier_of(to, KEEP_ID, right);
+	send_request(&carrier.Head);
+	mach_port_deallocate(mach_task_self(), to);
+}
+
 static void
 serve_peer(void)
 {
@@ -690,6 +723,9 @@ serve_peer(void)
 			answer(&message.Head,
 					mach_port_deallocate(mach_task_self(),
 							kept));
+		} else if (message.Head.msgh_id == FORWARD_ID) {
+			forward(message.carrier.port.name, kept);
+			answer(&message.Head, 1);
 		} else if (message.Head.msgh_id == LARGE_ID) {
 			answer(&message.Head,
 					patterned(message.bytes,
@@ -1063,26 +1099,6 @@ fileport_of_pipe(int *read_end)
 	return fileport;
 }
 
-static carrier_t
-carrier_of(mach_port_t port, mach_msg_id_t id, mach_port_t carried)
-{
-	return (carrier_t){
-		.Head = {
-			.msgh_bits = MACH_MSGH_BITS_SET(MACH_MSG_TYPE_COPY_SEND,
-					0, 0, MACH_MSGH_BITS_COMPLEX),
-			.msgh_size = sizeof(carrier_t),
-			.msgh_remote_port = port,
-			.msgh_id = id,
-		},
-		.body = {.msgh_descriptor_count = 1},
-		.port = {
-			.name = carried,
-			.disposition = MACH_MSG_TYPE_MOVE_SEND,
-			.type = MACH_MSG_PORT_DESCRIPTOR,
-		},
-	};
-}
-
 static void
 check_fileport(mach_port_t port)
 {
@@ -1453,6 +1469,23 @@ check_sender_counts(void)
 	CHECK(!has_senders(port));
 	destroy_port(notify);
 	destroy_port(port);
+
+	child_t third = start_peer(THIRD_NAME);
+	port = give_send_right(holder.port);
+	notify = request_notification(port, MACH_NOTIFY_NO_SENDERS);
+	carrier_t carrier = carrier_of(holder.port, FORWARD_ID, third.port);
+	carrier.port.disposition = MACH_MSG_TYPE_COPY_SEND;
+	CHECK(ask(&carrier.Head) == 1);
+	CHECK(receive_notification(notify, MACH_NOTIFY_NO_SENDERS, 100, &count)
+			== MACH_RCV_TIMED_OUT);
+	CHECK(has_senders(port));
+	CHECK(ask_for(third.port, DROP_ID) == KERN_SUCCESS);
+	CHECK(receive_notification(
+			      notify, MACH_NOTIFY_NO_SENDERS, ANSWER_MS, &count)
+			== MACH_MSG_SUCCESS);
+	destroy_port(notify);
+	destroy_port(port);
+	end_peer(&third);
 
 	port = give_send_right(holder.port);
 	notify = request_notification(port, MACH_NOTIFY_NO_SENDERS);
