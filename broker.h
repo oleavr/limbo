@@ -36,6 +36,7 @@
 
 #define LIMBO_BROKER_SOCKET_ENV "LIMBO_BROKER"
 #define LIMBO_BROKER_SERVICE_NAME_MAX 128
+#define BROKER_GUEST_ID               0
 
 #define BROKER_FRAME_MAX    (1 << 20)
 #define BROKER_INLINE_MAX   (64 * 1024)
