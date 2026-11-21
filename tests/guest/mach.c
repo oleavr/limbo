@@ -100,6 +100,11 @@ static void check_send_possible(void);
 static void check_dead_thread_name(void);
 static void *pass_gate(void *arg);
 static void check_port_deleted(void);
+static void check_no_senders(void);
+static void request_no_senders(
+		mach_port_t port, mach_port_mscount_t sync, mach_port_t notify);
+static bool receive_no_senders(mach_port_t notify, mach_msg_timeout_t timeout,
+		mach_port_mscount_t *count);
 static void check_make_send_count(void);
 static mach_port_mscount_t make_send_count(mach_port_t port);
 static void check_reference_deltas(void);
@@ -157,6 +162,7 @@ main(void)
 	check_send_possible();
 	check_dead_thread_name();
 	check_port_deleted();
+	check_no_senders();
 	check_make_send_count();
 	check_reference_deltas();
 	check_fork_during_port_calls();
@@ -1442,6 +1448,138 @@ check_port_deleted(void)
 	CHECK(mach_port_type(task, port, &type) == KERN_INVALID_NAME);
 	CHECK(mach_port_mod_refs(task, notify, MACH_PORT_RIGHT_RECEIVE, -1)
 			== KERN_SUCCESS);
+}
+
+static void
+check_no_senders(void)
+{
+	mach_port_t task = mach_task_self();
+	mach_port_t port = allocate_port();
+	mach_port_t notify = allocate_port();
+	mach_port_mscount_t count = 99;
+
+	request_no_senders(port, 0, notify);
+	CHECK(receive_no_senders(notify, 1000, &count));
+	CHECK(count == 0);
+
+	CHECK(mach_port_insert_right(task, port, port, MACH_MSG_TYPE_MAKE_SEND)
+			== KERN_SUCCESS);
+	request_no_senders(port, 0, notify);
+	CHECK(!receive_no_senders(notify, 100, &count));
+	CHECK(mach_port_deallocate(task, port) == KERN_SUCCESS);
+	CHECK(receive_no_senders(notify, 1000, &count));
+	CHECK(count == 1);
+
+	request_no_senders(port, count + 1, notify);
+	CHECK(!receive_no_senders(notify, 100, &count));
+	CHECK(mach_port_insert_right(task, port, port, MACH_MSG_TYPE_MAKE_SEND)
+			== KERN_SUCCESS);
+	CHECK(mach_port_mod_refs(task, port, MACH_PORT_RIGHT_SEND, -1)
+			== KERN_SUCCESS);
+	CHECK(receive_no_senders(notify, 1000, &count));
+	CHECK(count == 2);
+
+	request_no_senders(port, 1, notify);
+	CHECK(receive_no_senders(notify, 1000, &count));
+	CHECK(count == 2);
+
+	mach_port_options_t options = {.flags = MPO_INSERT_SEND_RIGHT};
+	mach_port_t constructed;
+	CHECK(mach_port_construct(task, &options, 0, &constructed)
+			== KERN_SUCCESS);
+	request_no_senders(constructed, 1, notify);
+	CHECK(!receive_no_senders(notify, 100, &count));
+	CHECK(mach_port_deallocate(task, constructed) == KERN_SUCCESS);
+	CHECK(receive_no_senders(notify, 1000, &count));
+	CHECK(count == 1);
+
+	CHECK(mach_port_insert_right(task, port, port, MACH_MSG_TYPE_MAKE_SEND)
+			== KERN_SUCCESS);
+	mach_port_t server = allocate_port();
+	struct {
+		mach_msg_header_t header;
+		mach_msg_body_t body;
+		mach_msg_port_descriptor_t right;
+	} message = {
+		.header = {
+			.msgh_bits = MACH_MSGH_BITS_SET(MACH_MSG_TYPE_MAKE_SEND,
+					0, 0, MACH_MSGH_BITS_COMPLEX),
+			.msgh_size = sizeof(message),
+			.msgh_remote_port = server,
+		},
+		.body = {.msgh_descriptor_count = 1},
+		.right = {
+			.name = port,
+			.disposition = MACH_MSG_TYPE_MOVE_SEND,
+			.type = MACH_MSG_PORT_DESCRIPTOR,
+		},
+	};
+	CHECK(mach_msg(&message.header, MACH_SEND_MSG, sizeof(message), 0,
+			      MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+			      MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	request_no_senders(port, 0, notify);
+	CHECK(!receive_no_senders(notify, 100, &count));
+	CHECK(mach_port_mod_refs(task, server, MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+	CHECK(receive_no_senders(notify, 1000, &count));
+	CHECK(count == 3);
+
+	CHECK(mach_port_insert_right(task, port, port, MACH_MSG_TYPE_MAKE_SEND)
+			== KERN_SUCCESS);
+	request_no_senders(port, 0, notify);
+	mach_port_t other = allocate_port();
+	mach_port_t previous = MACH_PORT_NULL;
+	CHECK(mach_port_request_notification(task, port, MACH_NOTIFY_NO_SENDERS,
+			      0, other, MACH_MSG_TYPE_MAKE_SEND_ONCE, &previous)
+			== KERN_SUCCESS);
+	mach_port_type_t type;
+	CHECK(mach_port_type(task, previous, &type) == KERN_SUCCESS);
+	CHECK(type & MACH_PORT_TYPE_SEND_ONCE);
+	CHECK(mach_port_deallocate(task, previous) == KERN_SUCCESS);
+	expect_send_once_notification(notify);
+	CHECK(mach_port_mod_refs(task, port, MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+	expect_send_once_notification(other);
+
+	CHECK(mach_port_deallocate(task, port) == KERN_SUCCESS);
+	CHECK(mach_port_mod_refs(task, constructed, MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+	CHECK(mach_port_mod_refs(task, other, MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+	CHECK(mach_port_mod_refs(task, notify, MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+}
+
+static void
+request_no_senders(
+		mach_port_t port, mach_port_mscount_t sync, mach_port_t notify)
+{
+	mach_port_t previous = MACH_PORT_NULL;
+	CHECK(mach_port_request_notification(mach_task_self(), port,
+			      MACH_NOTIFY_NO_SENDERS, sync, notify,
+			      MACH_MSG_TYPE_MAKE_SEND_ONCE, &previous)
+			== KERN_SUCCESS);
+}
+
+static bool
+receive_no_senders(mach_port_t notify, mach_msg_timeout_t timeout,
+		mach_port_mscount_t *count)
+{
+	struct {
+		mach_no_senders_notification_t notification;
+		mach_msg_trailer_t trailer;
+	} message;
+	if (mach_msg(&message.notification.not_header,
+			    MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(message),
+			    notify, timeout, MACH_PORT_NULL)
+			!= MACH_MSG_SUCCESS) {
+		return false;
+	}
+	CHECK(message.notification.not_header.msgh_id
+			== MACH_NOTIFY_NO_SENDERS);
+	*count = message.notification.not_count;
+	return true;
 }
 
 static void
