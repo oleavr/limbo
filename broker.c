@@ -45,9 +45,13 @@
 
 #include "broker.h"
 
+#define CONNECTION_FDS  (2 * BROKER_FDS_MAX)
+#define ACCEPT_RETRY_MS 1000
+
 struct connection {
 	int fd;
 	uint32_t guest_id;
+	size_t queued_fds;
 	struct broker_wire_frame *pending;
 	struct broker_wire_frame *last_pending;
 	struct broker_wire_ahead ahead;
@@ -60,7 +64,9 @@ struct service {
 
 static void raise_file_limit(void);
 static void run(int listen_fd);
-static void accept_guest(int listen_fd);
+static bool accept_guest(int listen_fd);
+static size_t fds_ahead(void);
+static void release_queued(struct connection *conn, size_t fd_count);
 static void handle_guest(int fd);
 static void welcome_guest(struct connection *conn);
 static void register_service(const struct broker_register *reg);
@@ -85,6 +91,8 @@ static size_t connection_count;
 static struct service *services;
 static size_t service_count;
 static uint32_t next_guest_id = 1;
+static size_t descriptor_room;
+static size_t queued_fds;
 
 int
 main(int argc, char *argv[])
@@ -119,15 +127,21 @@ raise_file_limit(void)
 		limit.rlim_cur = limit.rlim_max;
 		setrlimit(RLIMIT_NOFILE, &limit);
 	}
+	getrlimit(RLIMIT_NOFILE, &limit);
+	descriptor_room = limit.rlim_cur / 2;
 }
 
 static void
 run(int listen_fd)
 {
+	bool listening = true;
 	for (;;) {
 		size_t polled = connection_count;
 		struct pollfd *fds = calloc(polled + 1, sizeof(*fds));
-		fds[0] = (struct pollfd){ .fd = listen_fd, .events = POLLIN };
+		fds[0] = (struct pollfd){
+				.fd = listen_fd,
+				.events = listening ? POLLIN : 0,
+		};
 		for (size_t i = 0; i != polled; i++) {
 			fds[i + 1] = (struct pollfd){
 					.fd = connections[i].fd,
@@ -136,11 +150,10 @@ run(int listen_fd)
 			};
 		}
 
-		poll(fds, polled + 1, -1);
+		poll(fds, polled + 1, listening ? -1 : ACCEPT_RETRY_MS);
 
-		if (fds[0].revents & POLLIN) {
-			accept_guest(listen_fd);
-		}
+		listening = !(fds[0].revents & POLLIN)
+				|| accept_guest(listen_fd);
 		for (size_t i = 0; i != polled; i++) {
 			if (fds[i + 1].revents & POLLOUT) {
 				send_pending(connection_for_fd(fds[i + 1].fd));
@@ -154,13 +167,14 @@ run(int listen_fd)
 	}
 }
 
-static void
+static bool
 accept_guest(int listen_fd)
 {
 	int fd = accept(listen_fd, NULL, NULL);
 	if (fd >= 0) {
 		add_connection(fd);
 	}
+	return fd >= 0;
 }
 
 static void
@@ -179,6 +193,9 @@ handle_guest(int fd)
 		return;
 	}
 	if (received == 0) {
+		if (queued_fds + fds_ahead() > descriptor_room) {
+			remove_connection(index);
+		}
 		return;
 	}
 
@@ -326,6 +343,7 @@ remove_connection(size_t index)
 		connections[index].pending = frame->next;
 		broker_wire_free(frame);
 	}
+	release_queued(&connections[index], connections[index].queued_fds);
 	broker_wire_forget(&connections[index].ahead);
 	close(connections[index].fd);
 	struct broker_guest_gone gone = {
@@ -355,6 +373,15 @@ queue_frame(struct connection *conn, struct broker_wire_frame *frame)
 		broker_wire_free(frame);
 		return;
 	}
+	bool room = conn->queued_fds + frame->fd_count <= CONNECTION_FDS
+			&& queued_fds + fds_ahead() + frame->fd_count
+					<= descriptor_room;
+	if (!room && frame->fds_sent == 0) {
+		broker_wire_free(frame);
+		return;
+	}
+	conn->queued_fds += frame->fd_count;
+	queued_fds += frame->fd_count;
 	frame->next = NULL;
 	if (conn->pending == NULL) {
 		conn->pending = frame;
@@ -369,12 +396,32 @@ send_pending(struct connection *conn)
 {
 	while (conn->pending != NULL) {
 		struct broker_wire_frame *frame = conn->pending;
+		size_t held = frame->fd_count;
 		if (!send_data(conn->fd, frame)) {
+			release_queued(conn, held - frame->fd_count);
 			return;
 		}
+		release_queued(conn, held);
 		conn->pending = frame->next;
 		broker_wire_free(frame);
 	}
+}
+
+static void
+release_queued(struct connection *conn, size_t fd_count)
+{
+	conn->queued_fds -= fd_count;
+	queued_fds -= fd_count;
+}
+
+static size_t
+fds_ahead(void)
+{
+	size_t count = 0;
+	for (size_t i = 0; i != connection_count; i++) {
+		count += connections[i].ahead.count;
+	}
+	return count;
 }
 
 static bool

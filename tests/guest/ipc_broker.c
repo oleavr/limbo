@@ -34,6 +34,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -50,6 +51,7 @@
 #define REAP_TICKS   100
 #define PEER_IDLE_MS 30000
 #define ANSWER_MS    20000
+#define NO_ANSWER    INT32_MIN
 #define BULK_SIZE    4096
 #define BULK_COUNT   1000
 #define LARGE_SIZE   (300 * 1024)
@@ -59,6 +61,9 @@
 #define MANY_PORTS   300
 #define FDS_MAX      1024
 #define WAITING      5
+#define CROWDING     8
+#define CROWD_TAKEN  6
+#define FDS_NEEDED   4096
 
 typedef struct {
 	mach_msg_header_t Head;
@@ -896,22 +901,30 @@ post(mach_msg_header_t *request)
 }
 
 static int32_t
-collect(mach_port_t reply_port)
+collect_within(mach_port_t reply_port, mach_msg_timeout_t timeout)
 {
-
 	struct {
 		valued_t reply;
 		mach_msg_trailer_t trailer;
-	} message;
+	} message = {.reply = {.value = NO_ANSWER}};
 	kern_return_t kr = mach_msg(&message.reply.Head,
 			MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(message),
-			reply_port, ANSWER_MS, MACH_PORT_NULL);
-	CHECK(kr == MACH_MSG_SUCCESS);
-	CHECK(message.reply.Head.msgh_id == ANSWER_ID);
+			reply_port, timeout, MACH_PORT_NULL);
+	CHECK(kr == MACH_MSG_SUCCESS || kr == MACH_RCV_TIMED_OUT);
+	CHECK(kr != MACH_MSG_SUCCESS
+			|| message.reply.Head.msgh_id == ANSWER_ID);
 	kr = mach_port_mod_refs(mach_task_self(), reply_port,
 			MACH_PORT_RIGHT_RECEIVE, -1);
 	CHECK(kr == KERN_SUCCESS);
 	return message.reply.value;
+}
+
+static int32_t
+collect(mach_port_t reply_port)
+{
+	int32_t value = collect_within(reply_port, ANSWER_MS);
+	CHECK(value != NO_ANSWER);
+	return value;
 }
 
 static int32_t
@@ -1376,8 +1389,8 @@ check_killed_receiver(void)
 	reap(guardian);
 }
 
-static void
-check_descriptors_wait(pid_t peer, mach_port_t port)
+static int
+arriving_of(pid_t peer, mach_port_t port, int count)
 {
 	static carriers_t carriers;
 	carry(&carriers, port, MANY_PORTS);
@@ -1385,22 +1398,42 @@ check_descriptors_wait(pid_t peer, mach_port_t port)
 
 	stop(peer);
 	flood(port);
-	mach_port_t replies[WAITING];
-	for (int i = 0; i != WAITING; i++) {
+	mach_port_t replies[CROWDING];
+	for (int i = 0; i != count; i++) {
 		replies[i] = post(&carriers.Head);
 	}
 	CHECK(bootstrap_call(LOOK_UP, PEER_NAME) == port);
 
 	CHECK(kill(peer, SIGCONT) == 0);
-	for (int i = 0; i != WAITING; i++) {
-		CHECK(collect(replies[i]) == MANY_PORTS);
-	}
 	CHECK(ask_for(port, REPORT_ID) == BULK_COUNT);
+	int arrived = 0;
+	for (int i = 0; i != count; i++) {
+		int32_t found = collect_within(replies[i], 0);
+		CHECK(found == MANY_PORTS || found == NO_ANSWER);
+		arrived += found == MANY_PORTS;
+	}
 	for (int i = 0; i != MANY_PORTS; i++) {
 		CHECK(mach_port_deallocate(
 				      mach_task_self(), carriers.ports[i].name)
 				== KERN_SUCCESS);
 	}
+	return arrived;
+}
+
+static void
+check_descriptors_wait(pid_t peer, mach_port_t port)
+{
+	struct rlimit files;
+	CHECK(getrlimit(RLIMIT_NOFILE, &files) == 0);
+	if (files.rlim_max < FDS_NEEDED) {
+		fprintf(stderr,
+				"not checked: descriptors that wait in the "
+				"broker need a limit of %d open files\n",
+				FDS_NEEDED);
+		return;
+	}
+	CHECK(arriving_of(peer, port, WAITING) == WAITING);
+	CHECK(arriving_of(peer, port, CROWDING) == CROWD_TAKEN);
 }
 
 static child_t
