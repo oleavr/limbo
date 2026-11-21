@@ -40,6 +40,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/syscall.h>
 #include <sys/sysmacros.h>
 #include <unistd.h>
@@ -432,6 +433,28 @@ dev_t
 sysroot_root_device(void)
 {
 	return root_dev;
+}
+
+bool
+sysroot_space(dev_t dev, struct statvfs *space)
+{
+	size_t i = 0;
+	while (i < device_count && devices[i] != dev) {
+		i++;
+	}
+	if (root_length == 0 || i == device_count) {
+		return false;
+	}
+	int fd = -1;
+	for (i = 0; i < firmlink_count && fd == -1; i++) {
+		fd = open_in_root(firmlinks[i], 0, 0);
+	}
+	if (fd == -1) {
+		return statvfs(root, space) == 0;
+	}
+	bool found = fstatvfs(fd, space) == 0;
+	close(fd);
+	return found;
 }
 
 bool

@@ -583,6 +583,15 @@ pack_attributes(int fd, bool data, const struct __darwin_attrlist *alistp,
 
 	struct statvfs vfs = {0};
 	fstatvfs(fd, &vfs);
+	struct statvfs space;
+	if (sysroot_space(s.st_dev, &space)) {
+		vfs.f_frsize = space.f_frsize;
+		vfs.f_blocks = space.f_blocks;
+		vfs.f_bfree = space.f_bfree;
+		vfs.f_bavail = space.f_bavail;
+		vfs.f_files += space.f_ffree - vfs.f_ffree;
+		vfs.f_ffree = space.f_ffree;
+	}
 	uint64_t block = vfs.f_frsize ? vfs.f_frsize : vfs.f_bsize;
 
 	if (returned.volattr & ATTR_VOL_SIGNATURE) {
