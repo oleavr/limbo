@@ -2259,7 +2259,7 @@ request_notification(mach_port_name_t name, mach_msg_id_t id,
 		mach_port_name_t *previous)
 {
 	struct ipc_port *replaced = NULL;
-	kern_return_t kr = KERN_SUCCESS;
+	kern_return_t kr;
 	switch (id) {
 	case MACH_NOTIFY_PORT_DESTROYED:
 		kr = request_port_destroyed(name, sync, notify);
@@ -2271,6 +2271,8 @@ request_notification(mach_port_name_t name, mach_msg_id_t id,
 	case MACH_NOTIFY_DEAD_NAME:
 		kr = request_dead_name(name, id, sync, notify, &replaced);
 		break;
+	default:
+		kr = KERN_INVALID_VALUE;
 	}
 	if (kr != KERN_SUCCESS) {
 		if (notify != MACH_PORT_NULL) {

@@ -106,6 +106,7 @@ static void request_no_senders(
 static bool receive_no_senders(mach_port_t notify, mach_msg_timeout_t timeout,
 		mach_port_mscount_t *count);
 static void check_port_destroyed(void);
+static void check_unknown_request(void);
 static void check_make_send_count(void);
 static mach_port_mscount_t make_send_count(mach_port_t port);
 static void check_reference_deltas(void);
@@ -165,6 +166,7 @@ main(void)
 	check_port_deleted();
 	check_no_senders();
 	check_port_destroyed();
+	check_unknown_request();
 	check_make_send_count();
 	check_reference_deltas();
 	check_fork_during_port_calls();
@@ -1636,6 +1638,24 @@ check_port_destroyed(void)
 	CHECK(mach_port_type(task, back, &type) == KERN_SUCCESS);
 	CHECK(type == MACH_PORT_TYPE_DEAD_NAME);
 	CHECK(mach_port_deallocate(task, back) == KERN_SUCCESS);
+}
+
+static void
+check_unknown_request(void)
+{
+	mach_port_t task = mach_task_self();
+	mach_port_t port = allocate_port();
+	mach_port_t notify = allocate_port();
+	mach_port_t previous = MACH_PORT_NULL;
+	CHECK(mach_port_request_notification(task, port, MACH_NOTIFY_LAST + 1,
+			      0, notify, MACH_MSG_TYPE_MAKE_SEND_ONCE,
+			      &previous)
+			== KERN_INVALID_VALUE);
+	expect_send_once_notification(notify);
+	CHECK(mach_port_mod_refs(task, port, MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+	CHECK(mach_port_mod_refs(task, notify, MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
 }
 
 static void
