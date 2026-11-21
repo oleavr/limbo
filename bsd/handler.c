@@ -83,6 +83,7 @@
 
 #include "bsd/credentials.h"
 #include "bsd/hostuuid.h"
+#include "bsd/mac.h"
 #include "bsd/process.h"
 #include "codesign.h"
 #include "commpage.h"
@@ -317,10 +318,21 @@ sys_open(user_addr_t path, int flags, int mode)
 	if (fsevents_is_device_path(path)) {
 		return fsevents_open(flags & _O_CLOEXEC);
 	}
+	if (sandbox_denies_open(AT_FDCWD, path, flags)) {
+		return _EPERM;
+	}
 	char buffer[PATH_MAX];
 	return errno_map(acl_openat(AT_FDCWD,
 			open_path(AT_FDCWD, path, flags, buffer),
 			open_flags(flags), mode, NULL, NULL));
+}
+
+bool
+sandbox_denies_open(int dirfd, const char *path, int flags)
+{
+	int writing = _O_WRONLY | _O_RDWR | _O_TRUNC;
+	return mac_sandbox_denies_open(dirfd, path, flags & writing,
+			flags & _O_CREAT, open_follow(flags));
 }
 
 const char *
@@ -2504,6 +2516,9 @@ int
 sys_open_dprotected_np(
 		user_addr_t path, int flags, int class, int dpflags, int mode)
 {
+	if (sandbox_denies_open(AT_FDCWD, path, flags)) {
+		return _EPERM;
+	}
 	char buffer[PATH_MAX];
 	return errno_map(open_protected(AT_FDCWD,
 			open_path(AT_FDCWD, path, flags, buffer),
@@ -2514,6 +2529,9 @@ int
 sys_openat_dprotected_np(int fd, user_addr_t path, int flags, int class,
 		int dpflags, int mode, int authfd)
 {
+	if (sandbox_denies_open(at_fd(fd), path, flags)) {
+		return _EPERM;
+	}
 	char buffer[PATH_MAX];
 	return errno_map(open_protected(at_fd(fd),
 			open_path(at_fd(fd), path, flags, buffer),
@@ -2862,6 +2880,9 @@ sys_open_extended(user_addr_t path, int flags, void *uid, void *gid, int mode,
 	const struct acl_list *initial;
 	if (initial_list(xsecurity, &list, &initial) == -1) {
 		return _EINVAL;
+	}
+	if (sandbox_denies_open(AT_FDCWD, path, flags)) {
+		return _EPERM;
 	}
 	char buffer[PATH_MAX];
 	bool created;
@@ -3875,6 +3896,9 @@ sys_openat(int fd, user_addr_t path, int flags, int mode)
 {
 	if (fsevents_is_device_path(path)) {
 		return fsevents_open(flags & _O_CLOEXEC);
+	}
+	if (sandbox_denies_open(at_fd(fd), path, flags)) {
+		return _EPERM;
 	}
 	char buffer[PATH_MAX];
 	return errno_map(acl_openat(at_fd(fd),
