@@ -228,10 +228,12 @@ spawn_exec(const char *path, const struct darwin_spawnattr *attrp,
 
 #define IMG_SHSIZE 512
 #define EXEC_PATH_VARIABLE "LIMBO_EXEC_PATH"
+#define SANDBOX_VARIABLE   "LIMBO_SANDBOX"
 
 static const char *script_path(const char *path, const char *host,
 		char **argv, char *buffer, char ***script_argv);
 static const char *limbo_path(const char *host, char ***argv);
+static bool is_own(const char *variable);
 static bool has_variable(char **envp, const char *variable);
 
 const char *
@@ -256,15 +258,16 @@ char **
 exec_environment(char **envp, const char *executable)
 {
 	extern char **environ;
-	size_t count = 0, missing = 0;
+	size_t count = 0, missing = 0, dropped = 0;
 	while (envp != NULL && envp[count] != NULL) {
+		dropped += is_own(envp[count]);
 		count++;
 	}
 	for (char **own = environ; *own != NULL; own++) {
 		missing += strncmp(*own, "LIMBO_", 6) == 0
-				&& !has_variable(envp, *own);
+				&& (is_own(*own) || !has_variable(envp, *own));
 	}
-	if (missing == 0 && executable == NULL) {
+	if (missing == 0 && dropped == 0 && executable == NULL) {
 		return envp;
 	}
 	size_t executable_size = executable != NULL
@@ -275,23 +278,34 @@ exec_environment(char **envp, const char *executable)
 	if (result == NULL) {
 		return envp;
 	}
-	if (count != 0) {
-		memcpy(result, envp, count * sizeof(char *));
+	size_t kept = 0;
+	for (size_t i = 0; i != count; i++) {
+		if (!is_own(envp[i])) {
+			result[kept++] = envp[i];
+		}
 	}
 	for (char **own = environ; *own != NULL; own++) {
 		if (strncmp(*own, "LIMBO_", 6) == 0
-				&& !has_variable(envp, *own)) {
-			result[count++] = *own;
+				&& (is_own(*own)
+						|| !has_variable(envp, *own))) {
+			result[kept++] = *own;
 		}
 	}
 	if (executable != NULL) {
-		char *variable = (char *)(result + count + 2);
+		char *variable = (char *)(result + count + missing + 2);
 		snprintf(variable, executable_size, EXEC_PATH_VARIABLE "=%s",
 				executable);
-		result[count++] = variable;
+		result[kept++] = variable;
 	}
-	result[count] = NULL;
+	result[kept] = NULL;
 	return result;
+}
+
+static bool
+is_own(const char *variable)
+{
+	return strncmp(variable, SANDBOX_VARIABLE "=", sizeof(SANDBOX_VARIABLE))
+			== 0;
 }
 
 static bool
