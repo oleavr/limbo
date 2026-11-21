@@ -47,6 +47,7 @@
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <linux/fs.h>
 #include <mach-o/fat.h>
 #include <mach-o/loader.h>
@@ -3223,6 +3224,68 @@ sys_settid_with_pid(uint64_t pid, int assume)
 	unimplemented();
 }
 
+struct darwin_sigevent {
+	int32_t notify;
+	int32_t signo;
+	uint64_t value;
+	uint64_t function;
+	uint64_t attributes;
+};
+
+struct darwin_aiocb {
+	int32_t aio_fildes;
+	int64_t aio_offset;
+	uint64_t aio_buf;
+	uint64_t aio_nbytes;
+	int32_t aio_reqprio;
+	struct darwin_sigevent aio_sigevent;
+	int32_t aio_lio_opcode;
+};
+_Static_assert(sizeof(struct darwin_aiocb) == 80, "struct aiocb");
+
+#define DARWIN_SIGEV_NONE      0
+#define DARWIN_SIGEV_SIGNAL    1
+#define DARWIN_SIGKILL         9
+#define DARWIN_SIGSTOP         17
+#define DARWIN_NSIG            32
+#define DARWIN_AIO_PROCESS_MAX 256
+
+enum aio_kind {
+	AIO_READ,
+	AIO_WRITE,
+};
+
+struct aio_request {
+	uint64_t aiocb;
+	bool active;
+	ssize_t result;
+	int error;
+};
+
+struct aio_waiter {
+	struct aio_waiter *next;
+	_Atomic uint32_t woken;
+};
+
+static struct {
+	pthread_mutex_t lock;
+	struct aio_request requests[DARWIN_AIO_PROCESS_MAX];
+	size_t count;
+	struct aio_waiter *waiters;
+} aio = {.lock = PTHREAD_MUTEX_INITIALIZER};
+
+static bool aio_any_done(const uint64_t *list, int nent);
+static int aio_submit(user_addr_t aiocbp, enum aio_kind kind);
+static int aio_validate(const struct darwin_aiocb *cb, enum aio_kind kind);
+static bool aio_sigevent_valid(const struct darwin_sigevent *event);
+static bool aio_is_vnode(int fd);
+static bool aio_begin(uint64_t aiocb);
+static void aio_complete(uint64_t aiocb, const struct darwin_aiocb *cb,
+		enum aio_kind kind);
+static ssize_t aio_transfer(const struct darwin_aiocb *cb, bool writes);
+static struct aio_request *aio_find(uint64_t aiocb);
+static void aio_notify(const struct darwin_sigevent *event);
+
 int
 sys_aio_fsync(int op, user_addr_t aiocbp)
 {
@@ -3232,13 +3295,81 @@ sys_aio_fsync(int op, user_addr_t aiocbp)
 user_ssize_t
 sys_aio_return(user_addr_t aiocbp)
 {
-	unimplemented();
+	pthread_mutex_lock(&aio.lock);
+	struct aio_request *request = aio_find((uintptr_t)aiocbp);
+	user_ssize_t result = _EINVAL;
+	if (request != NULL && request->active) {
+		result = _EINPROGRESS;
+	} else if (request != NULL) {
+		result = request->result;
+		*request = aio.requests[--aio.count];
+	}
+	pthread_mutex_unlock(&aio.lock);
+	return result;
 }
 
 int
 sys_aio_suspend(user_addr_t aiocblist, int nent, user_addr_t timeoutp)
 {
-	unimplemented();
+	if (nent < 1 || nent > DARWIN_AIO_PROCESS_MAX) {
+		return _EINVAL;
+	}
+	uint64_t list[DARWIN_AIO_PROCESS_MAX];
+	memcpy(list, aiocblist, nent * sizeof(list[0]));
+	struct timespec deadline;
+	bool timed = timeoutp != NULL;
+	if (timed) {
+		const struct timespec *timeout = timeoutp;
+		if (timeout->tv_sec < 0 || timeout->tv_nsec < 0
+				|| timeout->tv_nsec >= 1000000000) {
+			return _EINVAL;
+		}
+		clock_gettime(CLOCK_REALTIME, &deadline);
+		deadline.tv_nsec += timeout->tv_nsec;
+		if (deadline.tv_nsec >= 1000000000) {
+			deadline.tv_sec++;
+			deadline.tv_nsec -= 1000000000;
+		}
+		timed = !__builtin_add_overflow(deadline.tv_sec,
+				timeout->tv_sec, &deadline.tv_sec);
+	}
+	pthread_mutex_lock(&aio.lock);
+	struct aio_waiter waiter = {.next = aio.waiters};
+	aio.waiters = &waiter;
+	int error = aio.count == 0 ? EINVAL : 0;
+	while (error == 0 && !aio_any_done(list, nent)) {
+		atomic_store(&waiter.woken, 0);
+		error = signals_futex_wait(&waiter.woken, &aio.lock,
+				timed ? &deadline : NULL);
+	}
+	struct aio_waiter **link = &aio.waiters;
+	while (*link != &waiter) {
+		link = &(*link)->next;
+	}
+	*link = waiter.next;
+	pthread_mutex_unlock(&aio.lock);
+	switch (error) {
+	case EINVAL:
+		return _EINVAL;
+	case ETIMEDOUT:
+		return _EAGAIN;
+	case EINTR:
+		return _EINTR;
+	default:
+		return 0;
+	}
+}
+
+static bool
+aio_any_done(const uint64_t *list, int nent)
+{
+	for (int i = 0; i < nent; i++) {
+		const struct aio_request *request = aio_find(list[i]);
+		if (list[i] != 0 && request != NULL && !request->active) {
+			return true;
+		}
+	}
+	return false;
 }
 
 int
@@ -3250,25 +3381,164 @@ sys_aio_cancel(int fd, user_addr_t aiocbp)
 int
 sys_aio_error(user_addr_t aiocbp)
 {
-	unimplemented();
+	pthread_mutex_lock(&aio.lock);
+	const struct aio_request *request = aio_find((uintptr_t)aiocbp);
+	int error = _EINVAL;
+	if (request != NULL) {
+		error = request->active ? -_EINPROGRESS : request->error;
+	}
+	pthread_mutex_unlock(&aio.lock);
+	return error;
 }
 
 int
 sys_aio_read(user_addr_t aiocbp)
 {
-	unimplemented();
+	return aio_submit(aiocbp, AIO_READ);
 }
 
 int
 sys_aio_write(user_addr_t aiocbp)
 {
-	unimplemented();
+	return aio_submit(aiocbp, AIO_WRITE);
+}
+
+static int
+aio_submit(user_addr_t aiocbp, enum aio_kind kind)
+{
+	struct darwin_aiocb cb;
+	memcpy(&cb, aiocbp, sizeof(cb));
+	int error = aio_validate(&cb, kind);
+	if (error != 0) {
+		return error;
+	}
+	if (!aio_begin((uintptr_t)aiocbp)) {
+		return _EAGAIN;
+	}
+	aio_complete((uintptr_t)aiocbp, &cb, kind);
+	aio_notify(&cb.aio_sigevent);
+	return 0;
 }
 
 int
 sys_lio_listio(int mode, user_addr_t aiocblist, int nent, user_addr_t sigp)
 {
 	unimplemented();
+}
+
+static int
+aio_validate(const struct darwin_aiocb *cb, enum aio_kind kind)
+{
+	if (cb->aio_nbytes > INT_MAX || cb->aio_buf == 0
+			|| cb->aio_offset < 0) {
+		return _EINVAL;
+	}
+	if (!aio_sigevent_valid(&cb->aio_sigevent)) {
+		return _EINVAL;
+	}
+	int flags = fcntl(cb->aio_fildes, F_GETFL);
+	if (flags == -1
+			|| (flags & O_ACCMODE)
+					== (kind == AIO_READ ? O_WRONLY
+							     : O_RDONLY)) {
+		return _EBADF;
+	}
+	return aio_is_vnode(cb->aio_fildes) ? 0 : _ESPIPE;
+}
+
+static bool
+aio_sigevent_valid(const struct darwin_sigevent *event)
+{
+	if (event->notify == DARWIN_SIGEV_SIGNAL) {
+		return event->signo > 0 && event->signo < DARWIN_NSIG
+				&& event->signo != DARWIN_SIGKILL
+				&& event->signo != DARWIN_SIGSTOP;
+	}
+	return event->notify == DARWIN_SIGEV_NONE;
+}
+
+static bool
+aio_is_vnode(int fd)
+{
+	struct stat st;
+	return fstat(fd, &st) == 0 && !S_ISFIFO(st.st_mode)
+			&& !S_ISSOCK(st.st_mode);
+}
+
+static bool
+aio_begin(uint64_t aiocb)
+{
+	pthread_mutex_lock(&aio.lock);
+	bool taken = aio.count != DARWIN_AIO_PROCESS_MAX
+			&& aio_find(aiocb) == NULL;
+	if (taken) {
+		aio.requests[aio.count++] = (struct aio_request){
+				.aiocb = aiocb, .active = true};
+	}
+	pthread_mutex_unlock(&aio.lock);
+	return taken;
+}
+
+static void
+aio_complete(uint64_t aiocb, const struct darwin_aiocb *cb, enum aio_kind kind)
+{
+	ssize_t result = 0;
+	switch (kind) {
+	case AIO_READ:
+		result = aio_transfer(cb, false);
+		break;
+	case AIO_WRITE:
+		result = aio_transfer(cb, true);
+		break;
+	}
+	int error = result < 0 ? -err_map(errno) : 0;
+	pthread_mutex_lock(&aio.lock);
+	struct aio_request *request = aio_find(aiocb);
+	request->result = result < 0 ? 0 : result;
+	request->error = error;
+	request->active = false;
+	for (struct aio_waiter *waiter = aio.waiters; waiter != NULL;
+			waiter = waiter->next) {
+		signals_futex_wake(&waiter->woken);
+	}
+	pthread_mutex_unlock(&aio.lock);
+}
+
+static ssize_t
+aio_transfer(const struct darwin_aiocb *cb, bool writes)
+{
+	void *buf = (void *)(uintptr_t)cb->aio_buf;
+	if (isatty(cb->aio_fildes)) {
+		errno = ENXIO;
+		return -1;
+	}
+	if (!writes) {
+		return pread(cb->aio_fildes, buf, cb->aio_nbytes,
+				cb->aio_offset);
+	}
+	if (fcntl(cb->aio_fildes, F_GETFL) & O_APPEND) {
+		return write(cb->aio_fildes, buf, cb->aio_nbytes);
+	}
+	return pwrite(cb->aio_fildes, buf, cb->aio_nbytes, cb->aio_offset);
+}
+
+static struct aio_request *
+aio_find(uint64_t aiocb)
+{
+	for (size_t i = 0; i < aio.count; i++) {
+		if (aio.requests[i].aiocb == aiocb) {
+			return &aio.requests[i];
+		}
+	}
+	return NULL;
+}
+
+static void
+aio_notify(const struct darwin_sigevent *event)
+{
+	if (event->notify == DARWIN_SIGEV_SIGNAL) {
+		sys_kill(getpid(), event->signo, 1);
+	}
 }
 
 #define IOPOL_CMD_GET                             1

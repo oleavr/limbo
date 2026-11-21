@@ -32,6 +32,7 @@ runner = files('run-guest.py')
 
 guest_tests = [
   'acl.c',
+  'aio.c',
   'corefoundation.c',
   'credentials.c',
   'cxx.cpp',
