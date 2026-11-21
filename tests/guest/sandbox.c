@@ -47,14 +47,21 @@ extern int sandbox_check(pid_t pid, const char *operation, int type, ...);
 
 #define AMFI_QUERY_BOOTARG_STATE 96
 
+#define SANDBOX_FILTER_PATH     1
+#define SANDBOX_CHECK_NO_REPORT 0x40000000
+
+#define MISSING "/private/tmp/limbo-sandbox-missing"
+
 static void check_entered(void);
 static void enter(void);
+static void check_missing(void);
 static int exit_status_of(void (*body)(void));
 
 int
 main(void)
 {
 	check_entered();
+	check_missing();
 
 	char *token = sandbox_extension_issue_file(
 			APP_SANDBOX_READ_WRITE, "/tmp", 0);
@@ -114,6 +121,34 @@ enter(void)
 	int status;
 	CHECK(waitpid(child, &status, 0) == child);
 	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
+static void
+check_missing(void)
+{
+	unlink(MISSING);
+	CHECK(sandbox_check(getpid(), "file-read-data", SANDBOX_FILTER_PATH,
+			      MISSING)
+			== 1);
+	CHECK(sandbox_check(getpid(), "file-write-create", SANDBOX_FILTER_PATH,
+			      MISSING)
+			== 1);
+	CHECK(sandbox_check(getpid(), "file-write-create",
+			      SANDBOX_FILTER_PATH | SANDBOX_CHECK_NO_REPORT,
+			      MISSING)
+			== 1);
+	CHECK(sandbox_check(getppid(), "file-read-data", SANDBOX_FILTER_PATH,
+			      MISSING)
+			== 1);
+	CHECK(sandbox_check(getpid(), "file-read-data", SANDBOX_FILTER_PATH,
+			      "/private/tmp")
+			== 0);
+	CHECK(sandbox_check(getpid(), "file-write-data",
+			      SANDBOX_FILTER_PATH | SANDBOX_CHECK_NO_REPORT,
+			      "/private/tmp")
+			== 0);
+	CHECK(sandbox_check(getpid(), "file-read-data", 0) == 0);
+	CHECK(sandbox_check(getpid(), NULL, SANDBOX_FILTER_PATH, MISSING) == 0);
 }
 
 static int
