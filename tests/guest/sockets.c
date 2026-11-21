@@ -33,7 +33,9 @@
 #include <netinet/in_systm.h>
 #include <netinet/ip.h>
 #include <netinet/ip_icmp.h>
+#include <netinet/tcp.h>
 #include <netinet/tcp_fsm.h>
+#include <netinet/tcp_var.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,6 +54,8 @@ static void check_connection_info(void);
 static void check_refused_error(void);
 static void check_control_with_many_open(void);
 static void check_pcblist(void);
+static void check_statistics(void);
+static void read_statistics(const char *name, void *stats, size_t size);
 static uint8_t *read_list(const char *name, size_t *size);
 static const uint8_t *find_socket(const uint8_t *list, size_t size,
 		uint16_t local_port, uint16_t remote_port);
@@ -111,6 +115,7 @@ main(void)
 	check_refused_error();
 	check_control_with_many_open();
 	check_pcblist();
+	check_statistics();
 	check_icmp();
 	return 0;
 }
@@ -379,6 +384,61 @@ check_pcblist(void)
 	CHECK(close(accepted) == 0 && close(client) == 0);
 	CHECK(close(datagram) == 0);
 	CHECK(close(listener) == 0);
+}
+
+static void
+check_statistics(void)
+{
+	struct sockaddr_in loopback = {
+			.sin_len = sizeof(loopback),
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+	};
+	struct tcpstat tcp_before, tcp;
+	read_statistics("net.inet.tcp.stats", &tcp_before, sizeof(tcp_before));
+
+	int listener = socket(AF_INET, SOCK_STREAM, 0);
+	CHECK(listener != -1);
+	CHECK(bind(listener, (struct sockaddr *)&loopback, sizeof(loopback))
+			== 0);
+	CHECK(listen(listener, 1) == 0);
+	struct sockaddr_in listening = loopback;
+	listening.sin_port = bound_port(listener);
+	int client = socket(AF_INET, SOCK_STREAM, 0);
+	CHECK(client != -1);
+	CHECK(connect(client, (struct sockaddr *)&listening, sizeof(listening))
+			== 0);
+	int accepted = accept(listener, NULL, NULL);
+	CHECK(accepted != -1);
+
+	read_statistics("net.inet.tcp.stats", &tcp, sizeof(tcp));
+	if (getuid() == 0) {
+		CHECK(tcp.tcps_connattempt - tcp_before.tcps_connattempt >= 1);
+		CHECK(tcp.tcps_accepts - tcp_before.tcps_accepts >= 1);
+		CHECK(tcp.tcps_sndtotal - tcp_before.tcps_sndtotal >= 1);
+		CHECK(tcp.tcps_rcvtotal - tcp_before.tcps_rcvtotal >= 1);
+	} else {
+		struct tcpstat none = {0};
+		CHECK(memcmp(&tcp, &none, sizeof(tcp)) == 0);
+	}
+
+	CHECK(close(accepted) == 0 && close(client) == 0);
+	CHECK(close(listener) == 0);
+}
+
+static void
+read_statistics(const char *name, void *stats, size_t size)
+{
+	size_t needed;
+	CHECK(sysctlbyname(name, NULL, &needed, NULL, 0) == 0);
+	CHECK(needed == size);
+	needed = size;
+	CHECK(sysctlbyname(name, stats, &needed, NULL, 0) == 0);
+	CHECK(needed == size);
+	uint64_t start;
+	needed = sizeof(start);
+	CHECK(sysctlbyname(name, &start, &needed, NULL, 0) == 0);
+	CHECK(needed == sizeof(start));
 }
 
 static uint8_t *

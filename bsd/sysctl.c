@@ -225,6 +225,7 @@ static const char *system_version(const char *key, const char *otherwise,
 		char *value, size_t size);
 static int read_tcp_pcblist(void *old, size_t *oldlenp);
 static int read_udp_pcblist(void *old, size_t *oldlenp);
+static int read_tcp_stats(void *old, size_t *oldlenp);
 static int read_ip_ttl(void *old, size_t *oldlenp);
 static int read_pressure_level(void *old, size_t *oldlenp);
 
@@ -296,6 +297,8 @@ static const struct sysctl_node nodes[] = {
 				.reader = read_tcp_pcblist},
 		{"net.inet.udp.pcblist_n", {0, 0}, SYSCTL_READER,
 				.reader = read_udp_pcblist},
+		{"net.inet.tcp.stats", {0, 0}, SYSCTL_READER,
+				.reader = read_tcp_stats},
 		{"net.inet.ip.ttl", {0, 0}, SYSCTL_READER,
 				.reader = read_ip_ttl},
 
@@ -743,6 +746,9 @@ oid_format(const int *oid, void *old, size_t *oldlenp)
 		} else if (node->reader == read_udp_pcblist) {
 			kind = CTLTYPE_OPAQUE;
 			format = "S,xinpcb_n";
+		} else if (node->reader == read_tcp_stats) {
+			kind = CTLTYPE_OPAQUE;
+			format = "S,tcpstat";
 		} else if (node->reader == read_hostname
 				|| node->reader == read_bootsessionuuid
 				|| node->reader == read_sandbox_sentinel
@@ -1350,6 +1356,100 @@ pcblist_address(uint32_t address[4], const char *hex, bool v6)
 	} else {
 		sscanf(hex, "%8x", &address[3]);
 	}
+}
+
+enum {
+	TCPSTAT_SIZE = 912,
+	TCPS_CONNATTEMPT = 0,
+	TCPS_ACCEPTS = 4,
+	TCPS_DROPS = 12,
+	TCPS_CONNDROPS = 16,
+	TCPS_SNDTOTAL = 60,
+	TCPS_SNDREXMITPACK = 72,
+	TCPS_RCVTOTAL = 100,
+	TCPS_RCVBADSUM = 112,
+};
+
+struct snmp_counter {
+	const char *name;
+	size_t offset;
+};
+
+static void snmp_counters(const char *protocol,
+		const struct snmp_counter *counters, size_t count,
+		uint8_t *stats);
+static int read_truncated(
+		const void *value, size_t size, void *old, size_t *oldlenp);
+
+static int
+read_tcp_stats(void *old, size_t *oldlenp)
+{
+	static const struct snmp_counter counters[] = {
+			{"ActiveOpens", TCPS_CONNATTEMPT},
+			{"PassiveOpens", TCPS_ACCEPTS},
+			{"EstabResets", TCPS_DROPS},
+			{"AttemptFails", TCPS_CONNDROPS},
+			{"OutSegs", TCPS_SNDTOTAL},
+			{"RetransSegs", TCPS_SNDTOTAL},
+			{"RetransSegs", TCPS_SNDREXMITPACK},
+			{"InSegs", TCPS_RCVTOTAL},
+			{"InCsumErrors", TCPS_RCVBADSUM},
+	};
+	uint8_t stats[TCPSTAT_SIZE] = {0};
+	if (geteuid() == 0) {
+		snmp_counters("Tcp", counters,
+				sizeof(counters) / sizeof(counters[0]), stats);
+	}
+	return read_truncated(stats, sizeof(stats), old, oldlenp);
+}
+
+static void
+snmp_counters(const char *protocol, const struct snmp_counter *counters,
+		size_t count, uint8_t *stats)
+{
+	FILE *file = fopen("/proc/net/snmp", "re");
+	if (file == NULL) {
+		return;
+	}
+	char names[2048], values[2048];
+	size_t prefix = strlen(protocol);
+	while (fgets(names, sizeof(names), file) != NULL
+			&& fgets(values, sizeof(values), file) != NULL) {
+		if (strncmp(names, protocol, prefix) != 0
+				|| names[prefix] != ':') {
+			continue;
+		}
+		char *next_name, *next_value;
+		char *name = strtok_r(names + prefix + 1, " \n", &next_name);
+		char *value = strtok_r(values + prefix + 1, " \n", &next_value);
+		while (name != NULL && value != NULL) {
+			for (size_t i = 0; i < count; i++) {
+				if (strcmp(name, counters[i].name) != 0) {
+					continue;
+				}
+				uint32_t sum;
+				uint8_t *counter = stats + counters[i].offset;
+				memcpy(&sum, counter, sizeof(sum));
+				sum += (uint32_t)strtoull(value, NULL, 10);
+				memcpy(counter, &sum, sizeof(sum));
+			}
+			name = strtok_r(NULL, " \n", &next_name);
+			value = strtok_r(NULL, " \n", &next_value);
+		}
+		break;
+	}
+	fclose(file);
+}
+
+static int
+read_truncated(const void *value, size_t size, void *old, size_t *oldlenp)
+{
+	if (old != NULL) {
+		size = size < *oldlenp ? size : *oldlenp;
+		memcpy(old, value, size);
+	}
+	*oldlenp = size;
+	return 0;
 }
 
 static int
