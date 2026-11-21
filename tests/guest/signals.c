@@ -241,8 +241,8 @@ check_children(void)
 	sigdelset(&wait_mask, SIGCHLD);
 	mach_timebase_info_data_t timebase;
 	mach_timebase_info(&timebase);
-	alarm(60);
 	for (int i = 0; i < 4000; i++) {
+		alarm(60);
 		children = 0;
 		sigprocmask(SIG_UNBLOCK, &set, NULL);
 		pid_t pid = fork();
@@ -320,8 +320,8 @@ check_self_pipe(void)
 	signal(SIGALRM, on_blocked);
 	mach_timebase_info_data_t timebase;
 	mach_timebase_info(&timebase);
-	alarm(60);
 	for (int i = 0; i < 4000; i++) {
+		alarm(60);
 		pid_t pid = fork();
 		CHECK(pid >= 0);
 		if (pid == 0) {
