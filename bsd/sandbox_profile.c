@@ -68,6 +68,21 @@
 #define SKIP_PAST_MAX    16
 #define NO_MATCH         SIZE_MAX
 
+static const char *const file_write_names[] = {
+		"file-write*",
+		"file-write-acl",
+		"file-write-create",
+		"file-write-data",
+		"file-write-finderinfo",
+		"file-write-flags",
+		"file-write-mode",
+		"file-write-owner",
+		"file-write-setugid",
+		"file-write-times",
+		"file-write-unlink",
+		"file-write-xattr",
+};
+
 struct node {
 	uint8_t kind;
 	uint8_t value;
@@ -324,6 +339,19 @@ sandbox_profile_free(struct sandbox_profile *profile)
 {
 	free(profile->data);
 	memset(profile, 0, sizeof(*profile));
+}
+
+int
+sandbox_operation_index(const char *name)
+{
+	for (int op = SANDBOX_FILE_WRITE_ALL; op <= SANDBOX_FILE_WRITE_XATTR;
+			op++) {
+		if (strcmp(name, file_write_names[op - SANDBOX_FILE_WRITE_ALL])
+				== 0) {
+			return op;
+		}
+	}
+	return -1;
 }
 
 enum sandbox_decision

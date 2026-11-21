@@ -69,6 +69,7 @@ enum sandbox_decision {
 bool sandbox_profile_parse(
 		struct sandbox_profile *profile, const void *data, size_t size);
 void sandbox_profile_free(struct sandbox_profile *profile);
+int sandbox_operation_index(const char *name);
 enum sandbox_decision sandbox_profile_decide(
 		const struct sandbox_profile *profile, int operation,
 		const char *path);

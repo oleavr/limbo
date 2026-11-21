@@ -420,6 +420,7 @@ static void check_malformed(void);
 static size_t build(uint8_t *out, const uint8_t *pattern, size_t length);
 static uint32_t enforced_of(const uint8_t *data, size_t size);
 static void check_built(void);
+static void check_names(void);
 static void check_path_filters(void);
 static void check_homebrew(void);
 static void check_other_filters(void);
@@ -431,6 +432,7 @@ main(void)
 	check_parsed();
 	check_malformed();
 	check_built();
+	check_names();
 	check_path_filters();
 	check_homebrew();
 	check_other_filters();
@@ -567,6 +569,17 @@ check_built(void)
 	CHECK(sandbox_profile_decide(&profile, SANDBOX_FILE_WRITE_DATA, path)
 			== SANDBOX_ALLOW);
 	sandbox_profile_free(&profile);
+}
+
+static void
+check_names(void)
+{
+	CHECK(sandbox_operation_index("file-write*") == SANDBOX_FILE_WRITE_ALL);
+	CHECK(sandbox_operation_index("file-write-create")
+			== SANDBOX_FILE_WRITE_CREATE);
+	CHECK(sandbox_operation_index("file-write-xattr")
+			== SANDBOX_FILE_WRITE_XATTR);
+	CHECK(sandbox_operation_index("file-read-data") == -1);
 }
 
 static void
