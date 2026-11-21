@@ -214,7 +214,9 @@ handle_guest(int fd)
 static void
 welcome_guest(struct connection *conn)
 {
-	conn->guest_id = next_guest_id++;
+	if (conn->guest_id == 0) {
+		conn->guest_id = next_guest_id++;
+	}
 	struct broker_welcome welcome = { .guest_id = conn->guest_id };
 	send_frame(conn, BROKER_WELCOME, &welcome, sizeof(welcome));
 }
@@ -312,7 +314,15 @@ remove_connection(size_t index)
 	}
 	broker_wire_forget(&connections[index].ahead);
 	close(connections[index].fd);
+	struct broker_guest_gone gone = {
+			.guest_id = connections[index].guest_id,
+	};
 	connections[index] = connections[--connection_count];
+
+	for (size_t i = 0; gone.guest_id != 0 && i != connection_count; i++) {
+		send_frame(&connections[i], BROKER_GUEST_GONE, &gone,
+				sizeof(gone));
+	}
 }
 
 static void

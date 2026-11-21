@@ -105,6 +105,7 @@ static void check_dead_send_once_rights(void);
 static void check_send_once_destroyed(void);
 static void expect_send_once_notification(mach_port_t port);
 static void check_dead_name(void);
+static void check_send_to_dead_name(void);
 static mach_port_rights_t send_once_rights(mach_port_t port);
 static void check_request_rights(void);
 static void check_send_possible_on_dead_name(void);
@@ -180,6 +181,7 @@ main(void)
 	check_dead_send_once_rights();
 	check_send_once_destroyed();
 	check_dead_name();
+	check_send_to_dead_name();
 	check_request_rights();
 	check_send_possible_on_dead_name();
 	check_send_possible();
@@ -1378,6 +1380,54 @@ check_dead_name(void)
 	CHECK(mach_port_mod_refs(task, port, MACH_PORT_RIGHT_DEAD_NAME, -2)
 			== KERN_SUCCESS);
 	CHECK(mach_port_mod_refs(task, notify, MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+}
+
+static void
+check_send_to_dead_name(void)
+{
+	mach_port_t task = mach_task_self();
+	mach_port_t port = allocate_port();
+	CHECK(mach_port_insert_right(task, port, port, MACH_MSG_TYPE_MAKE_SEND)
+			== KERN_SUCCESS);
+	CHECK(mach_port_mod_refs(task, port, MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+	mach_port_t carried = allocate_port();
+	CHECK(mach_port_insert_right(
+			      task, carried, carried, MACH_MSG_TYPE_MAKE_SEND)
+			== KERN_SUCCESS);
+	mach_port_t reply = allocate_port();
+
+	request_t request = {
+			.header = {
+					.msgh_bits = MACH_MSGH_BITS_SET(
+							MACH_MSG_TYPE_COPY_SEND,
+							MACH_MSG_TYPE_MAKE_SEND_ONCE,
+							0,
+							MACH_MSGH_BITS_COMPLEX),
+					.msgh_size = sizeof(request),
+					.msgh_remote_port = port,
+					.msgh_local_port = reply,
+			},
+			.body = {.msgh_descriptor_count = 2},
+			.port = {
+					.name = carried,
+					.disposition = MACH_MSG_TYPE_MOVE_SEND,
+					.type = MACH_MSG_PORT_DESCRIPTOR,
+			},
+			.data = {.type = MACH_MSG_OOL_DESCRIPTOR},
+	};
+	CHECK(mach_msg(&request.header, MACH_SEND_MSG, sizeof(request), 0,
+			      MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+			      MACH_PORT_NULL)
+			== MACH_SEND_INVALID_DEST);
+	CHECK(send_refs(carried) == 1);
+	CHECK(send_once_rights(reply) == 0);
+
+	CHECK(mach_port_mod_refs(task, port, MACH_PORT_RIGHT_DEAD_NAME, -1)
+			== KERN_SUCCESS);
+	CHECK(mach_port_destruct(task, carried, -1, 0) == KERN_SUCCESS);
+	CHECK(mach_port_mod_refs(task, reply, MACH_PORT_RIGHT_RECEIVE, -1)
 			== KERN_SUCCESS);
 }
 

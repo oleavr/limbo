@@ -52,6 +52,7 @@ enum broker_frame_type {
 	BROKER_SEND,
 	BROKER_DELIVER,
 	BROKER_FDS,
+	BROKER_GUEST_GONE,
 };
 
 struct broker_frame {
@@ -80,6 +81,10 @@ struct broker_lookup_reply {
 struct broker_send {
 	uint64_t dest_global_id;
 	uint32_t blob_length;
+};
+
+struct broker_guest_gone {
+	uint32_t guest_id;
 };
 
 struct broker_wire_frame {

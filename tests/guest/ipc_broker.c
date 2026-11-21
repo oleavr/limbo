@@ -92,6 +92,12 @@ typedef struct {
 } carriers_t;
 
 typedef struct {
+	pid_t pid;
+	pid_t guardian;
+	mach_port_t port;
+} child_t;
+
+typedef struct {
 	uint32_t message_size;
 	mach_msg_type_name_t dest_disposition;
 	mach_msg_type_name_t reply_disposition;
@@ -118,6 +124,7 @@ static const char LOST_NAME[] = "com.limbo.test.ipc.lost";
 static const char *program;
 static const char PEER_NAME[] = "com.limbo.test.ipc.peer";
 static const char VICTIM_NAME[] = "com.limbo.test.ipc.victim";
+static const char GONE_NAME[] = "com.limbo.test.ipc.gone";
 static const mach_msg_id_t CHECK_IN = 402;
 static const mach_msg_id_t LOOK_UP = 404;
 static const mach_msg_id_t REQUEST_ID = 7777;
@@ -1260,6 +1267,93 @@ check_descriptors_wait(pid_t peer, mach_port_t port)
 	}
 }
 
+static child_t
+start_peer(const char *name)
+{
+	peer_name = name;
+	child_t child = {.pid = start(serve_peer)};
+	child.guardian = guard(child.pid);
+	child.port = look_up(name);
+	return child;
+}
+
+static void
+end_peer(const child_t *child)
+{
+	kill(child->pid, SIGKILL);
+	int status = reap(child->pid);
+	CHECK(WIFSIGNALED(status));
+	kill(child->guardian, SIGKILL);
+	reap(child->guardian);
+}
+
+static mach_port_t
+request_notification(mach_port_t name, mach_msg_id_t id)
+{
+	mach_port_t notify;
+	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &notify);
+	mach_port_t previous = MACH_PORT_NULL;
+	kern_return_t kr = mach_port_request_notification(mach_task_self(),
+			name, id, 0, notify, MACH_MSG_TYPE_MAKE_SEND_ONCE,
+			&previous);
+	CHECK(kr == KERN_SUCCESS && previous == MACH_PORT_NULL);
+	return notify;
+}
+
+static mach_msg_return_t
+receive_notification(mach_port_t notify, mach_msg_id_t id,
+		mach_msg_timeout_t timeout, mach_port_name_t *name)
+{
+	struct {
+		mach_dead_name_notification_t notification;
+		mach_msg_trailer_t trailer;
+	} message;
+	kern_return_t kr = mach_msg(&message.notification.not_header,
+			MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(message),
+			notify, timeout, MACH_PORT_NULL);
+	if (kr == MACH_MSG_SUCCESS) {
+		CHECK(message.notification.not_header.msgh_id == id);
+		*name = message.notification.not_port;
+	}
+	return kr;
+}
+
+static void
+check_gone_process(void)
+{
+	child_t gone = start_peer(GONE_NAME);
+	mach_port_t notify = request_notification(
+			gone.port, MACH_NOTIFY_DEAD_NAME);
+	mach_port_name_t name;
+	CHECK(receive_notification(notify, MACH_NOTIFY_DEAD_NAME, 100, &name)
+			== MACH_RCV_TIMED_OUT);
+
+	end_peer(&gone);
+	CHECK(receive_notification(
+			      notify, MACH_NOTIFY_DEAD_NAME, ANSWER_MS, &name)
+			== MACH_MSG_SUCCESS);
+	CHECK(name == gone.port);
+	mach_port_type_t type;
+	CHECK(mach_port_type(mach_task_self(), gone.port, &type)
+			== KERN_SUCCESS);
+	CHECK(type == MACH_PORT_TYPE_DEAD_NAME);
+
+	mach_msg_header_t message = {
+			.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0),
+			.msgh_size = sizeof(message),
+			.msgh_remote_port = gone.port,
+	};
+	kern_return_t kr = mach_msg(&message, MACH_SEND_MSG, sizeof(message), 0,
+			MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	CHECK(kr == MACH_SEND_INVALID_DEST);
+	kr = mach_port_mod_refs(mach_task_self(), gone.port,
+			MACH_PORT_RIGHT_DEAD_NAME, -2);
+	CHECK(kr == KERN_SUCCESS);
+	kr = mach_port_mod_refs(
+			mach_task_self(), notify, MACH_PORT_RIGHT_RECEIVE, -1);
+	CHECK(kr == KERN_SUCCESS);
+}
+
 static void
 check_transport(void)
 {
@@ -1309,5 +1403,6 @@ main(int argc, char *argv[])
 	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 
 	check_transport();
+	check_gone_process();
 	return 0;
 }

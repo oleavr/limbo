@@ -232,6 +232,7 @@ static mach_port_name_t import_body_port(uint64_t global_id,
 		mach_msg_type_name_t type, const int **fds,
 		const uint8_t **data);
 static mach_port_name_t import_fileport(int fd);
+static void turn_dead(struct ipc_entry *entry);
 static mach_port_name_t import_memory_entry(int fd, const uint8_t *record);
 static struct ipc_entry *adopt_object(ipc_kobject_type_t kotype, void *kobject);
 static uint64_t export_local_port(mach_port_name_t name);
@@ -1241,6 +1242,35 @@ adopt_object(ipc_kobject_type_t kotype, void *kobject)
 	entry->type = MACH_PORT_TYPE_SEND;
 	entry->urefs = 1;
 	return entry;
+}
+
+void
+ipc_remote_guest_gone(uint32_t guest_id)
+{
+	pthread_mutex_lock(&lock);
+	for (uint32_t i = 1; i < entry_count; i++) {
+		struct ipc_port *port = entries[i].port;
+		if (port != NULL && port->remote
+				&& broker_guest_of(port->global_id)
+						== guest_id) {
+			turn_dead(&entries[i]);
+		}
+	}
+	pthread_mutex_unlock(&lock);
+	flush_notices();
+}
+
+static void
+turn_dead(struct ipc_entry *entry)
+{
+	if (!(entry->type & (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE))) {
+		return;
+	}
+
+	entry->type = MACH_PORT_TYPE_DEAD_NAME;
+	entry->urefs += entry->sorights;
+	entry->sorights = 0;
+	queue_dead_name_notification(entry);
 }
 
 mach_port_name_t
