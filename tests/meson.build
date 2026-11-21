@@ -65,6 +65,7 @@ guest_tests = [
   'suspend.c',
   'sysinfo.c',
   'terminals.c',
+  'thread_pointer.c',
   'threads.c',
   'vm_copy_after_main.c',
   'volumes.c',

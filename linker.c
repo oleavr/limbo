@@ -1,5 +1,6 @@
 /*
  * Copyright © 2021 Keegan Saunders
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -29,8 +30,9 @@
 #include <fcntl.h>
 #include <mach-o/fat.h>
 #include <mach-o/loader.h>
-#include <mach/machine/thread_status.h>
 #include <mach/mach.h>
+#include <mach/machine/thread_status.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/mman.h>
@@ -38,6 +40,7 @@
 #include <unistd.h>
 
 #include "linker.h"
+#include "shared_cache.h"
 
 #ifndef MAP_32BIT
 #define MAP_32BIT 0
@@ -52,6 +55,11 @@
 static size_t image_span(const struct mach_header_64 *header);
 static struct mach_header_64 *header_compatible(struct fat_header *fat);
 static void zero_bss(struct segment_command_64 *cmd, uintptr_t base_address);
+#ifndef __x86_64__
+static void patch_segment_thread_self_reads(
+		const struct segment_command_64 *cmd, uintptr_t base_address,
+		unsigned long prot);
+#endif
 
 /*
  * Enumerate Mach-O load commands and load into memory
@@ -199,6 +207,12 @@ linker_link(const char *path, const char **dylinker_path, uintptr_t *entry)
 
 			/* HACK: Zero the BSS */
 			zero_bss(cmd, base_address);
+#ifndef __x86_64__
+			if (prot & PROT_EXEC) {
+				patch_segment_thread_self_reads(
+						cmd, base_address, prot);
+			}
+#endif
 		} break;
 		/* The dynamic linker that handles this binary */
 		case LC_LOAD_DYLINKER: {
@@ -342,6 +356,39 @@ image_span(const struct mach_header_64 *header)
 	size_t span = (high > low) ? high - low : 0x1000000;
 	return span < 0x1000000 ? 0x1000000 : span;
 }
+
+#ifndef __x86_64__
+static void
+patch_segment_thread_self_reads(const struct segment_command_64 *cmd,
+		uintptr_t base_address, unsigned long prot)
+{
+	if (cmd->cmdsize < sizeof(*cmd)) {
+		return;
+	}
+	const struct section_64 *sections
+			= (const struct section_64 *)(cmd + 1);
+	uint32_t room = (cmd->cmdsize - sizeof(*cmd)) / sizeof(sections[0]);
+	char *segment = (char *)(base_address + cmd->vmaddr);
+	mprotect(segment, cmd->vmsize, PROT_READ | PROT_WRITE);
+	for (uint32_t i = 0; i < cmd->nsects && i < room; i++) {
+		const struct section_64 *section = &sections[i];
+		uint64_t offset = section->addr - cmd->vmaddr;
+		bool instructions = section->flags
+				& (S_ATTR_PURE_INSTRUCTIONS
+						| S_ATTR_SOME_INSTRUCTIONS);
+		bool inside = section->addr >= cmd->vmaddr
+				&& section->size <= cmd->vmsize
+				&& offset <= cmd->vmsize - section->size;
+		if (instructions && inside
+				&& section->addr % sizeof(uint32_t) == 0) {
+			patch_thread_self_reads(base_address + section->addr,
+					section->size);
+		}
+	}
+	mprotect(segment, cmd->vmsize, prot);
+	__builtin___clear_cache(segment, segment + cmd->vmsize);
+}
+#endif
 
 /*
  * Thin a Fat Mach-O and return the first compatible architecture header

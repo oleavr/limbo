@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -189,3 +190,6 @@ extern void *shared_cache_start;
 extern int shared_cache_cpu_subtype;
 
 int shared_cache_mmap(void);
+#ifndef __x86_64__
+void patch_thread_self_reads(uint64_t address, uint64_t size);
+#endif
