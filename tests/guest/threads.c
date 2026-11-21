@@ -45,6 +45,10 @@
 
 #include "check.h"
 
+#ifndef PROC_PIDLISTTHREADIDS
+#define PROC_PIDLISTTHREADIDS 28
+#endif
+
 #define THREADS    8
 #define ITERATIONS 10000
 
@@ -391,6 +395,30 @@ check_thread_times(void)
 			      sizeof(by_id))
 			== 0);
 	CHECK(errno == ESRCH);
+
+	enum { LISTED_MAX = 64 };
+	uint64_t handles[LISTED_MAX], listed[LISTED_MAX];
+	int size = proc_pidinfo(getpid(), PROC_PIDLISTTHREADS, 0, handles,
+			sizeof(handles));
+	CHECK(size >= 2 * (int)sizeof(uint64_t));
+	CHECK(proc_pidinfo(getpid(), PROC_PIDLISTTHREADIDS, 0, listed,
+			      sizeof(listed))
+			== size);
+	bool found = false;
+	for (int i = 0; i < size / (int)sizeof(uint64_t); i++) {
+		found |= handles[i] == ids.thread_handle
+				&& listed[i] == ids.thread_id;
+	}
+	CHECK(found);
+	CHECK(handles[0] == identifier_info(pthread_self()).thread_handle);
+	CHECK(proc_pidinfo(getpid(), PROC_PIDLISTTHREADIDS, 0, listed,
+			      sizeof(uint64_t))
+			== sizeof(uint64_t));
+	CHECK(listed[0] == identifier_info(pthread_self()).thread_id);
+	CHECK(proc_pidinfo(getpid(), PROC_PIDLISTTHREADIDS, 0, listed,
+			      sizeof(uint64_t) - 1)
+			== 0);
+	CHECK(errno == ENOMEM);
 
 	task_thread_times_info_data_t live;
 	mach_msg_type_number_t count = TASK_THREAD_TIMES_INFO_COUNT;

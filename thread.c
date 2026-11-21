@@ -130,6 +130,32 @@ thread_guest_ports(mach_port_name_t *ports, size_t max)
 	return count;
 }
 
+size_t
+thread_guest_handles(uint64_t *out, size_t max, bool ids)
+{
+	pthread_mutex_lock(&all_threads_lock);
+	size_t count = 0;
+	for (struct thread *thread = all_threads; thread != NULL;
+			thread = thread->all_next) {
+		if (thread->guest && !thread->terminating) {
+			count++;
+		}
+	}
+	size_t oldest_first = count;
+	for (struct thread *thread = all_threads; thread != NULL;
+			thread = thread->all_next) {
+		if (thread->guest && !thread->terminating) {
+			oldest_first--;
+			if (oldest_first < max) {
+				out[oldest_first] = ids ? (uint64_t)thread->tid
+							: thread->tsd_base;
+			}
+		}
+	}
+	pthread_mutex_unlock(&all_threads_lock);
+	return count < max ? count : max;
+}
+
 mach_port_name_t
 thread_guest_port_of(uint64_t value, bool id)
 {
