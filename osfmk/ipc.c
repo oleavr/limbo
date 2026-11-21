@@ -79,6 +79,7 @@ struct ipc_port {
 	mach_port_mscount_t mscount;
 	mach_port_urefs_t kernel_sorights;
 	struct ipc_port *no_senders_notify;
+	struct ipc_port *destroyed_notify;
 	mach_port_context_t context;
 	uint64_t global_id;
 	bool remote;
@@ -239,15 +240,19 @@ static void flush_notices(void);
 static void notify_port_deleted(struct ipc_port *notify, mach_port_name_t name);
 static void notify_send_possible(
 		struct ipc_port *notify, mach_port_name_t name);
+static void notify_port_destroyed(
+		struct ipc_port *notify, mach_port_name_t name);
 static void notify_no_senders(
 		struct ipc_port *notify, mach_port_mscount_t mscount);
 static void notify_send_once(struct ipc_port *port);
 static void notify_dead_name(struct ipc_port *notify, mach_port_name_t name);
-static void deliver_notification(
+static bool deliver_notification(
 		struct ipc_port *port, const mach_msg_header_t *msg);
 static kern_return_t request_notification(mach_port_name_t name,
 		mach_msg_id_t id, mach_port_mscount_t sync,
 		mach_port_name_t notify, mach_port_name_t *previous);
+static kern_return_t request_port_destroyed(mach_port_name_t name,
+		mach_port_mscount_t sync, mach_port_name_t notify);
 static kern_return_t request_no_senders(mach_port_name_t name,
 		mach_port_mscount_t sync, mach_port_name_t notify,
 		struct ipc_port **replaced);
@@ -1754,6 +1759,9 @@ flush_notices(void)
 		case MACH_NOTIFY_SEND_POSSIBLE:
 			notify_send_possible(notice->notify, notice->name);
 			break;
+		case MACH_NOTIFY_PORT_DESTROYED:
+			notify_port_destroyed(notice->notify, notice->name);
+			break;
 		case MACH_NOTIFY_NO_SENDERS:
 			notify_no_senders(notice->notify, notice->mscount);
 			break;
@@ -1799,6 +1807,28 @@ notify_send_possible(struct ipc_port *notify, mach_port_name_t name)
 }
 
 static void
+notify_port_destroyed(struct ipc_port *notify, mach_port_name_t name)
+{
+	mach_port_destroyed_notification_t notification = {
+		.not_header = {
+			.msgh_bits = MACH_MSGH_BITS_COMPLEX,
+			.msgh_size = sizeof(notification)
+					- sizeof(notification.trailer),
+			.msgh_id = MACH_NOTIFY_PORT_DESTROYED,
+		},
+		.not_body = {.msgh_descriptor_count = 1},
+		.not_port = {
+			.name = name,
+			.disposition = MACH_MSG_TYPE_PORT_RECEIVE,
+			.type = MACH_MSG_PORT_DESCRIPTOR,
+		},
+	};
+	if (!deliver_notification(notify, &notification.not_header)) {
+		ipc_port_mod_refs(name, MACH_PORT_RIGHT_RECEIVE, -1);
+	}
+}
+
+static void
 notify_no_senders(struct ipc_port *notify, mach_port_mscount_t mscount)
 {
 	mach_no_senders_notification_t notification = {
@@ -1840,7 +1870,7 @@ notify_dead_name(struct ipc_port *notify, mach_port_name_t name)
 	deliver_notification(notify, &notification.not_header);
 }
 
-static void
+static bool
 deliver_notification(struct ipc_port *port, const mach_msg_header_t *msg)
 {
 	pthread_mutex_lock(&lock);
@@ -1848,18 +1878,20 @@ deliver_notification(struct ipc_port *port, const mach_msg_header_t *msg)
 	if (!port_has_receiver(port)) {
 		port_free_if_unheld(port);
 		pthread_mutex_unlock(&lock);
-		return;
+		return false;
 	}
 
 	struct ipc_kmsg *kmsg = malloc(sizeof(*kmsg) + msg->msgh_size
 			+ sizeof(mach_msg_max_trailer_t));
 	kmsg->sender_pid = 0;
 	memcpy(kmsg->header, msg, msg->msgh_size);
-	kmsg->header->msgh_bits
-			= MACH_MSGH_BITS(0, MACH_MSG_TYPE_PORT_SEND_ONCE);
+	kmsg->header->msgh_bits = MACH_MSGH_BITS_SET(0,
+			MACH_MSG_TYPE_PORT_SEND_ONCE, 0,
+			msg->msgh_bits & MACH_MSGH_BITS_COMPLEX);
 	kmsg->header->msgh_local_port = port->name;
 	enqueue(port, kmsg);
 	unlock_and_notify_arrival(port);
+	return true;
 }
 
 kern_return_t
@@ -2229,6 +2261,9 @@ request_notification(mach_port_name_t name, mach_msg_id_t id,
 	struct ipc_port *replaced = NULL;
 	kern_return_t kr = KERN_SUCCESS;
 	switch (id) {
+	case MACH_NOTIFY_PORT_DESTROYED:
+		kr = request_port_destroyed(name, sync, notify);
+		break;
 	case MACH_NOTIFY_NO_SENDERS:
 		kr = request_no_senders(name, sync, notify, &replaced);
 		break;
@@ -2247,6 +2282,30 @@ request_notification(mach_port_name_t name, mach_msg_id_t id,
 		return kr;
 	}
 	*previous = send_once_name(replaced);
+	return KERN_SUCCESS;
+}
+
+static kern_return_t
+request_port_destroyed(mach_port_name_t name, mach_port_mscount_t sync,
+		mach_port_name_t notify)
+{
+	if (sync != 0) {
+		return KERN_INVALID_VALUE;
+	}
+	struct ipc_entry *entry = lookup(name);
+	if (entry == NULL) {
+		return KERN_INVALID_NAME;
+	}
+	if (!(entry->type & MACH_PORT_TYPE_RECEIVE)) {
+		return KERN_INVALID_RIGHT;
+	}
+	if (entry->port->destroyed_notify != NULL) {
+		return KERN_FAILURE;
+	}
+
+	entry->port->destroyed_notify = notify != MACH_PORT_NULL
+			? hold_send_once(notify)
+			: NULL;
 	return KERN_SUCCESS;
 }
 
@@ -2325,6 +2384,17 @@ static void
 destroy_receive_right(struct ipc_entry *entry)
 {
 	struct ipc_port *port = entry->port;
+	if (port->destroyed_notify != NULL) {
+		port_leave_all_sets(port);
+		queue_notice((struct pending_notice){
+				.id = MACH_NOTIFY_PORT_DESTROYED,
+				.notify = port->destroyed_notify,
+				.name = port->name,
+		});
+		port->destroyed_notify = NULL;
+		return;
+	}
+
 	struct ipc_kmsg *queued = port->messages;
 	port->messages = NULL;
 	port_leave_all_sets(port);
@@ -2539,6 +2609,7 @@ static void
 destroy_requests(struct ipc_port *port)
 {
 	destroy_send_once(&port->no_senders_notify);
+	destroy_send_once(&port->destroyed_notify);
 }
 
 static void

@@ -105,6 +105,7 @@ static void request_no_senders(
 		mach_port_t port, mach_port_mscount_t sync, mach_port_t notify);
 static bool receive_no_senders(mach_port_t notify, mach_msg_timeout_t timeout,
 		mach_port_mscount_t *count);
+static void check_port_destroyed(void);
 static void check_make_send_count(void);
 static mach_port_mscount_t make_send_count(mach_port_t port);
 static void check_reference_deltas(void);
@@ -163,6 +164,7 @@ main(void)
 	check_dead_thread_name();
 	check_port_deleted();
 	check_no_senders();
+	check_port_destroyed();
 	check_make_send_count();
 	check_reference_deltas();
 	check_fork_during_port_calls();
@@ -1580,6 +1582,60 @@ receive_no_senders(mach_port_t notify, mach_msg_timeout_t timeout,
 			== MACH_NOTIFY_NO_SENDERS);
 	*count = message.notification.not_count;
 	return true;
+}
+
+static void
+check_port_destroyed(void)
+{
+	mach_port_t task = mach_task_self();
+	mach_port_t port = allocate_port();
+	mach_port_t notify = allocate_port();
+	mach_port_t previous = MACH_PORT_NULL;
+	CHECK(mach_port_request_notification(task, port,
+			      MACH_NOTIFY_PORT_DESTROYED, 1, notify,
+			      MACH_MSG_TYPE_MAKE_SEND_ONCE, &previous)
+			== KERN_INVALID_VALUE);
+	expect_send_once_notification(notify);
+	CHECK(mach_port_request_notification(task, port,
+			      MACH_NOTIFY_PORT_DESTROYED, 0, notify,
+			      MACH_MSG_TYPE_MAKE_SEND_ONCE, &previous)
+			== KERN_SUCCESS);
+	CHECK(mach_port_request_notification(task, port,
+			      MACH_NOTIFY_PORT_DESTROYED, 0, notify,
+			      MACH_MSG_TYPE_MAKE_SEND_ONCE, &previous)
+			== KERN_FAILURE);
+	expect_send_once_notification(notify);
+	CHECK(mach_port_mod_refs(task, port, MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+
+	struct {
+		mach_port_destroyed_notification_t notification;
+		mach_msg_trailer_t trailer;
+	} message;
+	CHECK(mach_msg(&message.notification.not_header,
+			      MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof(message), notify, 1000, MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	CHECK(message.notification.not_header.msgh_id
+			== MACH_NOTIFY_PORT_DESTROYED);
+	mach_port_t back = message.notification.not_port.name;
+	mach_port_type_t type;
+	CHECK(mach_port_type(task, back, &type) == KERN_SUCCESS);
+	CHECK(type & MACH_PORT_TYPE_RECEIVE);
+
+	CHECK(mach_port_insert_right(task, back, back, MACH_MSG_TYPE_MAKE_SEND)
+			== KERN_SUCCESS);
+	CHECK(mach_port_request_notification(task, back,
+			      MACH_NOTIFY_PORT_DESTROYED, 0, notify,
+			      MACH_MSG_TYPE_MAKE_SEND_ONCE, &previous)
+			== KERN_SUCCESS);
+	CHECK(mach_port_mod_refs(task, notify, MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+	CHECK(mach_port_mod_refs(task, back, MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+	CHECK(mach_port_type(task, back, &type) == KERN_SUCCESS);
+	CHECK(type == MACH_PORT_TYPE_DEAD_NAME);
+	CHECK(mach_port_deallocate(task, back) == KERN_SUCCESS);
 }
 
 static void
