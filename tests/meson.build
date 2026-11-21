@@ -64,6 +64,7 @@ guest_tests = [
   'persona.c',
   'protection.c',
   'purgeable.c',
+  'responsibility.c',
   'restartable.c',
   'route.c',
   'rwlock.c',

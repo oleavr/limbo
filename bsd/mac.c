@@ -37,6 +37,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "bsd/process.h"
+#include "bsd/responsibility.h"
 #include "bsd/sandbox_profile.h"
 #include "fs/device.h"
 #include "handler.h"
@@ -131,18 +133,55 @@ amfi_handle_syscall(int call, void *arg)
 	}
 }
 
+#define QUARANTINE_RESPONSIBLE_FOR_PID 180
+
+struct quarantine_responsible_for_pid_args {
+	uint64_t pid;
+	uint64_t *responsible;
+	uint64_t *responsible_uniqueid;
+};
+
 static int
-quarantine_handle_syscall(int call)
+quarantine_responsible_for_pid(
+		const struct quarantine_responsible_for_pid_args *args)
+{
+	struct process process;
+	if (args == NULL) {
+		return _EFAULT;
+	}
+	if (args->pid > INT32_MAX
+			|| process_lookup((int32_t)args->pid, &process) != 0
+			|| process_exited(&process)) {
+		return _ESRCH;
+	}
+	if (geteuid() != 0 && geteuid() != process.uid[1]) {
+		return _EPERM;
+	}
+	if (args->responsible == NULL) {
+		return _EFAULT;
+	}
+	uint64_t responsible = (uint64_t)responsibility_of(&process);
+	*args->responsible = responsible;
+	if (args->responsible_uniqueid == NULL) {
+		return _EFAULT;
+	}
+	*args->responsible_uniqueid = responsible;
+	return 0;
+}
+
+static int
+quarantine_handle_syscall(int call, void *arg)
 {
 	switch (call) {
 	case 80:
 	case 81:
 	case 82:
 	case 84:
-	case 180:
 		return _ENOATTR;
 	case 87:
 		return 0;
+	case QUARANTINE_RESPONSIBLE_FOR_PID:
+		return quarantine_responsible_for_pid(arg);
 	default:
 		unimplemented();
 	}
@@ -519,7 +558,7 @@ sys___mac_syscall(char *policy, int call, user_addr_t arg)
 	if (strncmp(policy, "AMFI", MAC_MAX_POLICY_NAME) == 0) {
 		return amfi_handle_syscall(call, arg);
 	} else if (strncmp(policy, "Quarantine", MAC_MAX_POLICY_NAME) == 0) {
-		return quarantine_handle_syscall(call);
+		return quarantine_handle_syscall(call, arg);
 	} else if (strncmp(policy, "Sandbox", MAC_MAX_POLICY_NAME) == 0) {
 		return sandbox_handle_syscall(call, arg);
 	} else {

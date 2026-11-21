@@ -29,6 +29,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,6 +39,9 @@
 #include "gid.h"
 #include "process.h"
 
+#define STAT_VIRTUAL_SIZE 23
+#define STAT_END_CODE     27
+
 static void executable_name(int32_t pid, struct process *process);
 static void live_thread_memory(int32_t pid, struct process *process);
 static void read_ids(FILE *status, const char *key, uint32_t ids[3]);
@@ -46,6 +50,7 @@ static ssize_t read_process_file(
 		int32_t pid, const char *file, char *buffer, size_t size);
 static ssize_t read_file(const char *name, char *buffer, size_t size);
 static char stat_state(const char *path);
+static bool executing(const char *dir);
 
 int
 process_lookup(int32_t pid, struct process *process)
@@ -260,8 +265,18 @@ process_environment_value(
 {
 	size_t capacity = 64 * 1024;
 	char *environment = malloc(capacity);
-	ssize_t length = read_process_file(
-			pid, "environ", environment, capacity - 1);
+	char dir[64 + NAME_MAX], path[80 + NAME_MAX];
+	ssize_t length;
+	for (;;) {
+		process_proc_dir(pid, dir, sizeof(dir));
+		bool laying_out = executing(dir);
+		snprintf(path, sizeof(path), "%s/environ", dir);
+		length = read_file(path, environment, capacity - 1);
+		if (length != 0 || !laying_out) {
+			break;
+		}
+		sched_yield();
+	}
 	if (length > 0) {
 		environment[length] = '\0';
 	}
@@ -361,4 +376,31 @@ stat_state(const char *path)
 	}
 	line[length] = '\0';
 	return strrchr(line, ')')[2];
+}
+
+static bool
+executing(const char *dir)
+{
+	char path[80 + NAME_MAX];
+	char line[2048];
+	snprintf(path, sizeof(path), "%s/stat", dir);
+	ssize_t length = read_file(path, line, sizeof(line) - 1);
+	if (length <= 0) {
+		return false;
+	}
+	line[length] = '\0';
+	char *next = strrchr(line, ')') + 4;
+	unsigned long long value = 0, virtual_size = 0;
+	for (int field = 4; field <= STAT_END_CODE; field++) {
+		char *end;
+		value = strtoull(next, &end, 10);
+		if (end == next) {
+			return false;
+		}
+		if (field == STAT_VIRTUAL_SIZE) {
+			virtual_size = value;
+		}
+		next = end;
+	}
+	return virtual_size != 0 && value == 0;
 }
