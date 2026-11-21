@@ -41,6 +41,7 @@
 #include <sys/clonefile.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -75,8 +76,9 @@ extern int sandbox_check(pid_t pid, const char *operation, int type, ...);
 
 #define ALLOW_ALL   "(version 1) (allow default)"
 #define DENY_SECRET ALLOW_ALL " (deny file-write* (regex #\"\\.secret$\"))"
-#define DENY_FOLDER                                                            \
-	ALLOW_ALL " (deny file-write* (subpath \"/private" DENIED "\"))"
+#define DENY(operation)                                                        \
+	ALLOW_ALL " (deny " operation " (subpath \"/private" DENIED "\"))"
+#define DENY_FOLDER DENY("file-write*")
 
 static void clean_up(void);
 static void remove_deep(void);
@@ -94,13 +96,16 @@ static void denied_creating(void);
 static void denied_unlinking(void);
 static void denied_renaming(void);
 static void denied_truncating(void);
+static void denied_mode(void);
 static void in_denied_folder(void (*body)(void));
+static void in_sandbox(const char *profile, void (*body)(void));
 static int remove_entry(const char *path, const struct stat *st, int type,
 		struct FTW *ftw);
 static void enter_and_run(void);
 static void make_file(const char *path);
 static int exit_status_of(void (*body)(void));
 
+static const char *sandboxed_profile;
 static void (*sandboxed_body)(void);
 static pid_t owner;
 static int denied_fd;
@@ -257,6 +262,7 @@ check_enforced(void)
 	in_denied_folder(denied_unlinking);
 	in_denied_folder(denied_renaming);
 	in_denied_folder(denied_truncating);
+	in_sandbox(DENY("file-write-mode"), denied_mode);
 }
 
 static void
@@ -481,7 +487,43 @@ denied_truncating(void)
 }
 
 static void
+denied_mode(void)
+{
+	errno = 0;
+	CHECK(chmod(DENIED "/existing", 0600) == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(fchmod(denied_fd, 0600) == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(fchmodat(AT_FDCWD, DENIED "/existing", 0600, 0) == -1);
+	CHECK(errno == EPERM);
+	filesec_t filesec = filesec_init();
+	mode_t mode = 0600;
+	CHECK(filesec_set_property(filesec, FILESEC_MODE, &mode) == 0);
+	errno = 0;
+	CHECK(chmodx_np(DENIED "/existing", filesec) == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(fchmodx_np(denied_fd, filesec) == -1);
+	CHECK(errno == EPERM);
+	filesec_free(filesec);
+	struct stat st;
+	CHECK(stat(DENIED "/existing", &st) == 0);
+	CHECK((st.st_mode & 0777) == 0644);
+
+	CHECK(chmod(ALLOWED, 0600) == 0);
+	CHECK(utimes(DENIED "/existing", NULL) == 0);
+}
+
+static void
 in_denied_folder(void (*body)(void))
+{
+	in_sandbox(DENY_FOLDER, body);
+}
+
+static void
+in_sandbox(const char *profile, void (*body)(void))
 {
 	clean_up();
 	CHECK(mkdir(DENIED, 0755) == 0);
@@ -489,6 +531,7 @@ in_denied_folder(void (*body)(void))
 	make_file(ALLOWED);
 	denied_fd = open(DENIED "/existing", O_RDWR);
 	CHECK(denied_fd >= 0);
+	sandboxed_profile = profile;
 	sandboxed_body = body;
 	CHECK(exit_status_of(enter_and_run) == 0);
 	CHECK(close(denied_fd) == 0);
@@ -507,7 +550,7 @@ static void
 enter_and_run(void)
 {
 	char *error = NULL;
-	CHECK(sandbox_init(DENY_FOLDER, 0, &error) == 0);
+	CHECK(sandbox_init(sandboxed_profile, 0, &error) == 0);
 	sandboxed_body();
 }
 
