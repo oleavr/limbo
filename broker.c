@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -30,7 +31,9 @@
 #define _GNU_SOURCE
 #endif
 
+#include <errno.h>
 #include <poll.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,9 +46,17 @@
 
 #define BROKER_FRAME_MAX (1 << 20)
 
+struct pending_frame {
+	struct pending_frame *next;
+	size_t length;
+	char data[];
+};
+
 struct connection {
 	int fd;
 	uint32_t guest_id;
+	struct pending_frame *pending;
+	struct pending_frame *last_pending;
 };
 
 struct service {
@@ -61,12 +72,15 @@ static void register_service(const struct broker_register *reg);
 static void look_up_service(struct connection *conn,
 		const struct broker_lookup *req);
 static void route_send(const struct broker_send *send, const void *blob);
+static struct connection *connection_for_fd(int fd);
 static struct connection *connection_for_guest(uint32_t guest_id);
 static struct service *service_named(const char *name);
 static void add_connection(int fd);
 static void remove_connection(size_t index);
-static void send_frame(int fd, uint32_t type, const void *payload,
-		uint32_t length);
+static void send_frame(struct connection *conn, uint32_t type,
+		const void *payload, uint32_t length);
+static void send_pending(struct connection *conn);
+static bool send_data(int fd, const struct pending_frame *frame);
 static ssize_t receive_frame(int fd, struct broker_frame *header, void *payload);
 
 static struct connection *connections;
@@ -107,8 +121,9 @@ run(int listen_fd)
 		fds[0] = (struct pollfd){ .fd = listen_fd, .events = POLLIN };
 		for (size_t i = 0; i != polled; i++) {
 			fds[i + 1] = (struct pollfd){
-				.fd = connections[i].fd,
-				.events = POLLIN,
+					.fd = connections[i].fd,
+					.events
+					= POLLIN | (connections[i].pending != NULL ? POLLOUT : 0),
 			};
 		}
 
@@ -118,6 +133,9 @@ run(int listen_fd)
 			accept_guest(listen_fd);
 		}
 		for (size_t i = 0; i != polled; i++) {
+			if (fds[i + 1].revents & POLLOUT) {
+				send_pending(connection_for_fd(fds[i + 1].fd));
+			}
 			if (fds[i + 1].revents & (POLLIN | POLLHUP)) {
 				handle_guest(fds[i + 1].fd);
 			}
@@ -176,7 +194,7 @@ welcome_guest(struct connection *conn)
 {
 	conn->guest_id = next_guest_id++;
 	struct broker_welcome welcome = { .guest_id = conn->guest_id };
-	send_frame(conn->fd, BROKER_WELCOME, &welcome, sizeof(welcome));
+	send_frame(conn, BROKER_WELCOME, &welcome, sizeof(welcome));
 }
 
 static void
@@ -200,7 +218,7 @@ look_up_service(struct connection *conn, const struct broker_lookup *req)
 		.found = service != NULL,
 		.global_id = (service != NULL) ? service->global_id : 0,
 	};
-	send_frame(conn->fd, BROKER_LOOKUP_REPLY, &reply, sizeof(reply));
+	send_frame(conn, BROKER_LOOKUP_REPLY, &reply, sizeof(reply));
 }
 
 static void
@@ -216,8 +234,19 @@ route_send(const struct broker_send *send, const void *blob)
 	char *frame = malloc(length);
 	memcpy(frame, send, sizeof(*send));
 	memcpy(frame + sizeof(*send), blob, send->blob_length);
-	send_frame(owner->fd, BROKER_DELIVER, frame, length);
+	send_frame(owner, BROKER_DELIVER, frame, length);
 	free(frame);
+}
+
+static struct connection *
+connection_for_fd(int fd)
+{
+	for (size_t i = 0; i != connection_count; i++) {
+		if (connections[i].fd == fd) {
+			return &connections[i];
+		}
+	}
+	return NULL;
 }
 
 static struct connection *
@@ -253,20 +282,57 @@ add_connection(int fd)
 static void
 remove_connection(size_t index)
 {
+	while (connections[index].pending != NULL) {
+		struct pending_frame *frame = connections[index].pending;
+		connections[index].pending = frame->next;
+		free(frame);
+	}
 	close(connections[index].fd);
 	connections[index] = connections[--connection_count];
 }
 
 static void
-send_frame(int fd, uint32_t type, const void *payload, uint32_t length)
+send_frame(struct connection *conn, uint32_t type, const void *payload,
+		uint32_t length)
 {
 	struct broker_frame header = { .type = type, .length = length };
-	struct iovec iov[2] = {
-		{ .iov_base = &header, .iov_len = sizeof(header) },
-		{ .iov_base = (void *)payload, .iov_len = length },
-	};
-	struct msghdr msg = { .msg_iov = iov, .msg_iovlen = 2 };
-	sendmsg(fd, &msg, 0);
+	struct pending_frame *frame
+			= malloc(sizeof(*frame) + sizeof(header) + length);
+	frame->next = NULL;
+	frame->length = sizeof(header) + length;
+	memcpy(frame->data, &header, sizeof(header));
+	memcpy(frame->data + sizeof(header), payload, length);
+
+	if (conn->pending == NULL && send_data(conn->fd, frame)) {
+		free(frame);
+		return;
+	}
+	if (conn->pending == NULL) {
+		conn->pending = frame;
+	} else {
+		conn->last_pending->next = frame;
+	}
+	conn->last_pending = frame;
+}
+
+static void
+send_pending(struct connection *conn)
+{
+	while (conn->pending != NULL) {
+		struct pending_frame *frame = conn->pending;
+		if (!send_data(conn->fd, frame)) {
+			return;
+		}
+		conn->pending = frame->next;
+		free(frame);
+	}
+}
+
+static bool
+send_data(int fd, const struct pending_frame *frame)
+{
+	ssize_t n = send(fd, frame->data, frame->length, MSG_DONTWAIT);
+	return n != -1 || (errno != EAGAIN && errno != EWOULDBLOCK);
 }
 
 static ssize_t
