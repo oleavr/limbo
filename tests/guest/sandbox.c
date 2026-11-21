@@ -99,6 +99,7 @@ static void denied_truncating(void);
 static void denied_mode(void);
 static void denied_owner(void);
 static void denied_flags(void);
+static void denied_times(void);
 static void in_denied_folder(void (*body)(void));
 static void in_sandbox(const char *profile, void (*body)(void));
 static int remove_entry(const char *path, const struct stat *st, int type,
@@ -267,6 +268,7 @@ check_enforced(void)
 	in_sandbox(DENY("file-write-mode"), denied_mode);
 	in_sandbox(DENY("file-write-owner"), denied_owner);
 	in_sandbox(DENY("file-write-flags"), denied_flags);
+	in_sandbox(DENY("file-write-times"), denied_times);
 }
 
 static void
@@ -564,6 +566,20 @@ denied_flags(void)
 	CHECK(stat(DENIED "/existing", &st) == 0 && st.st_flags == 0);
 
 	CHECK(chflags(ALLOWED, UF_HIDDEN) == 0);
+	CHECK(chmod(DENIED "/existing", 0600) == 0);
+}
+
+static void
+denied_times(void)
+{
+	errno = 0;
+	CHECK(utimes(DENIED "/existing", NULL) == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(futimes(denied_fd, NULL) == -1);
+	CHECK(errno == EPERM);
+
+	CHECK(utimes(ALLOWED, NULL) == 0);
 	CHECK(chmod(DENIED "/existing", 0600) == 0);
 }
 
