@@ -30,6 +30,7 @@
 #endif
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -38,6 +39,8 @@
 
 #include "broker.h"
 
+#define PAYLOAD_SEALS (F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE)
+
 union fd_control {
 	char buffer[CMSG_SPACE(sizeof(int) * BROKER_DATAGRAM_FDS)];
 	struct cmsghdr align;
@@ -45,6 +48,7 @@ union fd_control {
 
 static int payload_file(const struct iovec *parts, int part_count);
 static bool write_whole(int fd, const struct iovec *part);
+static bool is_sealed(int fd);
 static int send_datagram(int fd, struct iovec *iov, int iov_count,
 		const int *fds, size_t fd_count, int flags);
 static int cancel_ahead(int fd, struct broker_wire_frame *frame, int flags);
@@ -62,32 +66,35 @@ broker_wire_new(uint32_t type, const struct iovec *parts, int part_count,
 	for (int i = 0; i != part_count; i++) {
 		length += parts[i].iov_len;
 	}
-
 	bool out_of_line = length > BROKER_INLINE_MAX;
-	struct broker_wire_frame *frame = calloc(
-			1, sizeof(*frame) + (out_of_line ? 0 : length));
+	int inline_parts = out_of_line ? part_count > 1 : part_count;
+	size_t inline_length = out_of_line ? parts[0].iov_len * inline_parts
+					   : length;
+
+	struct broker_wire_frame *frame
+			= calloc(1, sizeof(*frame) + inline_length);
 	frame->type = type;
 	frame->length = length;
 	frame->fds = malloc(sizeof(*frame->fds) * (fd_count + 1));
 	for (size_t i = 0; i != fd_count; i++) {
 		frame->fds[frame->fd_count++] = fds[i];
 	}
-	if (length > BROKER_FRAME_MAX
+	if (length > BROKER_FRAME_MAX || inline_length > BROKER_INLINE_MAX
 			|| fd_count + out_of_line > BROKER_FDS_MAX) {
 		broker_wire_free(frame);
 		errno = EMSGSIZE;
 		return NULL;
 	}
+	for (int i = 0; i != inline_parts; i++) {
+		memcpy(frame->payload + frame->inline_length, parts[i].iov_base,
+				parts[i].iov_len);
+		frame->inline_length += parts[i].iov_len;
+	}
 	if (!out_of_line) {
-		for (int i = 0; i != part_count; i++) {
-			memcpy(frame->payload + frame->inline_length,
-					parts[i].iov_base, parts[i].iov_len);
-			frame->inline_length += parts[i].iov_len;
-		}
 		return frame;
 	}
 
-	int fd = payload_file(parts, part_count);
+	int fd = payload_file(parts + inline_parts, part_count - inline_parts);
 	if (fd == -1) {
 		int error = errno;
 		broker_wire_free(frame);
@@ -102,14 +109,19 @@ broker_wire_new(uint32_t type, const struct iovec *parts, int part_count,
 static int
 payload_file(const struct iovec *parts, int part_count)
 {
-	int fd = memfd_create("limbo frame", MFD_CLOEXEC);
-	for (int i = 0; fd != -1 && i != part_count; i++) {
-		if (!write_whole(fd, &parts[i])) {
-			int error = errno;
-			close(fd);
-			errno = error;
-			return -1;
-		}
+	int fd = memfd_create("limbo frame", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+	bool written = fd != -1;
+	for (int i = 0; written && i != part_count; i++) {
+		written = write_whole(fd, &parts[i]);
+	}
+	if (fd != -1
+			&& (!written
+					|| fcntl(fd, F_ADD_SEALS, PAYLOAD_SEALS)
+							== -1)) {
+		int error = errno;
+		close(fd);
+		errno = error;
+		return -1;
 	}
 	return fd;
 }
@@ -262,10 +274,10 @@ broker_wire_receive(int fd, struct broker_wire_ahead *ahead,
 
 	size_t carried = (size_t)n - sizeof(header);
 	bool out_of_line = header.type & BROKER_FRAME_OOL;
-	bool whole = out_of_line
-			? carried == 0 && header.length <= BROKER_FRAME_MAX
+	bool whole = out_of_line ? carried <= header.length
+					&& header.length <= BROKER_FRAME_MAX
 					&& (frame->fd_count != 0 || ahead->lost)
-			: carried == header.length;
+				 : carried == header.length;
 	if (!whole || (msg.msg_flags & MSG_TRUNC)
 			|| ahead->count + frame->fd_count > BROKER_FDS_MAX) {
 		broker_wire_free(frame);
@@ -292,7 +304,7 @@ broker_wire_receive(int fd, struct broker_wire_ahead *ahead,
 
 	frame->type = header.type;
 	frame->length = header.length;
-	frame->inline_length = out_of_line ? 0 : header.length;
+	frame->inline_length = carried;
 	*received = realloc(frame, sizeof(*frame) + frame->inline_length);
 	return 1;
 }
@@ -341,16 +353,24 @@ broker_wire_read(const struct broker_wire_frame *frame, uint32_t offset,
 	if (offset > frame->length || length > frame->length - offset) {
 		return false;
 	}
-	if (!(frame->type & BROKER_FRAME_OOL)) {
-		memcpy(buffer, frame->payload + offset, length);
+	uint32_t done = 0;
+	if (offset < frame->inline_length) {
+		done = frame->inline_length - offset < length
+				? frame->inline_length - offset
+				: length;
+		memcpy(buffer, frame->payload + offset, done);
+	}
+	if (done == length) {
 		return true;
 	}
 
 	int fd = frame->fds[frame->fd_count - 1];
-	uint32_t done = 0;
+	if (!is_sealed(fd)) {
+		return false;
+	}
 	while (done != length) {
 		ssize_t n = pread(fd, (char *)buffer + done, length - done,
-				offset + done);
+				offset + done - frame->inline_length);
 		if (n == -1 && errno == EINTR) {
 			continue;
 		}
@@ -360,6 +380,13 @@ broker_wire_read(const struct broker_wire_frame *frame, uint32_t offset,
 		done += n;
 	}
 	return true;
+}
+
+static bool
+is_sealed(int fd)
+{
+	int seals = fcntl(fd, F_GET_SEALS);
+	return seals != -1 && (seals & PAYLOAD_SEALS) == PAYLOAD_SEALS;
 }
 
 void

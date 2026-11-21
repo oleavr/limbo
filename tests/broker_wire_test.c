@@ -34,6 +34,7 @@
 #include <poll.h>
 #include <stdbool.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -42,10 +43,12 @@
 
 #define CLOSED_WITHIN_MS 5000
 #define REFUSED          47
+#define LARGE            (300 * 1024)
 
 static void check_short_datagram(void);
 static void check_last_frames(void);
 static void check_cancel(void);
+static void check_large_frame(void);
 static void connect_pair(int pair[2]);
 static int pipe_to(int *read_end);
 static void send_datagram(int fd, const void *bytes, size_t length,
@@ -58,6 +61,7 @@ main(void)
 	check_short_datagram();
 	check_last_frames();
 	check_cancel();
+	check_large_frame();
 	return 0;
 }
 
@@ -135,6 +139,48 @@ check_cancel(void)
 	broker_wire_free(frame);
 	CHECK(close(read_end) == 0 && close(pair[0]) == 0
 			&& close(pair[1]) == 0);
+}
+
+static void
+check_large_frame(void)
+{
+	int pair[2];
+	connect_pair(pair);
+	struct broker_send head = {.dest_global_id = 7};
+	static char body[LARGE];
+	memset(body, 'b', sizeof(body));
+	struct iovec parts[2] = {
+			{.iov_base = &head, .iov_len = sizeof(head)},
+			{.iov_base = body, .iov_len = sizeof(body)},
+	};
+	struct broker_wire_frame *large
+			= broker_wire_new(BROKER_SEND, parts, 2, NULL, 0);
+	CHECK(broker_wire_send(pair[0], large, 0) == 0);
+	broker_wire_free(large);
+
+	struct broker_wire_ahead ahead = {0};
+	struct broker_wire_frame *frame;
+	CHECK(broker_wire_receive(pair[1], &ahead, &frame) == 1);
+	CHECK(frame->type == (BROKER_SEND | BROKER_FRAME_OOL));
+	CHECK(frame->inline_length == sizeof(head));
+	CHECK(memcmp(frame->payload, &head, sizeof(head)) == 0);
+	static char read_back[sizeof(head) + LARGE];
+	CHECK(broker_wire_read(frame, 0, read_back, sizeof(read_back)));
+	CHECK(memcmp(read_back + sizeof(head), body, sizeof(body)) == 0);
+	broker_wire_free(frame);
+
+	int unsealed = memfd_create("unsealed", MFD_CLOEXEC);
+	CHECK(write(unsealed, body, 8) == 8);
+	struct broker_frame header = {
+			.type = BROKER_SEND | BROKER_FRAME_OOL,
+			.length = 8,
+	};
+	send_datagram(pair[0], &header, sizeof(header), &unsealed, 1);
+	CHECK(close(unsealed) == 0);
+	CHECK(broker_wire_receive(pair[1], &ahead, &frame) == 1);
+	CHECK(!broker_wire_read(frame, 0, read_back, 8));
+	broker_wire_free(frame);
+	CHECK(close(pair[0]) == 0 && close(pair[1]) == 0);
 }
 
 static void
