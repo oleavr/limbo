@@ -41,6 +41,7 @@
 
 #include "codesign.h"
 #include "commpage.h"
+#include "credentials.h"
 #include "fs/device.h"
 #include "gid.h"
 #include "handler.h"
@@ -331,6 +332,12 @@ struct proc_regionwithpathinfo {
 
 static int pidinfo(int32_t pid, uint32_t flavor, uint64_t arg,
 		user_addr_t buffer, int32_t buffersize);
+static int list_linux_threads(const struct process *process, user_addr_t buffer,
+		int32_t buffersize);
+static int threadinfo_of_linux(const struct process *process, uint64_t id,
+		user_addr_t buffer, int32_t buffersize);
+static bool same_user(const struct process *process);
+static bool linux_thread_is_guest(int32_t pid, int32_t tid);
 static int threadinfo(uint64_t value, bool id, user_addr_t buffer,
 		int32_t buffersize);
 static void proc_threadinfo_of(const thread_extended_info_data_t *extended,
@@ -432,7 +439,10 @@ pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, user_addr_t buffer,
 	case PROC_PIDTHREADINFO:
 	case PROC_PIDTHREADID64INFO:
 		if (pid != getpid()) {
-			return _ESRCH;
+			return flavor == PROC_PIDTHREADID64INFO
+					? threadinfo_of_linux(&process, arg,
+							  buffer, buffersize)
+					: _ESRCH;
 		}
 		return threadinfo(arg, flavor == PROC_PIDTHREADID64INFO, buffer,
 				buffersize);
@@ -442,7 +452,10 @@ pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, user_addr_t buffer,
 			return _ENOMEM;
 		}
 		if (pid != getpid()) {
-			return _ESRCH;
+			return flavor == PROC_PIDLISTTHREADIDS
+					? list_linux_threads(&process, buffer,
+							  buffersize)
+					: _ESRCH;
 		}
 		size_t count = thread_guest_handles(buffer,
 				(size_t)buffersize / sizeof(uint64_t),
@@ -604,6 +617,78 @@ pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, user_addr_t buffer,
 	default:
 		unimplemented();
 	}
+}
+
+static int
+list_linux_threads(const struct process *process, user_addr_t buffer,
+		int32_t buffersize)
+{
+	if (!same_user(process)) {
+		return _EPERM;
+	}
+	char path[64];
+	snprintf(path, sizeof(path), "/proc/%d/task", process->pid);
+	DIR *dir = opendir(path);
+	if (dir == NULL) {
+		return _ESRCH;
+	}
+	uint64_t *ids = buffer;
+	size_t max = (size_t)buffersize / sizeof(ids[0]);
+	size_t count = 0;
+	struct dirent *entry;
+	while (count < max && (entry = readdir(dir)) != NULL) {
+		int32_t tid = (int32_t)strtol(entry->d_name, NULL, 10);
+		if (tid != 0 && linux_thread_is_guest(process->pid, tid)) {
+			ids[count++] = (uint64_t)tid;
+		}
+	}
+	closedir(dir);
+	return (int)(count * sizeof(ids[0]));
+}
+
+static int
+threadinfo_of_linux(const struct process *process, uint64_t id,
+		user_addr_t buffer, int32_t buffersize)
+{
+	struct proc_threadinfo *info = buffer;
+	if (buffersize < (int32_t)sizeof(*info)) {
+		return _ENOMEM;
+	}
+	if (!same_user(process)) {
+		return _EPERM;
+	}
+	thread_extended_info_data_t extended;
+	if (id > INT32_MAX || !linux_thread_is_guest(process->pid, (int32_t)id)
+			|| !thread_linux_extended_info(
+					process->pid, (pid_t)id, &extended)) {
+		return _ESRCH;
+	}
+	proc_threadinfo_of(&extended, info);
+	return sizeof(*info);
+}
+
+static bool
+same_user(const struct process *process)
+{
+	return geteuid() == 0 || process->uid[1] == geteuid();
+}
+
+static bool
+linux_thread_is_guest(int32_t pid, int32_t tid)
+{
+	char path[64];
+	snprintf(path, sizeof(path), "/proc/%d/task/%d/status", pid, tid);
+	FILE *status = fopen(path, "re");
+	if (status == NULL) {
+		return false;
+	}
+	char line[256];
+	unsigned long long blocked = 0;
+	while (fgets(line, sizeof(line), status) != NULL
+			&& sscanf(line, "SigBlk: %llx", &blocked) != 1) {
+	}
+	fclose(status);
+	return !((blocked >> (credentials_signal() - 1)) & 1);
 }
 
 static int

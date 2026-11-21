@@ -160,6 +160,9 @@ process_thread_lookup(int32_t pid, int32_t tid, struct process_thread *thread)
 	if (fields == NULL) {
 		return 1;
 	}
+	*fields = '\0';
+	snprintf(thread->comm, sizeof(thread->comm), "%s",
+			strchr(line, '(') + 1);
 	sscanf(fields + 2, "%c %*d %*d %*d %*u %*d %*u %*u %*u %*u %*u %lu %lu",
 			&thread->state, &thread->user_ticks,
 			&thread->system_ticks);
