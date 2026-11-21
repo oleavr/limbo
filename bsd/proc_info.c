@@ -27,11 +27,15 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <arpa/inet.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <mach/mach.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -300,6 +304,131 @@ struct pipe_fdinfo {
 };
 _Static_assert(sizeof(struct pipe_fdinfo) == 184, "pipe_fdinfo");
 
+struct sockbuf_info {
+	uint32_t sbi_cc;
+	uint32_t sbi_hiwat;
+	uint32_t sbi_mbcnt;
+	uint32_t sbi_mbmax;
+	uint32_t sbi_lowat;
+	int16_t sbi_flags;
+	int16_t sbi_timeo;
+};
+
+struct in_sockinfo {
+	int32_t insi_fport;
+	int32_t insi_lport;
+	uint64_t insi_gencnt;
+	uint32_t insi_flags;
+	uint32_t insi_flow;
+	uint8_t insi_vflag;
+	uint8_t insi_ip_ttl;
+	uint32_t rfu_1;
+	uint32_t insi_faddr[4];
+	uint32_t insi_laddr[4];
+	uint8_t insi_v4_tos;
+	struct {
+		uint8_t in6_hlim;
+		int32_t in6_cksum;
+		uint16_t in6_ifindex;
+		int16_t in6_hops;
+	} insi_v6;
+};
+
+struct tcp_sockinfo {
+	struct in_sockinfo tcpsi_ini;
+	int32_t tcpsi_state;
+	int32_t tcpsi_timer[4];
+	int32_t tcpsi_mss;
+	uint32_t tcpsi_flags;
+	uint32_t rfu_1;
+	uint64_t tcpsi_tp;
+};
+
+struct darwin_sockaddr_un {
+	uint8_t sun_len;
+	uint8_t sun_family;
+	char sun_path[104];
+};
+
+struct un_sockinfo {
+	uint64_t unsi_conn_so;
+	uint64_t unsi_conn_pcb;
+	union {
+		struct darwin_sockaddr_un ua_sun;
+		char ua_dummy[255];
+	} unsi_addr;
+	union {
+		struct darwin_sockaddr_un ua_sun;
+		char ua_dummy[255];
+	} unsi_caddr;
+};
+
+struct socket_fdinfo {
+	struct proc_fileinfo pfi;
+	struct socket_info {
+		struct vinfo_stat soi_stat;
+		uint64_t soi_so;
+		uint64_t soi_pcb;
+		int32_t soi_type;
+		int32_t soi_protocol;
+		int32_t soi_family;
+		int16_t soi_options;
+		int16_t soi_linger;
+		int16_t soi_state;
+		int16_t soi_qlen;
+		int16_t soi_incqlen;
+		int16_t soi_qlimit;
+		int16_t soi_timeo;
+		uint16_t soi_error;
+		uint32_t soi_oobmark;
+		struct sockbuf_info soi_rcv;
+		struct sockbuf_info soi_snd;
+		int32_t soi_kind;
+		uint32_t rfu_1;
+		union {
+			struct in_sockinfo pri_in;
+			struct tcp_sockinfo pri_tcp;
+			struct un_sockinfo pri_un;
+		} soi_proto;
+	} psi;
+};
+_Static_assert(sizeof(struct in_sockinfo) == 80, "in_sockinfo");
+_Static_assert(sizeof(struct tcp_sockinfo) == 120, "tcp_sockinfo");
+_Static_assert(sizeof(struct un_sockinfo) == 528, "un_sockinfo");
+_Static_assert(sizeof(struct socket_fdinfo) == 792, "socket_fdinfo");
+_Static_assert(offsetof(struct socket_fdinfo, psi.soi_proto) == 264,
+		"socket_info's protocol part");
+
+enum {
+	SOCKINFO_GENERIC,
+	SOCKINFO_IN,
+	SOCKINFO_TCP,
+	SOCKINFO_UN,
+};
+
+enum {
+	TSI_S_CLOSED,
+	TSI_S_LISTEN,
+	TSI_S_SYN_SENT,
+	TSI_S_SYN_RECEIVED,
+	TSI_S_ESTABLISHED,
+	TSI_S_CLOSE_WAIT,
+	TSI_S_FIN_WAIT_1,
+	TSI_S_CLOSING,
+	TSI_S_LAST_ACK,
+	TSI_S_FIN_WAIT_2,
+	TSI_S_TIME_WAIT,
+};
+
+#define INI_IPV4             0x1
+#define INI_IPV6             0x2
+#define SOI_S_ISCONNECTED    0x2
+#define DARWIN_SO_ACCEPTCONN 0x2
+#define DARWIN_AF_INET       2
+#define DARWIN_AF_INET6      30
+#define DARWIN_SOCK_STREAM   1
+#define DARWIN_SOCK_DGRAM    2
+
 struct proc_regioninfo {
 	uint32_t pri_protection;
 	uint32_t pri_max_protection;
@@ -358,6 +487,11 @@ static uint32_t file_table_size(int32_t pid);
 static int listfds(int32_t pid, void *buffer, int32_t buffersize);
 static int fdinfo(int32_t pid, uint32_t flavor, int32_t fd, void *buffer,
 		int32_t buffersize);
+static int socket_fdinfo(
+		int32_t pid, int32_t fd, void *buffer, int32_t buffersize);
+static bool inet_socket_info(const char *proc_dir, unsigned long inode,
+		struct socket_info *info);
+static void put_address(uint32_t address[4], const char *hex, bool v6);
 static int pipe_fdinfo(
 		int32_t pid, int32_t fd, void *buffer, int32_t buffersize);
 static int kqueue_fdinfo(
@@ -1042,6 +1176,7 @@ fdinfo(int32_t pid, uint32_t flavor, int32_t fd, void *buffer,
 {
 	enum {
 		PROC_PIDFDVNODEPATHINFO = 2,
+		PROC_PIDFDSOCKETINFO = 3,
 		PROC_PIDFDPIPEINFO = 6,
 		PROC_PIDFDKQUEUEINFO = 7,
 	};
@@ -1052,6 +1187,9 @@ fdinfo(int32_t pid, uint32_t flavor, int32_t fd, void *buffer,
 	_Static_assert(sizeof(struct vnode_fdinfowithpath) == 1200,
 			"vnode_fdinfowithpath");
 
+	if (flavor == PROC_PIDFDSOCKETINFO) {
+		return socket_fdinfo(pid, fd, buffer, buffersize);
+	}
 	if (flavor == PROC_PIDFDPIPEINFO) {
 		return pipe_fdinfo(pid, fd, buffer, buffersize);
 	}
@@ -1093,6 +1231,133 @@ fdinfo(int32_t pid, uint32_t flavor, int32_t fd, void *buffer,
 	}
 	info->pfi.fi_type = PROX_FDTYPE_VNODE;
 	return sizeof(*info);
+}
+
+static int
+socket_fdinfo(int32_t pid, int32_t fd, void *buffer, int32_t buffersize)
+{
+	struct socket_fdinfo *info = buffer;
+	if (buffersize < (int32_t)sizeof(*info)) {
+		return _ENOMEM;
+	}
+	char proc_dir[64 + NAME_MAX], path[80 + NAME_MAX], link[64];
+	process_proc_dir(pid, proc_dir, sizeof(proc_dir));
+	snprintf(path, sizeof(path), "%s/fd/%d", proc_dir, fd);
+	ssize_t length = readlink(path, link, sizeof(link) - 1);
+	if (length == -1) {
+		return _EBADF;
+	}
+	link[length] = '\0';
+	unsigned long inode;
+	if (sscanf(link, "socket:[%lu]", &inode) != 1) {
+		return _ENOTSOCK;
+	}
+	memset(info, 0, sizeof(*info));
+	info->pfi.fi_openflags = FREAD | FWRITE;
+	info->pfi.fi_type = PROX_FDTYPE_SOCKET;
+	info->psi.soi_so = inode;
+	info->psi.soi_pcb = inode;
+	inet_socket_info(proc_dir, inode, &info->psi);
+	return sizeof(*info);
+}
+
+static bool
+inet_socket_info(const char *proc_dir, unsigned long inode,
+		struct socket_info *info)
+{
+	static const struct {
+		const char *name;
+		bool tcp;
+		bool v6;
+	} tables[] = {
+			{"tcp", true, false},
+			{"tcp6", true, true},
+			{"udp", false, false},
+			{"udp6", false, true},
+	};
+	static const int32_t tcp_states[] = {
+			[TCP_ESTABLISHED] = TSI_S_ESTABLISHED,
+			[TCP_SYN_SENT] = TSI_S_SYN_SENT,
+			[TCP_SYN_RECV] = TSI_S_SYN_RECEIVED,
+			[TCP_FIN_WAIT1] = TSI_S_FIN_WAIT_1,
+			[TCP_FIN_WAIT2] = TSI_S_FIN_WAIT_2,
+			[TCP_TIME_WAIT] = TSI_S_TIME_WAIT,
+			[TCP_CLOSE] = TSI_S_CLOSED,
+			[TCP_CLOSE_WAIT] = TSI_S_CLOSE_WAIT,
+			[TCP_LAST_ACK] = TSI_S_LAST_ACK,
+			[TCP_LISTEN] = TSI_S_LISTEN,
+			[TCP_CLOSING] = TSI_S_CLOSING,
+	};
+	for (size_t i = 0; i < sizeof(tables) / sizeof(tables[0]); i++) {
+		bool tcp = tables[i].tcp, v6 = tables[i].v6;
+		char path[96 + NAME_MAX];
+		snprintf(path, sizeof(path), "%s/net/%s", proc_dir,
+				tables[i].name);
+		FILE *file = fopen(path, "re");
+		if (file == NULL) {
+			continue;
+		}
+		char line[512], local[33], remote[33];
+		unsigned int local_port, remote_port, state;
+		unsigned long sending, receiving, found = 0;
+		while (found != inode
+				&& fgets(line, sizeof(line), file) != NULL) {
+			if (sscanf(line,
+					    " %*d: %32[0-9A-Fa-f]:%x "
+					    "%32[0-9A-Fa-f]:%x %x %lx:%lx "
+					    "%*x:%*x %*x %*u %*u %lu",
+					    local, &local_port, remote,
+					    &remote_port, &state, &sending,
+					    &receiving, &found)
+					!= 8) {
+				found = 0;
+			}
+		}
+		fclose(file);
+		if (found != inode) {
+			continue;
+		}
+		bool listening = tcp && state == TCP_LISTEN;
+		info->soi_type = tcp ? DARWIN_SOCK_STREAM : DARWIN_SOCK_DGRAM;
+		info->soi_protocol = tcp ? IPPROTO_TCP : IPPROTO_UDP;
+		info->soi_family = v6 ? DARWIN_AF_INET6 : DARWIN_AF_INET;
+		info->soi_kind = tcp ? SOCKINFO_TCP : SOCKINFO_IN;
+		struct in_sockinfo *in = &info->soi_proto.pri_in;
+		in->insi_fport = htons(remote_port);
+		in->insi_lport = htons(local_port);
+		in->insi_vflag = v6 ? INI_IPV6 : INI_IPV4;
+		put_address(in->insi_faddr, remote, v6);
+		put_address(in->insi_laddr, local, v6);
+		if (!tcp) {
+			return true;
+		}
+		if (listening) {
+			info->soi_options = DARWIN_SO_ACCEPTCONN;
+			info->soi_qlen = (int16_t)receiving;
+		} else {
+			info->soi_rcv.sbi_cc = (uint32_t)receiving;
+			info->soi_snd.sbi_cc = (uint32_t)sending;
+		}
+		if (state == TCP_ESTABLISHED) {
+			info->soi_state = SOI_S_ISCONNECTED;
+		}
+		info->soi_proto.pri_tcp.tcpsi_state = state <= TCP_CLOSING
+				? tcp_states[state]
+				: TSI_S_CLOSED;
+		return true;
+	}
+	return false;
+}
+
+static void
+put_address(uint32_t address[4], const char *hex, bool v6)
+{
+	if (v6) {
+		sscanf(hex, "%8x%8x%8x%8x", &address[0], &address[1],
+				&address[2], &address[3]);
+	} else {
+		sscanf(hex, "%8x", &address[3]);
+	}
 }
 
 static int
