@@ -51,6 +51,7 @@
 #include "bsd/signals.h"
 #include "eventlink.h"
 #include "ipc.h"
+#include "ipc_remote.h"
 #include "libinfo.h"
 #include "mach_vm.h"
 #include "trace.h"
@@ -112,19 +113,6 @@ struct dead_name_request {
 	struct ipc_port *notify;
 };
 
-enum remote_notice_kind {
-	REMOTE_NOTICE_RELEASE,
-	REMOTE_NOTICE_ADD,
-	REMOTE_NOTICE_DEAD,
-	REMOTE_NOTICE_SEND_ONCE,
-};
-
-struct remote_notice {
-	uint32_t kind;
-	uint32_t guest_id;
-	uint64_t count;
-};
-
 struct pending_notice {
 	struct pending_notice *next;
 	mach_msg_id_t id;
@@ -133,16 +121,6 @@ struct pending_notice {
 	mach_port_mscount_t mscount;
 	uint64_t global_id;
 	struct remote_notice notice;
-};
-
-struct remote_header {
-	uint32_t message_size;
-	mach_msg_type_name_t dest_disposition;
-	mach_msg_type_name_t reply_disposition;
-	uint64_t reply_global_id;
-	pid_t sender_pid;
-	uint32_t descriptor_count;
-	uint32_t sender_guest_id;
 };
 
 struct remote_send_once {
