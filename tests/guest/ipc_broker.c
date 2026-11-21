@@ -412,6 +412,17 @@ call(void)
 			mach_task_self(), &given, vm_page_size, VM_FLAGS_FIXED);
 	CHECK(kr == KERN_SUCCESS);
 
+	mach_port_t notify;
+	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &notify);
+	mach_port_t previous;
+	kr = mach_port_request_notification(mach_task_self(), carried,
+			MACH_NOTIFY_NO_SENDERS, 0, notify,
+			MACH_MSG_TYPE_MAKE_SEND_ONCE, &previous);
+	CHECK(kr == KERN_SUCCESS);
+	kr = mach_msg(&message.reply.Head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			sizeof(message), notify, 100, MACH_PORT_NULL);
+	CHECK(kr == MACH_RCV_TIMED_OUT);
+
 	move_receive_right_away(service);
 }
 
