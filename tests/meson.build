@@ -5,6 +5,7 @@ sysroot_test = executable('sysroot_test',
   c_args: ['-Wno-unused-parameter'],
 )
 test('sysroot', sysroot_test, suite: 'unit')
+test('sysroot_mounts', sysroot_test, args: ['mounts'], suite: 'unit')
 
 signo_test = executable('signo_test',
   sources: ['signo_test.c', '../bsd/signo.c'],

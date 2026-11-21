@@ -41,6 +41,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 
 #include "sysroot.h"
@@ -54,12 +55,19 @@
 
 #define DATA_VOLUME "/System/Volumes/Data"
 
+#define DEVICES_MAX     8
+#define DEVICE_ID_SHIFT 40
+
 static char root[PATH_MAX];
 static dev_t root_dev;
 static ino_t root_ino;
 static size_t root_length;
 static char too_long[PATH_MAX + 1];
+static dev_t devices[DEVICES_MAX];
+static size_t device_count;
 
+static void note_devices(void);
+static const char *unescaped(char *field);
 static bool leads_on(
 		int dirfd, const char *path, const char *host, char *target);
 static const char *host_path(const char *path, int flags, char *buffer);
@@ -88,8 +96,60 @@ sysroot_open(void)
 		root_dev = s.st_dev;
 		root_ino = s.st_ino;
 	}
+	note_devices();
 
 	return 0;
+}
+
+static void
+note_devices(void)
+{
+	devices[0] = root_dev;
+	device_count = 1;
+	FILE *file = fopen("/proc/self/mountinfo", "re");
+	if (file == NULL) {
+		return;
+	}
+	char *line = NULL;
+	size_t capacity = 0;
+	while (getline(&line, &capacity, file) > 0) {
+		unsigned major_number, minor_number;
+		char point[PATH_MAX];
+		if (sscanf(line, "%*u %*u %u:%u %*s %4095s", &major_number,
+				    &minor_number,
+				    point) != 3
+				|| !under(unescaped(point), root)) {
+			continue;
+		}
+		dev_t dev = makedev(major_number, minor_number);
+		size_t i = 0;
+		while (i < device_count && devices[i] != dev) {
+			i++;
+		}
+		if (i == device_count && device_count < DEVICES_MAX) {
+			devices[device_count++] = dev;
+		}
+	}
+	free(line);
+	fclose(file);
+}
+
+static const char *
+unescaped(char *field)
+{
+	char *out = field;
+	for (const char *in = field; *in != '\0'; in++) {
+		if (in[0] == '\\' && isdigit(in[1]) && isdigit(in[2])
+				&& isdigit(in[3])) {
+			*out++ = (char)((in[1] - '0') << 6 | (in[2] - '0') << 3
+					| (in[3] - '0'));
+			in += 3;
+		} else {
+			*out++ = *in;
+		}
+	}
+	*out = '\0';
+	return field;
 }
 
 const char *
@@ -322,5 +382,21 @@ sysroot_file_id(dev_t dev, uint64_t ino)
 	if (root_length != 0 && dev == root_dev && ino == root_ino) {
 		return 2;
 	}
+	for (size_t i = 1; i < device_count; i++) {
+		if (devices[i] == dev) {
+			return ino | ((uint64_t)i << DEVICE_ID_SHIFT);
+		}
+	}
 	return ino;
+}
+
+dev_t
+sysroot_device(dev_t dev)
+{
+	for (size_t i = 1; i < device_count; i++) {
+		if (devices[i] == dev) {
+			return root_dev;
+		}
+	}
+	return dev;
 }

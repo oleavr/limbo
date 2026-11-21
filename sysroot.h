@@ -38,3 +38,4 @@ const char *sysroot_creation_path(
 		int dirfd, const char *path, int flags, char *buffer);
 const char *sysroot_guest_path(const char *path);
 uint64_t sysroot_file_id(dev_t dev, uint64_t ino);
+dev_t sysroot_device(dev_t dev);

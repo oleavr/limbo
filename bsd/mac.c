@@ -470,7 +470,8 @@ sandbox_extension_issue(struct sandbox_extension_issue_args *args)
 		}
 		length += snprintf(rest + length, sizeof(rest) - length,
 				";%s;%08x;%016llx;01;%s", exists ? "01" : "00",
-				(unsigned)darwin_device(s.st_dev),
+				(unsigned)darwin_device(
+						sysroot_device(s.st_dev)),
 				(unsigned long long)s.st_ino, args->data);
 	} else if (args->data != NULL) {
 		length += snprintf(rest + length, sizeof(rest) - length, ";%s",

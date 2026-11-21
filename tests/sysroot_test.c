@@ -34,18 +34,27 @@
 #include <fcntl.h>
 #include <ftw.h>
 #include <limits.h>
+#include <sched.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include "check.h"
 #include "sysroot.h"
 
+#define SKIP 77
+
 static char root[PATH_MAX];
 
 static void populate(void);
+static bool mount_volume(void);
+static bool write_file(const char *path, const char *text);
+static void check_devices(void);
 static void check_too_long(void);
 static void make_dir(const char *path);
 static void make_file(const char *path);
@@ -57,15 +66,24 @@ static int remove_entry(const char *path, const struct stat *st, int type,
 		struct FTW *ftw);
 
 int
-main(void)
+main(int argc, char *argv[])
 {
-	char template[] = "/tmp/limbo-sysroot-XXXXXX";
+	bool mounts = argc == 2 && strcmp(argv[1], "mounts") == 0;
+	char template[] = "/tmp/limbo-sysroot test-XXXXXX";
 	CHECK(mkdtemp(template) != NULL);
 	CHECK(realpath(template, root) != NULL);
 	populate();
+	if (mounts && !mount_volume()) {
+		printf("skipping: no mount in a user namespace here\n");
+		CHECK(nftw(root, remove_entry, 16, FTW_DEPTH | FTW_PHYS) == 0);
+		return SKIP;
+	}
 
 	CHECK(setenv("LIMBO_SYSROOT", template, 1) == 0);
 	CHECK(sysroot_open() == 0);
+	if (mounts) {
+		check_devices();
+	}
 
 	check_host_path("/System/Library/file", 0, "/System/Library/file");
 	check_host_path("/absolute/file", 0, "/System/Library/file");
@@ -131,6 +149,56 @@ populate(void)
 	make_link("dangling", "/dangling-chain");
 	make_link("../../new", "/dangling-outside");
 	make_dir("/proc");
+}
+
+static bool
+mount_volume(void)
+{
+	char uid_map[32], gid_map[32], point[PATH_MAX * 2];
+	snprintf(uid_map, sizeof(uid_map), "0 %u 1", getuid());
+	snprintf(gid_map, sizeof(gid_map), "0 %u 1", getgid());
+	make_dir("/Volumes");
+	snprintf(point, sizeof(point), "%s/Volumes", root);
+	if (unshare(CLONE_NEWUSER | CLONE_NEWNS) == -1
+			|| !write_file("/proc/self/setgroups", "deny")
+			|| !write_file("/proc/self/uid_map", uid_map)
+			|| !write_file("/proc/self/gid_map", gid_map)
+			|| mount("none", point, "tmpfs", 0, NULL) == -1) {
+		return false;
+	}
+	make_file("/Volumes/file");
+	return true;
+}
+
+static bool
+write_file(const char *path, const char *text)
+{
+	int fd = open(path, O_WRONLY);
+	ssize_t length = strlen(text);
+	bool written = fd != -1 && write(fd, text, length) == length;
+	close(fd);
+	return written;
+}
+
+static void
+check_devices(void)
+{
+	char path[PATH_MAX * 2];
+	struct stat top, own, mounted;
+	CHECK(stat(root, &top) == 0);
+	snprintf(path, sizeof(path), "%s/System/Library/file", root);
+	CHECK(stat(path, &own) == 0);
+	snprintf(path, sizeof(path), "%s/Volumes/file", root);
+	CHECK(stat(path, &mounted) == 0);
+	CHECK(mounted.st_dev != top.st_dev);
+	CHECK(sysroot_device(mounted.st_dev) == top.st_dev);
+	CHECK(sysroot_device(own.st_dev) == top.st_dev);
+	CHECK(sysroot_file_id(own.st_dev, own.st_ino) == own.st_ino);
+	CHECK(sysroot_file_id(mounted.st_dev, mounted.st_ino)
+			== (mounted.st_ino | (uint64_t)1 << 40));
+	CHECK(sysroot_file_id(top.st_dev, top.st_ino) == 2);
+	snprintf(path, sizeof(path), "%s/Volumes", root);
+	CHECK(umount(path) == 0);
 }
 
 static void
