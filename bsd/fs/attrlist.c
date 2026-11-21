@@ -50,6 +50,7 @@
 #include "bsd_flags.h"
 #include "device.h"
 #include "fileid.h"
+#include "protection.h"
 #include "purgeable.h"
 #include "sysroot.h"
 
@@ -539,7 +540,7 @@ pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 	}
 
 	if (returned.commonattr & ATTR_CMN_DATA_PROTECT_FLAGS) {
-		offset = pack_u32(buffer, offset, 0);
+		offset = pack_u32(buffer, offset, protection_get(fd));
 		commonattr &= ~ATTR_CMN_DATA_PROTECT_FLAGS;
 	}
 
