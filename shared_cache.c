@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -47,9 +48,9 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <sys/statfs.h>
 #include <unistd.h>
 
+#include "bsd/fs/device.h"
 #include "shared_cache.h"
 #include "sidt.h"
 #include "sysroot.h"
@@ -303,9 +304,8 @@ map_dynamic_data(int f, const char *path, dyld_cache_header_t *header)
 		return 0;
 	}
 
-	struct statfs fs;
 	struct stat st;
-	if (fstatfs(f, &fs) == -1 || fstat(f, &st) == -1) {
+	if (fstat(f, &st) == -1) {
 		perror("stat");
 		return 1;
 	}
@@ -321,8 +321,8 @@ map_dynamic_data(int f, const char *path, dyld_cache_header_t *header)
 	}
 
 	strcpy(data->magic, "dyld_data    v4");
-	memcpy(&data->fsId, &fs.f_fsid, sizeof(data->fsId));
-	data->fsObjId = st.st_ino;
+	data->fsId = (uint32_t)darwin_device(sysroot_device(st.st_dev));
+	data->fsObjId = sysroot_file_id(st.st_dev, st.st_ino);
 	data->cachePathOffset
 			= offsetof(dyld_cache_dynamic_data_header_t, strings);
 	data->cachePathSize = strlen(path) + 1;
