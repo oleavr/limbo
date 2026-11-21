@@ -1965,7 +1965,7 @@ int
 sys_mkdir(user_addr_t path, int mode)
 {
 	char buffer[PATH_MAX];
-	return errno_map(mkdir(
+	return errno_map(acl_mkdirat(AT_FDCWD,
 			sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer),
 			mode));
 }
@@ -3883,7 +3883,7 @@ sys_mkdirat(int fd, user_addr_t path, int mode)
 		return _EFAULT;
 	}
 	char buffer[PATH_MAX];
-	return errno_map(mkdirat(at_fd(fd),
+	return errno_map(acl_mkdirat(at_fd(fd),
 			sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer),
 			mode));
 }

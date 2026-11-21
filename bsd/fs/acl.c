@@ -238,6 +238,24 @@ inherit(int fd, const struct acl_list *parent)
 	}
 }
 
+int
+acl_mkdirat(int dirfd, const char *host_path, mode_t mode)
+{
+	struct acl_list parent;
+	bool gives = parent_gives(dirfd, host_path, &parent);
+	if (mkdirat(dirfd, host_path, mode) == -1) {
+		return -1;
+	}
+	int fd = gives ? openat(dirfd, host_path,
+					 O_PATH | O_NOFOLLOW | O_CLOEXEC)
+		       : -1;
+	if (fd != -1) {
+		inherit(fd, &parent);
+		close(fd);
+	}
+	return 0;
+}
+
 size_t
 acl_filesec_at(int dirfd, const char *host_path, int at_flags, void *buffer,
 		size_t size)
