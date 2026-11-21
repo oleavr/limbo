@@ -199,6 +199,7 @@ main(void)
 	check_structure("net.inet.tcp.pcblist_n", "S,xtcpcb_n");
 	check_structure("net.inet.udp.pcblist_n", "S,xinpcb_n");
 	check_structure("net.inet.tcp.stats", "S,tcpstat");
+	check_structure("net.inet.udp.stats", "S,udpstat");
 	check_pipe_info();
 	check_kqueue_info();
 	check_workqueue();

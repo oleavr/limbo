@@ -36,6 +36,8 @@
 #include <netinet/tcp.h>
 #include <netinet/tcp_fsm.h>
 #include <netinet/tcp_var.h>
+#include <netinet/udp.h>
+#include <netinet/udp_var.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -395,7 +397,9 @@ check_statistics(void)
 			.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
 	};
 	struct tcpstat tcp_before, tcp;
+	struct udpstat udp_before, udp;
 	read_statistics("net.inet.tcp.stats", &tcp_before, sizeof(tcp_before));
+	read_statistics("net.inet.udp.stats", &udp_before, sizeof(udp_before));
 
 	int listener = socket(AF_INET, SOCK_STREAM, 0);
 	CHECK(listener != -1);
@@ -410,8 +414,20 @@ check_statistics(void)
 			== 0);
 	int accepted = accept(listener, NULL, NULL);
 	CHECK(accepted != -1);
+	int receiver = socket(AF_INET, SOCK_DGRAM, 0);
+	CHECK(receiver != -1);
+	CHECK(bind(receiver, (struct sockaddr *)&loopback, sizeof(loopback))
+			== 0);
+	struct sockaddr_in receiving = loopback;
+	receiving.sin_port = bound_port(receiver);
+	CHECK(sendto(receiver, "x", 1, 0, (struct sockaddr *)&receiving,
+			      sizeof(receiving))
+			== 1);
+	char byte;
+	CHECK(read(receiver, &byte, 1) == 1);
 
 	read_statistics("net.inet.tcp.stats", &tcp, sizeof(tcp));
+	read_statistics("net.inet.udp.stats", &udp, sizeof(udp));
 	if (getuid() == 0) {
 		CHECK(tcp.tcps_connattempt - tcp_before.tcps_connattempt >= 1);
 		CHECK(tcp.tcps_accepts - tcp_before.tcps_accepts >= 1);
@@ -421,9 +437,11 @@ check_statistics(void)
 		struct tcpstat none = {0};
 		CHECK(memcmp(&tcp, &none, sizeof(tcp)) == 0);
 	}
+	CHECK(udp.udps_ipackets - udp_before.udps_ipackets >= 1);
+	CHECK(udp.udps_opackets - udp_before.udps_opackets >= 1);
 
-	CHECK(close(accepted) == 0 && close(client) == 0);
-	CHECK(close(listener) == 0);
+	CHECK(close(receiver) == 0 && close(accepted) == 0);
+	CHECK(close(client) == 0 && close(listener) == 0);
 }
 
 static void
