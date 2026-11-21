@@ -3250,11 +3250,15 @@ _Static_assert(sizeof(struct darwin_aiocb) == 80, "struct aiocb");
 #define DARWIN_NSIG            32
 #define DARWIN_AIO_ALLDONE     1
 #define DARWIN_AIO_NOTCANCELED 4
+#define DARWIN_O_SYNC          0x80
+#define DARWIN_O_DSYNC         0x400000
 #define DARWIN_AIO_PROCESS_MAX 256
 
 enum aio_kind {
 	AIO_READ,
 	AIO_WRITE,
+	AIO_FSYNC,
+	AIO_DSYNC,
 };
 
 struct aio_request {
@@ -3292,7 +3296,13 @@ static void aio_notify(const struct darwin_sigevent *event);
 int
 sys_aio_fsync(int op, user_addr_t aiocbp)
 {
-	unimplemented();
+	if (op == DARWIN_O_SYNC || op == 0) {
+		return aio_submit(aiocbp, AIO_FSYNC);
+	}
+	if (op == DARWIN_O_DSYNC) {
+		return aio_submit(aiocbp, AIO_DSYNC);
+	}
+	return _EINVAL;
 }
 
 user_ssize_t
@@ -3457,8 +3467,9 @@ sys_lio_listio(int mode, user_addr_t aiocblist, int nent, user_addr_t sigp)
 static int
 aio_validate(const struct darwin_aiocb *cb, enum aio_kind kind)
 {
-	if (cb->aio_nbytes > INT_MAX || cb->aio_buf == 0
-			|| cb->aio_offset < 0) {
+	if ((kind == AIO_READ || kind == AIO_WRITE)
+			&& (cb->aio_nbytes > INT_MAX || cb->aio_buf == 0
+					|| cb->aio_offset < 0)) {
 		return _EINVAL;
 	}
 	if (!aio_sigevent_valid(&cb->aio_sigevent)) {
@@ -3517,6 +3528,12 @@ aio_complete(uint64_t aiocb, const struct darwin_aiocb *cb, enum aio_kind kind)
 		break;
 	case AIO_WRITE:
 		result = aio_transfer(cb, true);
+		break;
+	case AIO_FSYNC:
+		result = fsync(cb->aio_fildes);
+		break;
+	case AIO_DSYNC:
+		result = fdatasync(cb->aio_fildes);
 		break;
 	}
 	int error = result < 0 ? -err_map(errno) : 0;

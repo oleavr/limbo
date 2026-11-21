@@ -50,6 +50,7 @@ static void check_waiters(void);
 static void check_refused(void);
 static void check_suspend(void);
 static void check_cancel(void);
+static void check_fsync(void);
 static void check_signal(void);
 static void check_limit(void);
 static void wait_for(struct aiocb *cb);
@@ -69,6 +70,7 @@ main(void)
 	check_append();
 	check_waiters();
 	check_refused();
+	check_fsync();
 	check_signal();
 	check_limit();
 	printf("aio: ok\n");
@@ -327,6 +329,23 @@ check_refused(void)
 	cb.aio_sigevent.sigev_notify = SIGEV_THREAD;
 	CHECK(aio_write(&cb) == -1 && errno == EINVAL);
 	CHECK(aio_error(&cb) == -1 && errno == EINVAL);
+}
+
+static void
+check_fsync(void)
+{
+	struct aiocb cb = {.aio_fildes = file};
+	int ops[] = {0, O_SYNC, O_DSYNC};
+	for (size_t i = 0; i < sizeof(ops) / sizeof(ops[0]); i++) {
+		CHECK(aio_fsync(ops[i], &cb) == 0);
+		wait_for(&cb);
+		CHECK(aio_error(&cb) == 0 && aio_return(&cb) == 0);
+	}
+	CHECK(aio_fsync(O_NONBLOCK, &cb) == -1 && errno == EINVAL);
+	cb.aio_fildes = open("/dev/null", O_RDONLY);
+	CHECK(cb.aio_fildes != -1);
+	CHECK(aio_fsync(O_SYNC, &cb) == -1 && errno == EBADF);
+	CHECK(close(cb.aio_fildes) == 0);
 }
 
 static void
