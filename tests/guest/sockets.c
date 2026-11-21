@@ -312,6 +312,10 @@ check_pcblist(void)
 	CHECK(accepted != -1 && write(client, "hello", 5) == 5);
 	char byte;
 	CHECK(recv(accepted, &byte, 1, MSG_PEEK) == 1);
+	int datagram = socket(AF_INET, SOCK_DGRAM, 0);
+	CHECK(datagram != -1);
+	CHECK(bind(datagram, (struct sockaddr *)&loopback, sizeof(loopback))
+			== 0);
 
 	size_t size;
 	uint8_t *list = read_list("net.inet.tcp.pcblist_n", &size);
@@ -358,7 +362,22 @@ check_pcblist(void)
 			== -1);
 	CHECK(errno == ENOMEM && size == sizeof(struct xinpgen));
 
+	list = read_list("net.inet.udp.pcblist_n", &size);
+	record = find_socket(list, size, bound_port(datagram), 0);
+	CHECK(record != NULL);
+	record = next_record(record, XSO_SOCKET);
+	CHECK(field16(record, SOCKET_TYPE) == SOCK_DGRAM);
+	CHECK(field32(record, SOCKET_PROTOCOL) == IPPROTO_UDP);
+	record = next_record(record, XSO_RCVBUF);
+	record = next_record(record, XSO_SNDBUF);
+	record = next_record(record, XSO_STATS);
+	record += (field32(record, RECORD_LENGTH) + 7) & ~7u;
+	CHECK(record == list + size - sizeof(struct xinpgen)
+			|| field32(record, RECORD_KIND) == XSO_INPCB);
+	free(list);
+
 	CHECK(close(accepted) == 0 && close(client) == 0);
+	CHECK(close(datagram) == 0);
 	CHECK(close(listener) == 0);
 }
 

@@ -224,6 +224,7 @@ static int read_osproductversion(void *old, size_t *oldlenp);
 static const char *system_version(const char *key, const char *otherwise,
 		char *value, size_t size);
 static int read_tcp_pcblist(void *old, size_t *oldlenp);
+static int read_udp_pcblist(void *old, size_t *oldlenp);
 static int read_ip_ttl(void *old, size_t *oldlenp);
 static int read_pressure_level(void *old, size_t *oldlenp);
 
@@ -293,6 +294,8 @@ static const struct sysctl_node nodes[] = {
 		{"vm.self_region_info_flags", {0, 0}, SYSCTL_INT, .number = 0},
 		{"net.inet.tcp.pcblist_n", {0, 0}, SYSCTL_READER,
 				.reader = read_tcp_pcblist},
+		{"net.inet.udp.pcblist_n", {0, 0}, SYSCTL_READER,
+				.reader = read_udp_pcblist},
 		{"net.inet.ip.ttl", {0, 0}, SYSCTL_READER,
 				.reader = read_ip_ttl},
 
@@ -737,6 +740,9 @@ oid_format(const int *oid, void *old, size_t *oldlenp)
 		} else if (node->reader == read_tcp_pcblist) {
 			kind = CTLTYPE_OPAQUE;
 			format = "S,xtcpcb_n";
+		} else if (node->reader == read_udp_pcblist) {
+			kind = CTLTYPE_OPAQUE;
+			format = "S,xinpcb_n";
 		} else if (node->reader == read_hostname
 				|| node->reader == read_bootsessionuuid
 				|| node->reader == read_sandbox_sentinel
@@ -1180,6 +1186,12 @@ static int
 read_tcp_pcblist(void *old, size_t *oldlenp)
 {
 	return pcblist_answer(true, old, oldlenp);
+}
+
+static int
+read_udp_pcblist(void *old, size_t *oldlenp)
+{
+	return pcblist_answer(false, old, oldlenp);
 }
 
 static int
