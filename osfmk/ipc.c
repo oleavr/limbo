@@ -283,6 +283,7 @@ static void tell_holders_dead(struct ipc_port *port);
 static void remember_send_once(mach_port_name_t port, uint32_t guest_id);
 static uint32_t forget_send_onces(
 		mach_port_name_t port, uint32_t guest_id, uint64_t count);
+static void send_onces_gone(uint32_t guest_id);
 static void receive_notice(
 		uint64_t dest_global_id, const struct remote_notice *notice);
 static void send_remote_notice(const struct pending_notice *notice);
@@ -1558,6 +1559,7 @@ ipc_remote_guest_gone(uint32_t guest_id)
 {
 	pthread_mutex_lock(&lock);
 	remember_gone(guest_id);
+	send_onces_gone(guest_id);
 	for (uint32_t i = 1; i < entry_count; i++) {
 		struct ipc_port *port = entries[i].port;
 		if (port != NULL && port->remote
@@ -1572,6 +1574,25 @@ ipc_remote_guest_gone(uint32_t guest_id)
 	}
 	pthread_mutex_unlock(&lock);
 	flush_notices();
+}
+
+static void
+send_onces_gone(uint32_t guest_id)
+{
+	struct remote_send_once **link = &remote_send_onces;
+	while (*link != NULL) {
+		struct remote_send_once *record = *link;
+		if (record->guest_id != guest_id) {
+			link = &record->next;
+			continue;
+		}
+		*link = record->next;
+		struct ipc_entry *entry = lookup(record->port);
+		if (entry != NULL) {
+			queue_send_once_notifications(entry, 1);
+		}
+		free(record);
+	}
 }
 
 static void
