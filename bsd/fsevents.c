@@ -468,7 +468,7 @@ make_item(int mount_fd, struct file_handle *directory, const char *name,
 					   &s)
 					== 0) {
 		item->has_info = true;
-		item->dev = darwin_device(s.st_dev);
+		item->dev = darwin_device(sysroot_device(s.st_dev));
 		item->ino = sysroot_file_id(s.st_dev, s.st_ino);
 		item->mode = (int32_t)s.st_mode;
 		item->uid = s.st_uid;
@@ -476,7 +476,7 @@ make_item(int mount_fd, struct file_handle *directory, const char *name,
 		char root[PATH_MAX];
 		if (stat(sysroot_host_path("/", 0, root), &s) == 0) {
 			item->has_info = true;
-			item->dev = darwin_device(s.st_dev);
+			item->dev = darwin_device(sysroot_device(s.st_dev));
 			item->ino = 0;
 			item->mode = is_dir ? S_IFDIR : S_IFREG;
 		}

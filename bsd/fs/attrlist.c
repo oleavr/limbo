@@ -364,14 +364,15 @@ pack_attributes(int fd, const struct __darwin_attrlist *alistp,
 	}
 
 	if (returned.commonattr & ATTR_CMN_DEVID) {
-		__darwin_dev_t d = darwin_device(s.st_dev);
+		__darwin_dev_t d = darwin_device(sysroot_device(s.st_dev));
 		memcpy(buffer + offset, &d, sizeof(d));
 		offset += sizeof(d);
 		commonattr &= ~ATTR_CMN_DEVID;
 	}
 
 	if (returned.commonattr & ATTR_CMN_FSID) {
-		offset = pack_u32(buffer, offset, darwin_device(s.st_dev));
+		offset = pack_u32(buffer, offset,
+				darwin_device(sysroot_device(s.st_dev)));
 		offset = pack_u32(buffer, offset, DARWIN_FSTYPE_APFS);
 		commonattr &= ~ATTR_CMN_FSID;
 	}

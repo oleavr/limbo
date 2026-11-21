@@ -1054,7 +1054,7 @@ fill_vnode_info(const char *file, const struct stat *st,
 {
 	memset(info, 0, sizeof(*info));
 	struct vinfo_stat *vst = &info->vi_stat;
-	vst->vst_dev = darwin_device(st->st_dev);
+	vst->vst_dev = darwin_device(sysroot_device(st->st_dev));
 	vst->vst_mode = st->st_mode;
 	vst->vst_nlink = st->st_nlink;
 	vst->vst_ino = sysroot_file_id(st->st_dev, st->st_ino);

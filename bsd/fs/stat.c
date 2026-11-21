@@ -183,8 +183,8 @@ stat_at(int fd, const char *path, int flags, struct __darwin_user64_stat64 *ub)
 static void
 convert_statx(struct statx *stat, struct __darwin_user64_stat64 *dest)
 {
-	dest->st_dev = darwin_device(
-			makedev(stat->stx_dev_major, stat->stx_dev_minor));
+	dest->st_dev = darwin_device(sysroot_device(
+			makedev(stat->stx_dev_major, stat->stx_dev_minor)));
 	dest->st_mode = stat->stx_mode;
 	dest->st_nlink = stat->stx_nlink;
 	dest->st_ino = sysroot_file_id(
