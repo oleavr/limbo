@@ -92,6 +92,7 @@ static void check_enforced(void);
 static void denied_opening(void);
 static void denied_creating(void);
 static void denied_unlinking(void);
+static void denied_renaming(void);
 static void in_denied_folder(void (*body)(void));
 static int remove_entry(const char *path, const struct stat *st, int type,
 		struct FTW *ftw);
@@ -252,6 +253,7 @@ check_enforced(void)
 	in_denied_folder(denied_opening);
 	in_denied_folder(denied_creating);
 	in_denied_folder(denied_unlinking);
+	in_denied_folder(denied_renaming);
 }
 
 static void
@@ -430,6 +432,34 @@ denied_unlinking(void)
 	CHECK(unlink(ALLOWED "-new") == 0);
 	CHECK(mkdir(ALLOWED "-folder", 0755) == 0);
 	CHECK(rmdir(ALLOWED "-folder") == 0);
+}
+
+static void
+denied_renaming(void)
+{
+	int dir = open(DENIED, O_RDONLY);
+	CHECK(dir >= 0);
+	errno = 0;
+	CHECK(rename(DENIED "/existing", ALLOWED "-moved") == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(rename(ALLOWED, DENIED "/moved") == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(renameat(dir, "existing", AT_FDCWD, ALLOWED "-moved") == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(renameat(AT_FDCWD, ALLOWED, dir, "moved") == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(renamex_np(ALLOWED, DENIED "/moved", RENAME_EXCL) == -1);
+	CHECK(errno == EPERM);
+	CHECK(close(dir) == 0);
+	CHECK(access(DENIED "/existing", F_OK) == 0);
+	CHECK(access(DENIED "/moved", F_OK) == -1);
+
+	CHECK(rename(ALLOWED, ALLOWED "-moved") == 0);
+	CHECK(rename(ALLOWED "-moved", ALLOWED) == 0);
 }
 
 static void
