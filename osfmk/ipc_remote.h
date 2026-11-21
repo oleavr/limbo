@@ -47,6 +47,7 @@ enum remote_notice_kind {
 	REMOTE_NOTICE_ADD,
 	REMOTE_NOTICE_DEAD,
 	REMOTE_NOTICE_SEND_ONCE,
+	REMOTE_NOTICE_SEND_ONCE_MOVED,
 };
 
 struct remote_notice {
