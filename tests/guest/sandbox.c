@@ -38,6 +38,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/acl.h>
+#include <sys/attr.h>
 #include <sys/clonefile.h>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -103,6 +104,10 @@ static void denied_flags(void);
 static void denied_times(void);
 static void denied_xattr(void);
 static void denied_acl(void);
+static void denied_attributes(void);
+static void allowed_attributes(void);
+static void denied_finder_info(void);
+static void denied_attribute_flags(void);
 static void in_denied_folder(void (*body)(void));
 static void in_sandbox(const char *profile, void (*body)(void));
 static int remove_entry(const char *path, const struct stat *st, int type,
@@ -274,6 +279,10 @@ check_enforced(void)
 	in_sandbox(DENY("file-write-times"), denied_times);
 	in_sandbox(DENY("file-write-xattr"), denied_xattr);
 	in_sandbox(DENY("file-write-acl"), denied_acl);
+	in_denied_folder(denied_attributes);
+	in_sandbox(DENY("file-write-times"), allowed_attributes);
+	in_sandbox(DENY("file-write-finderinfo"), denied_finder_info);
+	in_sandbox(DENY("file-write-flags"), denied_attribute_flags);
 }
 
 static void
@@ -633,6 +642,90 @@ denied_acl(void)
 	CHECK(acl_set_file(ALLOWED, ACL_TYPE_EXTENDED, acl) == 0);
 	CHECK(chmod(DENIED "/existing", 0600) == 0);
 	acl_free(acl);
+}
+
+static void
+denied_attributes(void)
+{
+	struct attrlist times = {
+			.bitmapcount = ATTR_BIT_MAP_COUNT,
+			.commonattr = ATTR_CMN_MODTIME,
+	};
+	struct timespec time = {1000, 0};
+	errno = 0;
+	CHECK(setattrlist(DENIED "/existing", &times, &time, sizeof(time), 0)
+			== -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(fsetattrlist(denied_fd, &times, &time, sizeof(time), 0) == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(setattrlistat(AT_FDCWD, DENIED "/existing", &times, &time,
+			      sizeof(time), 0)
+			== -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(utimensat(AT_FDCWD, DENIED "/existing", NULL, 0) == -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(lchmod(DENIED "/existing", 0600) == -1);
+	CHECK(errno == EPERM);
+
+	CHECK(setattrlist(ALLOWED, &times, &time, sizeof(time), 0) == 0);
+}
+
+static void
+allowed_attributes(void)
+{
+	struct attrlist times = {
+			.bitmapcount = ATTR_BIT_MAP_COUNT,
+			.commonattr = ATTR_CMN_MODTIME,
+	};
+	struct timespec time = {1000, 0};
+	CHECK(setattrlist(DENIED "/existing", &times, &time, sizeof(time), 0)
+			== 0);
+	CHECK(fsetattrlist(denied_fd, &times, &time, sizeof(time), 0) == 0);
+	CHECK(utimensat(AT_FDCWD, DENIED "/existing", NULL, 0) == 0);
+	errno = 0;
+	CHECK(utimes(DENIED "/existing", NULL) == -1);
+	CHECK(errno == EPERM);
+}
+
+static void
+denied_finder_info(void)
+{
+	struct attrlist info = {
+			.bitmapcount = ATTR_BIT_MAP_COUNT,
+			.commonattr = ATTR_CMN_FNDRINFO,
+	};
+	char value[32] = {0};
+	errno = 0;
+	CHECK(setattrlist(DENIED "/existing", &info, value, sizeof(value), 0)
+			== -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(fsetattrlist(denied_fd, &info, value, sizeof(value), 0) == -1);
+	CHECK(errno == EPERM);
+	CHECK(setattrlist(ALLOWED, &info, value, sizeof(value), 0) == 0);
+	CHECK(lchmod(DENIED "/existing", 0600) == 0);
+}
+
+static void
+denied_attribute_flags(void)
+{
+	struct attrlist flags = {
+			.bitmapcount = ATTR_BIT_MAP_COUNT,
+			.commonattr = ATTR_CMN_FLAGS,
+	};
+	uint32_t value = 0;
+	errno = 0;
+	CHECK(setattrlist(DENIED "/existing", &flags, &value, sizeof(value), 0)
+			== -1);
+	CHECK(errno == EPERM);
+	errno = 0;
+	CHECK(fsetattrlist(denied_fd, &flags, &value, sizeof(value), 0) == -1);
+	CHECK(errno == EPERM);
+	CHECK(setattrlist(ALLOWED, &flags, &value, sizeof(value), 0) == 0);
 }
 
 static void
