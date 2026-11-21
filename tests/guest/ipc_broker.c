@@ -27,6 +27,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <fcntl.h>
 #include <mach/mach.h>
 #include <mach/ndr.h>
 #include <pthread.h>
@@ -41,6 +42,7 @@
 #include "check.h"
 
 #define PORT_COUNT   32
+#define FDS_SEEN     256
 #define OVERSIZED    (2u << 20)
 #define GUARD_TICKS  1000
 #define REAP_TICKS   100
@@ -95,6 +97,7 @@ typedef struct {
 } raw_message_t;
 
 static const char SERVICE_NAME[] = "com.limbo.test.ipc";
+static const char *program;
 static const char PEER_NAME[] = "com.limbo.test.ipc.peer";
 static const mach_msg_id_t CHECK_IN = 402;
 static const mach_msg_id_t LOOK_UP = 404;
@@ -355,6 +358,26 @@ look_up(const char *name)
 	}
 	CHECK(service != MACH_PORT_NULL);
 	return service;
+}
+
+static int
+open_descriptors(void)
+{
+	int count = 0;
+	for (int fd = 0; fd != FDS_SEEN; fd++) {
+		count += fcntl(fd, F_GETFD) != -1;
+	}
+	return count;
+}
+
+static void
+connect_and_exec(void)
+{
+	char before[16];
+	snprintf(before, sizeof(before), "%d", open_descriptors());
+	bootstrap_call(LOOK_UP, SERVICE_NAME);
+	execl(program, program, "descriptors", before, NULL);
+	_exit(1);
 }
 
 static void
@@ -660,6 +683,17 @@ stop(pid_t pid)
 }
 
 static void
+check_exec(void)
+{
+	pid_t child = start(connect_and_exec);
+	pid_t guardian = guard(child);
+	int status = reap(child);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	kill(guardian, SIGKILL);
+	reap(guardian);
+}
+
+static void
 send_quit(mach_port_t port)
 {
 	mach_msg_header_t quit = {
@@ -894,8 +928,14 @@ check_transport(void)
 }
 
 int
-main(void)
+main(int argc, char *argv[])
 {
+	if (argc == 3 && strcmp(argv[1], "descriptors") == 0) {
+		return open_descriptors() != atoi(argv[2]);
+	}
+	program = argv[0];
+	check_exec();
+
 	pid_t pid = fork();
 	CHECK(pid >= 0);
 	if (pid == 0) {
