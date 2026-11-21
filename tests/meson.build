@@ -20,6 +20,12 @@ trace_test = executable('trace_test',
 )
 test('trace', trace_test, suite: 'unit', workdir: meson.current_build_dir())
 
+sandbox_profile_test = executable('sandbox_profile_test',
+  sources: ['sandbox_profile_test.c', '../bsd/sandbox_profile.c'],
+  include_directories: include_dir,
+)
+test('sandbox_profile', sandbox_profile_test, suite: 'unit')
+
 python = import('python').find_installation('python3')
 runner = files('run-guest.py')
 

@@ -1,0 +1,4 @@
+(version 1)
+(allow default)
+(deny file-write* (vnode-type DIRECTORY))
+(deny file-write* (regex #"^/x(ab)+$"))

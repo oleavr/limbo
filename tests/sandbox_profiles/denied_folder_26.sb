@@ -1,0 +1,3 @@
+(version 1)
+(allow default)
+(deny file-write* (subpath "/private/tmp/limbo-sandbox-denied"))
