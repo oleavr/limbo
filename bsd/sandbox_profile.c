@@ -39,9 +39,10 @@
 #define DATA_UNIT              8
 #define DATA_LENGTH_SIZE       2
 
-#define OPERATION_COUNT_27 204
-#define OPERATION_COUNT_26 200
-#define FILE_WRITE_ALL_26  32
+#define OPERATION_COUNT_27    204
+#define OPERATION_COUNT_26    200
+#define OPERATION_COUNT_25G76 198
+#define FILE_WRITE_ALL_26     32
 
 #define KIND_FILTER   0
 #define KIND_DECISION 1
@@ -105,6 +106,7 @@ static uint16_t start_node(
 static bool graph_valid(const struct sandbox_profile *profile, uint16_t start,
 		uint8_t *seen, uint16_t *stack);
 static size_t nodes_offset(const struct sandbox_profile *profile);
+static size_t nodes_offset_of(uint16_t operation_count);
 static struct node node_at(
 		const struct sandbox_profile *profile, uint16_t index);
 static const uint8_t *blob_at(const struct sandbox_profile *profile,
@@ -132,8 +134,7 @@ sandbox_profile_parse(
 	const uint8_t *bytes = data;
 	uint16_t node_count = read16(bytes + HEADER_NODE_COUNT);
 	uint16_t operation_count = read16(bytes + HEADER_OPERATION_COUNT);
-	if (HEADER_SIZE + INDEX_SIZE * (size_t)operation_count
-					+ NODE_SIZE * (size_t)node_count
+	if (nodes_offset_of(operation_count) + NODE_SIZE * (size_t)node_count
 			> size) {
 		return false;
 	}
@@ -147,7 +148,8 @@ sandbox_profile_parse(
 	profile->operation_count = operation_count;
 	if (operation_count == OPERATION_COUNT_27) {
 		profile->file_write_index = SANDBOX_FILE_WRITE_ALL;
-	} else if (operation_count == OPERATION_COUNT_26) {
+	} else if (operation_count == OPERATION_COUNT_26
+			|| operation_count == OPERATION_COUNT_25G76) {
 		profile->file_write_index = FILE_WRITE_ALL_26;
 	} else {
 		return true;
@@ -224,7 +226,14 @@ graph_valid(const struct sandbox_profile *profile, uint16_t start,
 static size_t
 nodes_offset(const struct sandbox_profile *profile)
 {
-	return HEADER_SIZE + INDEX_SIZE * (size_t)profile->operation_count;
+	return nodes_offset_of(profile->operation_count);
+}
+
+static size_t
+nodes_offset_of(uint16_t operation_count)
+{
+	size_t end = HEADER_SIZE + INDEX_SIZE * (size_t)operation_count;
+	return (end + NODE_SIZE - 1) / NODE_SIZE * NODE_SIZE;
 }
 
 static struct node
