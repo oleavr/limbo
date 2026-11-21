@@ -34,6 +34,7 @@
 
 struct process {
 	int32_t pid;
+	char state;
 	int32_t ppid;
 	int32_t pgid;
 	int32_t tpgid;
@@ -60,6 +61,7 @@ struct process_thread {
 };
 
 int process_lookup(int32_t pid, struct process *process);
+bool process_exited(const struct process *process);
 int process_thread_lookup(
 		int32_t pid, int32_t tid, struct process_thread *thread);
 int32_t process_terminal(const struct process *process);

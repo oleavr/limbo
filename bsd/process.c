@@ -72,19 +72,18 @@ process_lookup(int32_t pid, struct process *process)
 			(int)(fields - comm), comm);
 	snprintf(process->name, sizeof(process->name), "%s", process->comm);
 	executable_name(pid, process);
-	char state = 0;
 	long resident = 0;
 	sscanf(fields + 2,
 			"%c %d %d %d %u %d %*u %*u %*u %*u %*u %lu %lu %*d "
 			"%*d %*d %d %d %*d %lu %lu %ld",
-			&state, &process->ppid, &process->pgid,
+			&process->state, &process->ppid, &process->pgid,
 			&process->session, &process->tty, &process->tpgid,
 			&process->user_ticks, &process->system_ticks,
 			&process->nice, &process->threads,
 			&process->start_ticks, &process->virtual_size,
 			&resident);
 	process->resident_pages = resident > 0 ? (uint64_t)resident : 0;
-	if (state == 'Z') {
+	if (process->state == 'Z') {
 		live_thread_memory(pid, process);
 	}
 
@@ -100,6 +99,13 @@ process_lookup(int32_t pid, struct process *process)
 	}
 	fclose(status);
 	return 0;
+}
+
+bool
+process_exited(const struct process *process)
+{
+	return process->state == 'X'
+			|| (process->state == 'Z' && process->threads <= 1);
 }
 
 static void
