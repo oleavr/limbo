@@ -29,7 +29,6 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
-#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,6 +40,7 @@
 
 #define STAT_VIRTUAL_SIZE 23
 #define STAT_END_CODE     27
+#define EXEC_WAIT_STEPS   2000
 
 static void executable_name(int32_t pid, struct process *process);
 static void live_thread_memory(int32_t pid, struct process *process);
@@ -266,16 +266,16 @@ process_environment_value(
 	size_t capacity = 64 * 1024;
 	char *environment = malloc(capacity);
 	char dir[64 + NAME_MAX], path[80 + NAME_MAX];
-	ssize_t length;
-	for (;;) {
+	ssize_t length = 0;
+	for (int i = 0; i != EXEC_WAIT_STEPS; i++) {
 		process_proc_dir(pid, dir, sizeof(dir));
 		bool laying_out = executing(dir);
 		snprintf(path, sizeof(path), "%s/environ", dir);
 		length = read_file(path, environment, capacity - 1);
-		if (length != 0 || !laying_out) {
+		if (length > 0 || !laying_out) {
 			break;
 		}
-		sched_yield();
+		usleep(500);
 	}
 	if (length > 0) {
 		environment[length] = '\0';
