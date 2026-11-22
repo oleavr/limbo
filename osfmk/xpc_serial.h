@@ -36,6 +36,7 @@
 #define XPC_REPLY_ID       0x20000000
 
 #define XPC_SERIAL_PORTS_MAX 4
+#define XPC_SERIAL_DEPTH_MAX 8
 
 enum xpc_serial_type {
 	XPC_SERIAL_NULL = 0x1000,
@@ -82,6 +83,9 @@ bool xpc_serial_get_int(const struct xpc_object *dictionary, const char *key,
 		uint64_t *value);
 const char *xpc_serial_get_string(
 		const struct xpc_object *dictionary, const char *key);
+bool xpc_serial_get_port(const mach_msg_header_t *message,
+		const struct xpc_object *payload, const char *key,
+		mach_port_name_t *port);
 
 void xpc_encoder_init(
 		struct xpc_encoder *encoder, void *buffer, uint32_t capacity);

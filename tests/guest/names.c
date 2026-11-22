@@ -50,6 +50,7 @@ typedef struct {
 static const char UNKNOWN_NAME[] = "com.limbo.test.names.unknown";
 static const char DOOMED_NAME[] = "com.limbo.test.names.doomed";
 static const char TAKEN_NAME[] = "com.limbo.test.names.taken";
+static const char REGISTERED_NAME[] = "com.limbo.test.names.registered";
 static const char COUNTED_NAME[] = "com.limbo.test.names.counted";
 static const char ALONE_NAME[] = "com.limbo.test.names.alone";
 
@@ -61,6 +62,9 @@ static char read_within(int fd);
 static kern_return_t look_up_until_forgotten(const char *name);
 static int in_child(int (*role)(void));
 static int check_in_taken(void);
+static int register_taken(void);
+static kern_return_t register_port(const char *name, mach_port_t port);
+static mach_port_t make_port(void);
 
 static void
 check_unknown_name(void)
@@ -101,8 +105,19 @@ check_taken_names(void)
 			== KERN_SUCCESS);
 	CHECK(found == port);
 
+	mach_port_t registered = make_port();
+	CHECK(register_port(REGISTERED_NAME, registered) == KERN_SUCCESS);
+	CHECK(register_port(REGISTERED_NAME, registered)
+			== BOOTSTRAP_NAME_IN_USE);
+	CHECK(in_child(register_taken) == 0);
+	CHECK(bootstrap_look_up(bootstrap_port, REGISTERED_NAME, &found)
+			== KERN_SUCCESS);
+	CHECK(found == registered);
+
 	CHECK(mach_port_mod_refs(mach_task_self(), port,
 			      MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+	CHECK(mach_port_destruct(mach_task_self(), registered, -2, 0)
 			== KERN_SUCCESS);
 }
 
@@ -314,6 +329,35 @@ check_in_taken(void)
 	mach_port_t port = MACH_PORT_NULL;
 	return bootstrap_check_in(bootstrap_port, TAKEN_NAME, &port)
 			!= BOOTSTRAP_NOT_PRIVILEGED;
+}
+
+static int
+register_taken(void)
+{
+	return register_port(REGISTERED_NAME, make_port())
+			!= BOOTSTRAP_NOT_PRIVILEGED;
+}
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+static kern_return_t
+register_port(const char *name, mach_port_t port)
+{
+	return bootstrap_register(bootstrap_port, (char *)name, port);
+}
+#pragma clang diagnostic pop
+
+static mach_port_t
+make_port(void)
+{
+	mach_port_t port = MACH_PORT_NULL;
+	CHECK(mach_port_allocate(
+			      mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port)
+			== KERN_SUCCESS);
+	CHECK(mach_port_insert_right(mach_task_self(), port, port,
+			      MACH_MSG_TYPE_MAKE_SEND)
+			== KERN_SUCCESS);
+	return port;
 }
 
 static kern_return_t

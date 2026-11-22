@@ -88,6 +88,12 @@ check_round_trip(void)
 	CHECK(type == XPC_SERIAL_MACH_SEND);
 	CHECK(xpc_serial_find(&payload, "last", &type, &inner));
 	CHECK(type == XPC_SERIAL_BOOL);
+
+	mach_port_name_t name_of_port = MACH_PORT_NULL;
+	CHECK(xpc_serial_get_port(message, &payload, "port", &name_of_port));
+	CHECK(name_of_port == PORT_NAME);
+	CHECK(!xpc_serial_get_port(message, &payload, "name", &name_of_port));
+	CHECK(!xpc_serial_get_port(message, &payload, "absent", &name_of_port));
 }
 
 static void
