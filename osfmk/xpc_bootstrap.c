@@ -32,7 +32,6 @@
 #include <unistd.h>
 
 #include "ipc.h"
-#include "names.h"
 #include "xpc_bootstrap.h"
 #include "xpc_serial.h"
 #include "xpc_service.h"

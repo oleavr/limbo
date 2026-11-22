@@ -31,7 +31,6 @@
 #include "bootstrap/bootstrap_defs.h"
 #include "ipc.h"
 #include "libinfo.h"
-#include "names.h"
 #include "xpc_service.h"
 
 #define XPC_HANDSHAKE_ID 0x77303074
