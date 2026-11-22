@@ -33,6 +33,12 @@ broker_wire_test = executable('broker_wire_test',
 )
 test('broker_wire', broker_wire_test, suite: 'unit')
 
+xpc_serial_test = executable('xpc_serial_test',
+  sources: ['xpc_serial_test.c', '../osfmk/xpc_serial.c'],
+  include_directories: include_dir,
+)
+test('xpc_serial', xpc_serial_test, suite: 'unit')
+
 responsibility_test = executable('responsibility_test',
   sources: ['responsibility_test.c', '../bsd/responsibility.c'],
   include_directories: include_dir,
