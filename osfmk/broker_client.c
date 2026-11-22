@@ -116,14 +116,6 @@ broker_client_guest_id(void)
 	return guest_id;
 }
 
-void
-broker_client_post(uint32_t type, const void *request, uint32_t length)
-{
-	pthread_mutex_lock(&call_lock);
-	send_frame(type, request, length);
-	pthread_mutex_unlock(&call_lock);
-}
-
 bool
 broker_client_call(uint32_t type, const void *request, uint32_t length,
 		uint32_t reply_type, void *reply, uint32_t reply_length)
@@ -249,6 +241,7 @@ dispatch_frame(const struct broker_frame *header, const void *payload,
 	switch (header->type) {
 	case BROKER_WELCOME:
 	case BROKER_LOOKUP_REPLY:
+	case BROKER_REGISTERED:
 		take_reply(header, payload);
 		break;
 	case BROKER_GUEST_GONE:
@@ -301,9 +294,12 @@ take_reply(const struct broker_frame *header, const void *payload)
 {
 	pthread_mutex_lock(&reply_lock);
 	if (reply_pending && header->type == reply_type) {
-		memcpy(reply_buffer, payload,
-				header->length < reply_length ? header->length
-							      : reply_length);
+		if (reply_buffer != NULL) {
+			memcpy(reply_buffer, payload,
+					header->length < reply_length
+							? header->length
+							: reply_length);
+		}
 		reply_pending = false;
 		reply_taken = true;
 		pthread_cond_signal(&reply_ready);

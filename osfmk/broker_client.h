@@ -37,7 +37,6 @@ void broker_client_ensure(void);
 void broker_client_reset(void);
 bool broker_client_available(void);
 uint32_t broker_client_guest_id(void);
-void broker_client_post(uint32_t type, const void *request, uint32_t length);
 bool broker_client_call(uint32_t type, const void *request, uint32_t length,
 		uint32_t reply_type, void *reply, uint32_t reply_length);
 bool broker_client_carries(uint64_t length, size_t fd_count);

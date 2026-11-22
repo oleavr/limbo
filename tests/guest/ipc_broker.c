@@ -127,6 +127,7 @@ static const char HOLDER_NAME[] = "com.limbo.test.ipc.holder";
 static const char THIRD_NAME[] = "com.limbo.test.ipc.third";
 static const char DOOMED_NAME[] = "com.limbo.test.ipc.doomed";
 static const char RAW_NAME[] = "com.limbo.test.ipc.raw";
+static const char ANSWERED_NAME[] = "com.limbo.test.ipc.answered";
 static const mach_msg_id_t CHECK_IN = 402;
 static const mach_msg_id_t LOOK_UP = 404;
 static const mach_msg_id_t REQUEST_ID = 7777;
@@ -1216,6 +1217,22 @@ check_short_frames(mach_port_t port)
 	CHECK(bootstrap_call(LOOK_UP, PEER_NAME) == port);
 }
 
+static void
+check_registration_answered(void)
+{
+	int fd = connect_raw();
+	struct broker_register registration = {
+			.global_id = broker_global_id(UINT32_MAX - 1, 1),
+	};
+	strncpy(registration.name, ANSWERED_NAME,
+			sizeof(registration.name) - 1);
+	send_raw(fd, BROKER_REGISTER, &registration, sizeof(registration));
+	struct broker_frame registered;
+	receive_raw(fd, &registered, sizeof(registered));
+	CHECK(registered.type == BROKER_REGISTERED);
+	close(fd);
+}
+
 static raw_message_t
 raw_message(uint64_t dest_global_id)
 {
@@ -1611,6 +1628,9 @@ check_late_add(int fd, uint32_t gone_guest_id)
 	};
 	strncpy(registration.name, RAW_NAME, sizeof(registration.name) - 1);
 	send_raw(fd, BROKER_REGISTER, &registration, sizeof(registration));
+	struct broker_frame registered;
+	receive_raw(fd, &registered, sizeof(registered));
+	CHECK(registered.type == BROKER_REGISTERED);
 
 	mach_port_t port;
 	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
@@ -2210,6 +2230,7 @@ check_transport(void)
 	check_stopped_receiver(peer, port);
 	check_large_frames(port);
 	check_short_frames(port);
+	check_registration_answered();
 	check_malformed_messages(port);
 	check_fileport(port);
 	check_many_fileports(port);

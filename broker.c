@@ -210,6 +210,7 @@ handle_guest(int fd)
 						sizeof(request.reg))) {
 			request.reg.name[sizeof(request.reg.name) - 1] = '\0';
 			broker_names_register(&request.reg);
+			send_frame(conn, BROKER_REGISTERED, NULL, 0);
 		}
 		break;
 	case BROKER_LOOKUP:
