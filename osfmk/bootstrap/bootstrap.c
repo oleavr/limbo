@@ -31,7 +31,7 @@
 #include <stdlib.h>
 
 #include "bootstrap.h"
-#include "names.h"
+#include "ipc.h"
 #include "xpc_service.h"
 
 kern_return_t
