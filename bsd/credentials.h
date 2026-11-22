@@ -31,6 +31,9 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+#define KAUTH_UID_NONE (~(uid_t)0 - 100)
+#define KAUTH_GID_NONE (~(gid_t)0 - 100)
+
 void credentials_init(void);
 int credentials_signal(void);
 int credentials_setuid(uid_t uid);
@@ -40,6 +43,11 @@ int credentials_setgid(gid_t gid);
 int credentials_setegid(gid_t egid);
 int credentials_setregid(gid_t rgid, gid_t egid);
 int credentials_setgroups(uint32_t count, const uint32_t *groups);
+
+int credentials_settid(uid_t uid, gid_t gid);
+bool credentials_gettid(uid_t *uid, gid_t *gid);
+void credentials_thread_start(void);
+void credentials_fork_child(void);
 
 bool credentials_issetugid(void);
 void credentials_set_sugid(void);

@@ -238,6 +238,7 @@ thread_main(void *arg)
 		pthread_sigmask(SIG_BLOCK, &others, NULL);
 	}
 	thread->tid = gettid();
+	credentials_thread_start();
 
 	if (syscall_dispatch_enable()) {
 		abort();

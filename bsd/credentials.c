@@ -53,6 +53,15 @@ static long change_arguments[3];
 static gid_t change_groups[GROUPS_MAX];
 static int changed;
 static bool sugid;
+static bool process_known;
+static uid_t process_users[3];
+static gid_t process_group_ids[3];
+static gid_t process_groups[GROUPS_MAX];
+static int process_group_count;
+static int assuming;
+static __thread bool assumed;
+static __thread uid_t assumed_uid;
+static __thread gid_t assumed_gid;
 
 #ifndef __x86_64__
 #ifndef SA_RESTORER
@@ -73,6 +82,10 @@ static int change(enum change_kind kind, long number, long a, long b, long c);
 static bool privileged(void);
 static void broadcast(void);
 static bool blocks(pid_t tid);
+static void know_process(void);
+static int assume(uid_t uid, gid_t gid);
+static bool take_assumed_identity(void);
+static void take_process_identity(void);
 
 int
 credentials_signal(void)
@@ -101,9 +114,15 @@ handle_change(int sig, siginfo_t *info, void *context)
 	(void)sig;
 	(void)info;
 	(void)context;
+	if (assumed) {
+		raw_syscall(SYS_setresuid, -1, 0, -1);
+	}
 	raw_syscall(__atomic_load_n(&change_number, __ATOMIC_ACQUIRE),
 			change_arguments[0], change_arguments[1],
 			change_arguments[2]);
+	if (assumed) {
+		take_assumed_identity();
+	}
 	__atomic_add_fetch(&changed, 1, __ATOMIC_RELEASE);
 }
 
@@ -139,6 +158,9 @@ credentials_setuid(uid_t uid)
 static int
 change(enum change_kind kind, long number, long a, long b, long c)
 {
+	if (assumed) {
+		return _EPERM;
+	}
 	if (!privileged()) {
 		return 0;
 	}
@@ -201,6 +223,8 @@ change(enum change_kind kind, long number, long a, long b, long c)
 		break;
 	}
 	}
+	process_known = false;
+	know_process();
 	broadcast();
 	pthread_mutex_unlock(&lock);
 	return 0;
@@ -313,6 +337,120 @@ credentials_setgroups(uint32_t count, const uint32_t *groups)
 		list[i] = gid_to_linux(groups[i]);
 	}
 	return change(CHANGE_GROUPS, SYS_setgroups, count, (long)list, 0);
+}
+
+int
+credentials_settid(uid_t uid, gid_t gid)
+{
+	pthread_mutex_lock(&lock);
+	know_process();
+	int error = assume(uid, gid);
+	pthread_mutex_unlock(&lock);
+	return error;
+}
+
+bool
+credentials_gettid(uid_t *uid, gid_t *gid)
+{
+	if (!assumed) {
+		return false;
+	}
+	*uid = assumed_uid;
+	*gid = gid_from_linux(assumed_gid);
+	return true;
+}
+
+void
+credentials_thread_start(void)
+{
+	if (__atomic_load_n(&assuming, __ATOMIC_ACQUIRE) == 0) {
+		return;
+	}
+	pthread_mutex_lock(&lock);
+	take_process_identity();
+	pthread_mutex_unlock(&lock);
+}
+
+void
+credentials_fork_child(void)
+{
+	pthread_mutex_init(&lock, NULL);
+	__atomic_store_n(&assuming, 0, __ATOMIC_RELEASE);
+	if (assumed) {
+		take_process_identity();
+		assumed = false;
+	}
+}
+
+static void
+know_process(void)
+{
+	if (process_known) {
+		return;
+	}
+	getresuid(&process_users[0], &process_users[1], &process_users[2]);
+	getresgid(&process_group_ids[0], &process_group_ids[1],
+			&process_group_ids[2]);
+	process_group_count = getgroups(GROUPS_MAX, process_groups);
+	if (process_group_count < 0) {
+		process_group_count = 0;
+	}
+	process_known = true;
+}
+
+static int
+assume(uid_t uid, gid_t gid)
+{
+	if (process_users[1] != 0) {
+		return _EPERM;
+	}
+	if (uid == KAUTH_UID_NONE) {
+		if (!assumed) {
+			return _EPERM;
+		}
+		take_process_identity();
+		assumed = false;
+		__atomic_sub_fetch(&assuming, 1, __ATOMIC_RELEASE);
+		return 0;
+	}
+	if (assumed) {
+		return _EPERM;
+	}
+
+	assumed_uid = uid;
+	assumed_gid = gid_to_linux(gid);
+	if (!take_assumed_identity()) {
+		take_process_identity();
+		return _EPERM;
+	}
+	assumed = true;
+	__atomic_add_fetch(&assuming, 1, __ATOMIC_RELEASE);
+	return 0;
+}
+
+static bool
+take_assumed_identity(void)
+{
+	raw_syscall(SYS_setresuid, -1, 0, -1);
+	return raw_syscall(SYS_setgroups, 1, (long)&assumed_gid, 0) == 0
+			&& raw_syscall(SYS_setresgid, assumed_gid, assumed_gid,
+					   assumed_gid)
+			== 0
+			&& raw_syscall(SYS_setresuid, assumed_uid, assumed_uid,
+					   0)
+			== 0;
+}
+
+static void
+take_process_identity(void)
+{
+	raw_syscall(SYS_setresuid, -1, 0, -1);
+	raw_syscall(SYS_setgroups, process_group_count, (long)process_groups,
+			0);
+	raw_syscall(SYS_setresgid, process_group_ids[0], process_group_ids[1],
+			process_group_ids[2]);
+	raw_syscall(SYS_setresuid, process_users[0], process_users[1],
+			process_users[2]);
 }
 
 bool
