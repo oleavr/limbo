@@ -44,7 +44,6 @@
 #include <unistd.h>
 
 #include "broker.h"
-#include "broker_names.h"
 #include "osfmk/ipc_remote.h"
 
 #define CONNECTION_FDS  (2 * BROKER_FDS_MAX)
@@ -59,6 +58,12 @@ struct connection {
 	struct broker_wire_ahead ahead;
 };
 
+struct service {
+	uint32_t guest_id;
+	uint64_t global_id;
+	char name[LIMBO_BROKER_SERVICE_NAME_MAX];
+};
+
 static void raise_file_limit(void);
 static void run(int listen_fd);
 static bool accept_guest(int listen_fd);
@@ -66,12 +71,19 @@ static size_t fds_ahead(void);
 static void release_queued(struct connection *conn, size_t fd_count);
 static void handle_guest(int fd);
 static void welcome_guest(struct connection *conn);
+static struct broker_registered broker_names_register(
+		uint32_t guest_id, const struct broker_register *reg);
+static struct broker_lookup_reply broker_names_look_up(
+		const struct broker_lookup *req);
 static void look_up_service(struct connection *conn,
 		const struct broker_lookup *req);
 static void route_send(struct broker_wire_frame *frame);
 static void take_notice(const struct broker_wire_frame *frame);
 static struct connection *connection_for_fd(int fd);
 static struct connection *connection_for_guest(uint32_t guest_id);
+static struct service *service_named(const char *name);
+static void broker_names_forget(uint32_t guest_id);
+static void broker_names_forget_port(uint64_t global_id);
 static void add_connection(int fd);
 static void remove_connection(size_t index);
 static void send_frame(struct connection *conn, uint32_t type,
@@ -83,6 +95,8 @@ static bool send_data(int fd, struct broker_wire_frame *frame);
 
 static struct connection *connections;
 static size_t connection_count;
+static struct service *services;
+static size_t service_count;
 static uint32_t next_guest_id = 1;
 static size_t descriptor_room;
 static size_t queued_fds;
@@ -244,6 +258,38 @@ welcome_guest(struct connection *conn)
 	send_frame(conn, BROKER_WELCOME, &welcome, sizeof(welcome));
 }
 
+static struct broker_registered
+broker_names_register(uint32_t guest_id, const struct broker_register *reg)
+{
+	struct service *service = service_named(reg->name);
+	if (service != NULL) {
+		return (struct broker_registered){
+				.holder = service->guest_id == guest_id
+						? BROKER_NAME_ASKERS
+						: BROKER_NAME_ANOTHERS,
+		};
+	}
+
+	services = reallocarray(services, service_count + 1, sizeof(*services));
+	service = &services[service_count++];
+	*service = (struct service){
+			.guest_id = guest_id,
+			.global_id = reg->global_id,
+	};
+	strncpy(service->name, reg->name, sizeof(service->name) - 1);
+	return (struct broker_registered){.holder = BROKER_NAME_FREE};
+}
+
+static struct broker_lookup_reply
+broker_names_look_up(const struct broker_lookup *req)
+{
+	struct service *service = service_named(req->name);
+	return (struct broker_lookup_reply){
+			.found = service != NULL,
+			.global_id = (service != NULL) ? service->global_id : 0,
+	};
+}
+
 static void
 look_up_service(struct connection *conn, const struct broker_lookup *req)
 {
@@ -312,6 +358,43 @@ connection_for_guest(uint32_t guest_id)
 		}
 	}
 	return NULL;
+}
+
+static struct service *
+service_named(const char *name)
+{
+	for (size_t i = 0; i != service_count; i++) {
+		if (strcmp(services[i].name, name) == 0) {
+			return &services[i];
+		}
+	}
+	return NULL;
+}
+
+static void
+broker_names_forget(uint32_t guest_id)
+{
+	size_t kept = 0;
+	for (size_t i = 0; i != service_count; i++) {
+		if (services[i].guest_id != guest_id
+				&& broker_guest_of(services[i].global_id)
+						!= guest_id) {
+			services[kept++] = services[i];
+		}
+	}
+	service_count = kept;
+}
+
+static void
+broker_names_forget_port(uint64_t global_id)
+{
+	size_t kept = 0;
+	for (size_t i = 0; i != service_count; i++) {
+		if (services[i].global_id != global_id) {
+			services[kept++] = services[i];
+		}
+	}
+	service_count = kept;
 }
 
 static void
