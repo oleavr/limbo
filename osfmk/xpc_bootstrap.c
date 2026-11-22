@@ -27,6 +27,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <errno.h>
 #include <stdint.h>
 #include <unistd.h>
 
@@ -43,15 +44,19 @@ enum xpc_routine {
 	XPC_ROUTINE_CHECK_IN = 0x325,
 	XPC_ROUTINE_LOOK_UP_LEGACY = 0xcf,
 	XPC_ROUTINE_CHECK_IN_LEGACY = 0xce,
+	XPC_ROUTINE_REGISTER = 0xcc,
 	XPC_ROUTINE_EVENT_PUBLISH = 0x193,
 };
 
 static bool look_up(mach_msg_header_t *request, const char *name);
 static bool check_in(mach_msg_header_t *request, const char *name);
+static bool register_port(mach_msg_header_t *request,
+		const struct xpc_object *payload, const char *name);
 static bool reply_event_publish(mach_msg_header_t *request);
 static void reply_with_port(mach_msg_header_t *request, mach_port_name_t port,
 		mach_msg_type_name_t disposition, bool with_metadata);
 static void reply_with_error(mach_msg_header_t *request, kern_return_t error);
+static void reply_empty(mach_msg_header_t *request);
 
 bool
 xpc_bootstrap_is_message(mach_msg_id_t id)
@@ -63,9 +68,9 @@ bool
 xpc_bootstrap_serve(mach_msg_header_t *request)
 {
 	struct xpc_object payload;
-	const char *name = xpc_serial_payload(request, &payload)
-			? xpc_serial_get_string(&payload, "name")
-			: NULL;
+	bool parsed = xpc_serial_payload(request, &payload);
+	const char *name = parsed ? xpc_serial_get_string(&payload, "name")
+				  : NULL;
 
 	switch (request->msgh_id & 0xffff) {
 	case XPC_ROUTINE_LOOK_UP:
@@ -74,6 +79,8 @@ xpc_bootstrap_serve(mach_msg_header_t *request)
 	case XPC_ROUTINE_CHECK_IN:
 	case XPC_ROUTINE_CHECK_IN_LEGACY:
 		return check_in(request, name != NULL ? name : "");
+	case XPC_ROUTINE_REGISTER:
+		return parsed && register_port(request, &payload, name);
 	case XPC_ROUTINE_EVENT_PUBLISH:
 		return reply_event_publish(request);
 	default:
@@ -105,6 +112,26 @@ check_in(mach_msg_header_t *request, const char *name)
 		return true;
 	}
 	reply_with_port(request, service, MACH_MSG_TYPE_MOVE_RECEIVE, false);
+	return true;
+}
+
+static bool
+register_port(mach_msg_header_t *request, const struct xpc_object *payload,
+		const char *name)
+{
+	mach_port_name_t port;
+	if (name == NULL || name[0] == '\0'
+			|| !xpc_serial_get_port(
+					request, payload, "port", &port)) {
+		reply_with_error(request, EINVAL);
+		return true;
+	}
+	kern_return_t kr = names_register(name, port);
+	if (kr != KERN_SUCCESS) {
+		reply_with_error(request, kr);
+	} else {
+		reply_empty(request);
+	}
 	return true;
 }
 
@@ -148,6 +175,17 @@ reply_with_error(mach_msg_header_t *request, kern_return_t error)
 	xpc_encoder_init(&encoder, buffer, sizeof(buffer));
 	xpc_encoder_begin_dictionary(&encoder, NULL);
 	xpc_encoder_int64(&encoder, "error", error);
+	xpc_encoder_end(&encoder);
+	xpc_serial_reply(request, &encoder, ipc_launchd_send);
+}
+
+static void
+reply_empty(mach_msg_header_t *request)
+{
+	uint8_t buffer[REPLY_MAX];
+	struct xpc_encoder encoder;
+	xpc_encoder_init(&encoder, buffer, sizeof(buffer));
+	xpc_encoder_begin_dictionary(&encoder, NULL);
 	xpc_encoder_end(&encoder);
 	xpc_serial_reply(request, &encoder, ipc_launchd_send);
 }
