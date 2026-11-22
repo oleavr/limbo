@@ -29,6 +29,7 @@
 #include <poll.h>
 #include <servers/bootstrap.h>
 #include <signal.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -50,6 +51,7 @@ static const char UNKNOWN_NAME[] = "com.limbo.test.names.unknown";
 static const char DOOMED_NAME[] = "com.limbo.test.names.doomed";
 static const char TAKEN_NAME[] = "com.limbo.test.names.taken";
 static const char COUNTED_NAME[] = "com.limbo.test.names.counted";
+static const char ALONE_NAME[] = "com.limbo.test.names.alone";
 
 static server_t start_server(const char *name);
 static void serve(const char *name, int commands, int answers);
@@ -152,14 +154,73 @@ check_looked_up_right_counted(void)
 			== KERN_SUCCESS);
 }
 
+static int
+check_alone(void)
+{
+	mach_port_t port = MACH_PORT_NULL;
+	CHECK(bootstrap_check_in(bootstrap_port, ALONE_NAME, &port)
+			== KERN_SUCCESS);
+	mach_port_t again = MACH_PORT_NULL;
+	CHECK(bootstrap_check_in(bootstrap_port, ALONE_NAME, &again)
+			== BOOTSTRAP_SERVICE_ACTIVE);
+	mach_port_t found = MACH_PORT_NULL;
+	CHECK(bootstrap_look_up(bootstrap_port, ALONE_NAME, &found)
+			== KERN_SUCCESS);
+	CHECK(found == port);
+
+	mach_msg_header_t sent = {
+			.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0),
+			.msgh_size = sizeof(sent),
+			.msgh_remote_port = found,
+			.msgh_id = 1,
+	};
+	CHECK(mach_msg(&sent, MACH_SEND_MSG, sizeof(sent), 0, MACH_PORT_NULL,
+			      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	struct {
+		mach_msg_header_t header;
+		mach_msg_trailer_t trailer;
+	} received;
+	CHECK(mach_msg(&received.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof(received), port, ANSWER_MS, MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	CHECK(received.header.msgh_id == 1);
+
+	CHECK(mach_port_mod_refs(mach_task_self(), port,
+			      MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+	CHECK(bootstrap_look_up(bootstrap_port, ALONE_NAME, &found)
+			== BOOTSTRAP_UNKNOWN_SERVICE);
+	return 0;
+}
+
+static void
+check_without_broker(const char *program)
+{
+	pid_t pid = fork();
+	CHECK(pid != -1);
+	if (pid == 0) {
+		setenv("LIMBO_BROKER", "", 1);
+		execl(program, program, "alone", NULL);
+		_exit(1);
+	}
+	int status;
+	CHECK(waitpid(pid, &status, 0) == pid);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
 int
-main(void)
+main(int argc, char *argv[])
 {
 	alarm(DEADLINE_S);
+	if (argc == 2 && strcmp(argv[1], "alone") == 0) {
+		return check_alone();
+	}
 	check_unknown_name();
 	check_dead_port_forgotten();
 	check_taken_names();
 	check_looked_up_right_counted();
+	check_without_broker(argv[0]);
 	return 0;
 }
 

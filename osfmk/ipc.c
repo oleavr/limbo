@@ -1880,6 +1880,15 @@ ipc_names_release(mach_port_name_t port)
 	flush_notices();
 }
 
+bool
+ipc_names_lives(uint64_t global_id)
+{
+	pthread_mutex_lock(&lock);
+	bool lives = port_for_global_id(global_id) != NULL;
+	pthread_mutex_unlock(&lock);
+	return lives;
+}
+
 mach_port_name_t
 ipc_names_send_right(uint64_t global_id)
 {
