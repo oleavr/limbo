@@ -143,6 +143,9 @@ static void check_mincore(void);
 static void check_madvise_zero(void);
 static void check_regions(void);
 static void check_region_recurse(void);
+static void check_readable_regions(void);
+static vm_prot_t region_at(mach_vm_address_t *address, mach_vm_size_t *size);
+static void *wait_for_walk(void *arg);
 static mach_msg_type_number_t submap_info_count(
 		mach_vm_address_t address, mach_msg_type_number_t room);
 static unsigned char share_mode(mach_vm_address_t address);
@@ -209,6 +212,7 @@ main(void)
 	check_madvise_zero();
 	check_regions();
 	check_region_recurse();
+	check_readable_regions();
 	check_exception_ports();
 	check_vouchers();
 	check_destroy();
@@ -247,7 +251,8 @@ check_destroy(void)
 	CHECK(mach_port_insert_right(mach_task_self(), port, port,
 			      MACH_MSG_TYPE_MAKE_SEND)
 			== KERN_SUCCESS);
-	CHECK(mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_SEND, 2)
+	CHECK(mach_port_mod_refs(
+			      mach_task_self(), port, MACH_PORT_RIGHT_SEND, 2)
 			== KERN_SUCCESS);
 
 #pragma clang diagnostic push
@@ -2370,9 +2375,8 @@ check_memory_entries(void)
 	CHECK(mach_vm_map(mach_task_self(), &first, size, 0, VM_FLAGS_ANYWHERE,
 			      entry, 0, false, rw, rw, VM_INHERIT_NONE)
 			== KERN_SUCCESS);
-	CHECK(mach_vm_map(mach_task_self(), &second, size, 0,
-			      VM_FLAGS_ANYWHERE, entry, 0, false, rw, rw,
-			      VM_INHERIT_NONE)
+	CHECK(mach_vm_map(mach_task_self(), &second, size, 0, VM_FLAGS_ANYWHERE,
+			      entry, 0, false, rw, rw, VM_INHERIT_NONE)
 			== KERN_SUCCESS);
 	CHECK(first != second && ((volatile char *)first)[size - 1] == 0);
 	((volatile char *)first)[vm_page_size + 5] = 42;
@@ -2399,7 +2403,8 @@ check_memory_entries(void)
 			== KERN_SUCCESS);
 	CHECK(state == VM_PURGABLE_NONVOLATILE);
 
-	CHECK(mach_vm_deallocate(mach_task_self(), first, size) == KERN_SUCCESS);
+	CHECK(mach_vm_deallocate(mach_task_self(), first, size)
+			== KERN_SUCCESS);
 	CHECK(mach_vm_deallocate(mach_task_self(), second, size)
 			== KERN_SUCCESS);
 	CHECK(mach_port_deallocate(mach_task_self(), entry) == KERN_SUCCESS);
@@ -2509,10 +2514,10 @@ check_shared_range_entries(void)
 	mach_vm_address_t range = 0;
 	mach_vm_size_t size = 2 * vm_page_size;
 	vm_prot_t rw = VM_PROT_READ | VM_PROT_WRITE;
-	CHECK(mach_vm_allocate(mach_task_self(), &range, size,
-			      VM_FLAGS_ANYWHERE)
+	CHECK(mach_vm_allocate(
+			      mach_task_self(), &range, size, VM_FLAGS_ANYWHERE)
 			== KERN_SUCCESS);
-	mach_vm_address_t maps[2] = { 0, 0 };
+	mach_vm_address_t maps[2] = {0, 0};
 	mach_port_t entries[2];
 	for (int i = 0; i < 2; i++) {
 		memory_object_size_t entry_size = size;
@@ -2820,6 +2825,60 @@ handle_own_exceptions(void *arg)
 			      EXCEPTION_STATE | MACH_EXCEPTION_CODES,
 			      MACHINE_THREAD_STATE)
 			== KERN_SUCCESS);
+	return NULL;
+}
+
+static atomic_bool walked;
+
+static void
+check_readable_regions(void)
+{
+	pthread_t thread;
+	CHECK(pthread_create(&thread, NULL, wait_for_walk, NULL) == 0);
+	vm_prot_t written = VM_PROT_READ | VM_PROT_WRITE;
+	mach_vm_address_t address = 0;
+	mach_vm_size_t size;
+	vm_prot_t protection;
+	int regions = 0;
+	while ((protection = region_at(&address, &size)) != VM_PROT_ALL + 1) {
+		mach_vm_address_t ends[2] = {address, address + size - 1};
+		for (int i = 0; i < 2 && (protection & written) == written;
+				i++) {
+			char byte;
+			mach_vm_size_t got;
+			CHECK(mach_vm_read_overwrite(mach_task_self(), ends[i],
+					      1, (mach_vm_address_t)&byte, &got)
+					== KERN_SUCCESS);
+		}
+		regions++;
+		address += size;
+	}
+	CHECK(regions > 10);
+	atomic_store(&walked, true);
+	CHECK(pthread_join(thread, NULL) == 0);
+}
+
+static vm_prot_t
+region_at(mach_vm_address_t *address, mach_vm_size_t *size)
+{
+	natural_t depth = 999999;
+	vm_region_submap_info_data_64_t info;
+	mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+	if (mach_vm_region_recurse(mach_task_self(), address, size, &depth,
+			    (vm_region_recurse_info_t)&info, &count)
+			!= KERN_SUCCESS) {
+		return VM_PROT_ALL + 1;
+	}
+	return info.protection;
+}
+
+static void *
+wait_for_walk(void *arg)
+{
+	(void)arg;
+	while (!atomic_load(&walked)) {
+		usleep(1000);
+	}
 	return NULL;
 }
 

@@ -33,6 +33,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/fs.h>
 #include <mach/mach_types.h>
 #include <pthread.h>
 #include <signal.h>
@@ -51,6 +52,13 @@
 #include "commpage.h"
 #include "ipc.h"
 #include "mach_vm.h"
+
+/* Linux's mark of a guard region, which headers before 6.15 lack */
+#ifndef PAGE_IS_GUARD
+#define PAGE_IS_GUARD (1 << 8)
+#endif
+
+#define GUARD_RUNS 16
 
 struct memory_entry {
 	int fd;
@@ -92,6 +100,8 @@ static kern_return_t remap_copy(mach_vm_address_t *target_address,
 		mach_vm_size_t size, mach_vm_offset_t mask, int flags,
 		mach_vm_address_t src_address, vm_prot_t *protection);
 static vm_prot_t region_protection(mach_vm_address_t address);
+static void split_at_guards(mach_vm_address_t address, mach_vm_address_t *start,
+		mach_vm_size_t *size, vm_prot_t *protection, uint64_t *offset);
 static bool region_untouched(mach_vm_address_t start, mach_vm_size_t size);
 static int range_touched(mach_vm_address_t start, mach_vm_size_t size);
 static void region_top_info(mach_vm_address_t address, mach_vm_size_t size,
@@ -789,7 +799,7 @@ held_fd(mach_vm_address_t start)
 	return found;
 }
 
-/* The inode of the file the mapping that starts at START maps */
+/* The inode of the file the mapping that holds START maps */
 static bool
 region_inode(mach_vm_address_t start, dev_t *device, ino_t *inode)
 {
@@ -797,13 +807,13 @@ region_inode(mach_vm_address_t start, dev_t *device, ino_t *inode)
 	char line[512];
 	bool found = false;
 	while (maps != NULL && fgets(line, sizeof(line), maps) != NULL) {
-		unsigned long low;
+		unsigned long low, high;
 		unsigned int major, minor;
 		unsigned long long number;
-		if (sscanf(line, "%lx-%*x %*s %*x %x:%x %llu", &low, &major,
-				    &minor,
-				    &number) == 4
-				&& low == start) {
+		if (sscanf(line, "%lx-%lx %*s %*x %x:%x %llu", &low, &high,
+				    &major, &minor,
+				    &number) == 5
+				&& low <= start && start < high) {
 			*device = makedev(major, minor);
 			*inode = (ino_t)number;
 			found = true;
@@ -835,24 +845,15 @@ remap_copy(mach_vm_address_t *target_address, mach_vm_size_t size,
 static vm_prot_t
 region_protection(mach_vm_address_t address)
 {
-	FILE *maps = fopen("/proc/thread-self/maps", "r");
-	char line[512];
-	vm_prot_t protection = VM_PROT_NONE;
-	while (fgets(line, sizeof(line), maps) != NULL) {
-		unsigned long start, end;
-		char perms[5];
-		if (sscanf(line, "%lx-%lx %4s", &start, &end, perms) == 3
-				&& address >= start && address < end) {
-			protection = ((perms[0] == 'r') ? VM_PROT_READ : 0)
-					| ((perms[1] == 'w') ? VM_PROT_WRITE
-							     : 0)
-					| ((perms[2] == 'x') ? VM_PROT_EXECUTE
-							     : 0);
-			break;
-		}
-	}
-	fclose(maps);
-	return protection;
+	mach_vm_address_t start;
+	mach_vm_size_t size;
+	vm_prot_t protection;
+	bool shared;
+	uint64_t offset;
+	return region_find(address, &start, &size, &protection, &shared,
+			       &offset) && start <= address
+			? protection
+			: VM_PROT_NONE;
 }
 
 kern_return_t
@@ -1120,7 +1121,68 @@ region_find(mach_vm_address_t address, mach_vm_address_t *start,
 		}
 	}
 	fclose(maps);
+	if (found && *protection != VM_PROT_NONE) {
+		split_at_guards(address, start, size, protection, offset);
+	}
 	return found;
+}
+
+/*
+ * A region that holds guard pages (MADV_GUARD_INSTALL, which glibc puts
+ * under its threads' stacks) is as many regions as it has runs of them and
+ * of other pages, the guards' with no access, as on XNU a stack's guard is a
+ * region of its own
+ */
+static void
+split_at_guards(mach_vm_address_t address, mach_vm_address_t *start,
+		mach_vm_size_t *size, vm_prot_t *protection, uint64_t *offset)
+{
+	int pagemap = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
+	if (pagemap == -1) {
+		return;
+	}
+	mach_vm_address_t low = *start;
+	mach_vm_address_t high = *start + *size;
+	mach_vm_address_t at = address > low ? address : low;
+	mach_vm_address_t from = low;
+	mach_vm_address_t to = high;
+	bool guarded = false;
+	bool done = false;
+	struct page_region runs[GUARD_RUNS];
+	struct pm_scan_arg scan = {
+			.size = sizeof(scan),
+			.start = low,
+			.end = high,
+			.vec = (uintptr_t)runs,
+			.vec_len = GUARD_RUNS,
+			.category_mask = PAGE_IS_GUARD,
+			.return_mask = PAGE_IS_GUARD,
+	};
+	long count;
+	do {
+		count = ioctl(pagemap, PAGEMAP_SCAN, &scan);
+		for (long i = 0; i < count && !done; i++) {
+			if (runs[i].end <= at) {
+				from = runs[i].end;
+			} else if (runs[i].start > at) {
+				to = runs[i].start;
+				done = true;
+			} else {
+				from = runs[i].start;
+				to = runs[i].end;
+				guarded = done = true;
+			}
+		}
+		scan.start = scan.walk_end;
+	} while (!done && count == GUARD_RUNS && scan.start < high);
+	close(pagemap);
+
+	*start = from;
+	*size = to - from;
+	*offset += from - low;
+	if (guarded) {
+		*protection = VM_PROT_NONE;
+	}
 }
 
 void
