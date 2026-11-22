@@ -164,12 +164,14 @@ static const mach_msg_id_t STARVE_ID = 7926;
 static const mach_msg_id_t FEED_ID = 7927;
 static const mach_msg_id_t BAD_REPLY_ID = 7928;
 static const mach_msg_id_t FAIL_HOME_ID = 7929;
+static const mach_msg_id_t RECEIVE_KEPT_ID = 7930;
 static const mach_port_name_t NO_SUCH_NAME = 0x00fffe03;
 static const char FROM_SENDER[] = "from the sender";
 static const char FROM_RECEIVER[] = "from the receiver";
 
 static const char *peer_name = PEER_NAME;
 
+static mach_msg_id_t receive_id(mach_port_t port);
 static child_t start_peer(const char *name);
 static void end_peer(const child_t *child);
 int fileport_makeport(int fd, mach_port_t *port);
@@ -960,6 +962,8 @@ serve_peer(void)
 			answer(&message.Head,
 					fail_home(message.carrier.port.name,
 							held_reply));
+		} else if (message.Head.msgh_id == RECEIVE_KEPT_ID) {
+			answer(&message.Head, receive_id(kept));
 		} else if (message.Head.msgh_id == LARGE_ID) {
 			answer(&message.Head,
 					patterned(message.bytes,
@@ -2047,6 +2051,17 @@ check_moved_rights(void)
 	CHECK(ask_for(keeper.port, WATCHED_ID) == 0);
 	CHECK(mach_port_deallocate(mach_task_self(), port) == KERN_SUCCESS);
 	CHECK(ask_for(keeper.port, WATCHED_ID) == 1);
+
+	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
+	mach_msg_header_t queued = {
+			.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MAKE_SEND, 0),
+			.msgh_size = sizeof(queued),
+			.msgh_remote_port = port,
+			.msgh_id = MARK_ID,
+	};
+	send_request(&queued);
+	move_to_keeper(keeper.port, port);
+	CHECK(ask_for(keeper.port, RECEIVE_KEPT_ID) == MARK_ID);
 	end_peer(&keeper);
 }
 

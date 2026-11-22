@@ -140,6 +140,12 @@ struct remote_memory_entry {
 	uint64_t data_offset;
 };
 
+struct queued_move {
+	struct queued_move *next;
+	uint64_t global_id;
+	struct ipc_kmsg *messages;
+};
+
 struct task_subsystem;
 struct mach_vm_subsystem;
 struct mach_port_subsystem;
@@ -208,17 +214,22 @@ static void ipc_fork_prepare(void);
 static void ipc_fork_parent(void);
 static void ipc_fork_child(void);
 static mach_msg_return_t remote_send(mach_msg_header_t *header,
-		mach_msg_size_t size, ipc_side_t sender, pid_t sender_pid);
+		mach_msg_size_t size, ipc_side_t sender, pid_t sender_pid,
+		uint64_t dest_global_id);
+static void forward_queued(struct queued_move *queued, bool sent);
+static void release_out_of_line(mach_msg_header_t *header);
 static mach_msg_return_t remote_copyin(
 		mach_msg_header_t *header, ipc_side_t sender);
 static uint64_t remote_size(const mach_msg_header_t *header,
 		mach_msg_size_t size, size_t *fd_count);
 static uint32_t export_body_ports(mach_msg_header_t *header,
 		uint64_t *global_ids, uint8_t **data, uint32_t *data_length,
-		uint32_t dest_guest_id, struct remote_fds *fds);
+		uint32_t dest_guest_id, struct remote_fds *fds,
+		struct queued_move **queued);
 static uint64_t export_body_port(mach_port_name_t name,
 		mach_msg_type_name_t disposition, uint32_t dest_guest_id,
-		struct remote_fds *fds, uint8_t **data, uint32_t *data_length);
+		struct remote_fds *fds, uint8_t **data, uint32_t *data_length,
+		struct queued_move **queued);
 static uint64_t export_fileport(
 		const struct ipc_port *port, struct remote_fds *fds);
 static uint64_t export_memory_entry(const struct ipc_port *port,
@@ -666,8 +677,8 @@ send(mach_msg_header_t *msg, mach_msg_size_t size, ipc_side_t sender,
 	pthread_mutex_lock(&lock);
 	struct ipc_entry *remote_entry = lookup(kmsg->header->msgh_remote_port);
 	if (remote_entry != NULL && remote_entry->port->remote) {
-		mach_msg_return_t rr = remote_send(
-				kmsg->header, size, sender, sender_pid);
+		mach_msg_return_t rr = remote_send(kmsg->header, size, sender,
+				sender_pid, remote_entry->port->global_id);
 		free(kmsg);
 		return rr;
 	}
@@ -741,9 +752,8 @@ has_valid_descriptors(const mach_msg_header_t *header)
 
 static mach_msg_return_t
 remote_send(mach_msg_header_t *header, mach_msg_size_t size, ipc_side_t sender,
-		pid_t sender_pid)
+		pid_t sender_pid, uint64_t dest_global_id)
 {
-	uint64_t dest_global_id = lookup(header->msgh_remote_port)->port->global_id;
 	mach_msg_bits_t bits = header->msgh_bits;
 	size_t fd_count = 0;
 	if (!broker_client_carries(
@@ -774,8 +784,10 @@ remote_send(mach_msg_header_t *header, mach_msg_size_t size, ipc_side_t sender,
 	struct remote_fds fds = {
 			.fds = malloc(id_capacity * sizeof(*fds.fds)),
 	};
+	struct queued_move *queued = NULL;
 	uint32_t descriptor_count = export_body_ports(header, global_ids, &data,
-			&data_length, broker_guest_of(dest_global_id), &fds);
+			&data_length, broker_guest_of(dest_global_id), &fds,
+			&queued);
 
 	struct remote_header rh = {
 			.message_size = size,
@@ -823,12 +835,67 @@ remote_send(mach_msg_header_t *header, mach_msg_size_t size, ipc_side_t sender,
 		queue_send_once_gone(dest_global_id, broker_client_guest_id());
 	}
 	release_unused_entries(header);
+	forward_queued(queued, mr == MACH_MSG_SUCCESS);
 	pthread_mutex_unlock(&lock);
 	flush_notices();
 	free(global_ids);
 	free(fds.fds);
 	free(blob);
 	return mr;
+}
+
+static void
+forward_queued(struct queued_move *queued, bool sent)
+{
+	while (queued != NULL) {
+		struct queued_move *move = queued;
+		queued = move->next;
+		while (move->messages != NULL) {
+			struct ipc_kmsg *kmsg = move->messages;
+			move->messages = kmsg->next;
+			mach_msg_header_t *header = kmsg->header;
+			if (!sent) {
+				destroy_rights(header);
+				free(kmsg);
+				continue;
+			}
+			mach_msg_bits_t bits = header->msgh_bits;
+			header->msgh_bits = MACH_MSGH_BITS_SET(
+					MACH_MSGH_BITS_LOCAL(bits),
+					MACH_MSGH_BITS_REMOTE(bits), 0,
+					bits & MACH_MSGH_BITS_COMPLEX);
+			header->msgh_local_port = header->msgh_remote_port;
+			header->msgh_remote_port = MACH_PORT_NULL;
+			release_out_of_line(header);
+			remote_send(header, header->msgh_size, IPC_USER,
+					kmsg->sender_pid, move->global_id);
+			pthread_mutex_lock(&lock);
+			free(kmsg);
+		}
+		free(move);
+	}
+}
+
+static void
+release_out_of_line(mach_msg_header_t *header)
+{
+	if (!(header->msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
+		return;
+	}
+
+	mach_msg_body_t *body = (mach_msg_body_t *)(header + 1);
+	uint8_t *cursor = (uint8_t *)(body + 1);
+	for (mach_msg_size_t i = 0; i < body->msgh_descriptor_count; i++) {
+		mach_msg_ool_descriptor64_t *d
+				= (mach_msg_ool_descriptor64_t *)cursor;
+		if (d->type == MACH_MSG_OOL_DESCRIPTOR
+				|| d->type == MACH_MSG_OOL_VOLATILE_DESCRIPTOR) {
+			d->deallocate = true;
+		}
+		cursor += d->type == MACH_MSG_PORT_DESCRIPTOR
+				? sizeof(mach_msg_port_descriptor_t)
+				: sizeof(*d);
+	}
 }
 
 static uint64_t
@@ -884,7 +951,7 @@ remote_copyin(mach_msg_header_t *header, ipc_side_t sender)
 	mach_msg_bits_t bits = header->msgh_bits;
 
 	struct ipc_entry *dest_entry = lookup(header->msgh_remote_port);
-	if (sender == IPC_USER
+	if (sender == IPC_USER && dest_entry != NULL
 			&& !has_right(dest_entry,
 					MACH_MSGH_BITS_REMOTE(bits))) {
 		return MACH_SEND_INVALID_DEST;
@@ -908,7 +975,7 @@ remote_copyin(mach_msg_header_t *header, ipc_side_t sender)
 static uint32_t
 export_body_ports(mach_msg_header_t *header, uint64_t *global_ids,
 		uint8_t **data, uint32_t *data_length, uint32_t dest_guest_id,
-		struct remote_fds *fds)
+		struct remote_fds *fds, struct queued_move **queued)
 {
 	if (!(header->msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
 		return 0;
@@ -925,7 +992,7 @@ export_body_ports(mach_msg_header_t *header, uint64_t *global_ids,
 					= (mach_msg_port_descriptor_t *)cursor;
 			global_ids[count++] = export_body_port(d->name,
 					d->disposition, dest_guest_id, fds,
-					data, data_length);
+					data, data_length, queued);
 			cursor += sizeof(*d);
 		} else if (descriptor->type == MACH_MSG_OOL_DESCRIPTOR
 				|| descriptor->type
@@ -947,7 +1014,7 @@ export_body_ports(mach_msg_header_t *header, uint64_t *global_ids,
 							cursor;
 			global_ids[count++] = export_body_port(d->name,
 					d->disposition, dest_guest_id, fds,
-					data, data_length);
+					data, data_length, queued);
 			cursor += sizeof(*d);
 		}
 	}
@@ -957,7 +1024,7 @@ export_body_ports(mach_msg_header_t *header, uint64_t *global_ids,
 static uint64_t
 export_body_port(mach_port_name_t name, mach_msg_type_name_t disposition,
 		uint32_t dest_guest_id, struct remote_fds *fds, uint8_t **data,
-		uint32_t *data_length)
+		uint32_t *data_length, struct queued_move **queued)
 {
 	if (name == MACH_PORT_NULL) {
 		return 0;
@@ -982,6 +1049,16 @@ export_body_port(mach_port_name_t name, mach_msg_type_name_t disposition,
 					| (++transfer_counter & 0xfffff));
 	entry->port->remote = true;
 	entry->port->grants = 1;
+	if (entry->port->messages != NULL) {
+		struct queued_move *move = malloc(sizeof(*move));
+		*move = (struct queued_move){
+				.next = *queued,
+				.global_id = entry->port->global_id,
+				.messages = entry->port->messages,
+		};
+		*queued = move;
+		entry->port->messages = NULL;
+	}
 	return entry->port->global_id;
 }
 
