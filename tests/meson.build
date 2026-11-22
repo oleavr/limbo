@@ -62,6 +62,7 @@ guest_tests = [
   'iopolicy.c',
   'kqueue.c',
   'kqueue_dispatch2.c',
+  'libinfo.c',
   'mach.c',
   'necp.c',
   'nogroup.c',
