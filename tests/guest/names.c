@@ -48,6 +48,7 @@ typedef struct {
 
 static const char UNKNOWN_NAME[] = "com.limbo.test.names.unknown";
 static const char DOOMED_NAME[] = "com.limbo.test.names.doomed";
+static const char TAKEN_NAME[] = "com.limbo.test.names.taken";
 
 static server_t start_server(const char *name);
 static void serve(const char *name, int commands, int answers);
@@ -55,6 +56,8 @@ static void tell(const server_t *server, char command);
 static void stop_server(server_t *server);
 static char read_within(int fd);
 static kern_return_t look_up_until_forgotten(const char *name);
+static int in_child(int (*role)(void));
+static int check_in_taken(void);
 
 static void
 check_unknown_name(void)
@@ -79,12 +82,34 @@ check_dead_port_forgotten(void)
 	mach_port_deallocate(mach_task_self(), port);
 }
 
+static void
+check_taken_names(void)
+{
+	mach_port_t port = MACH_PORT_NULL;
+	CHECK(bootstrap_check_in(bootstrap_port, TAKEN_NAME, &port)
+			== KERN_SUCCESS);
+	mach_port_t again = MACH_PORT_NULL;
+	CHECK(bootstrap_check_in(bootstrap_port, TAKEN_NAME, &again)
+			== BOOTSTRAP_SERVICE_ACTIVE);
+	CHECK(again == MACH_PORT_NULL);
+	CHECK(in_child(check_in_taken) == 0);
+	mach_port_t found = MACH_PORT_NULL;
+	CHECK(bootstrap_look_up(bootstrap_port, TAKEN_NAME, &found)
+			== KERN_SUCCESS);
+	CHECK(found == port);
+
+	CHECK(mach_port_mod_refs(mach_task_self(), port,
+			      MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+}
+
 int
 main(void)
 {
 	alarm(DEADLINE_S);
 	check_unknown_name();
 	check_dead_port_forgotten();
+	check_taken_names();
 	return 0;
 }
 
@@ -156,6 +181,28 @@ read_within(int fd)
 	CHECK(poll(&polled, 1, ANSWER_MS) == 1);
 	CHECK(read(fd, &byte, 1) == 1);
 	return byte;
+}
+
+static int
+in_child(int (*role)(void))
+{
+	pid_t pid = fork();
+	CHECK(pid != -1);
+	if (pid == 0) {
+		_exit(role());
+	}
+	int status;
+	CHECK(waitpid(pid, &status, 0) == pid);
+	CHECK(WIFEXITED(status));
+	return WEXITSTATUS(status);
+}
+
+static int
+check_in_taken(void)
+{
+	mach_port_t port = MACH_PORT_NULL;
+	return bootstrap_check_in(bootstrap_port, TAKEN_NAME, &port)
+			!= BOOTSTRAP_NOT_PRIVILEGED;
 }
 
 static kern_return_t

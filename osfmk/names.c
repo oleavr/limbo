@@ -33,23 +33,34 @@
 #include "ipc.h"
 #include "names.h"
 
-static void register_name(const char *name, uint64_t global_id);
+static uint32_t register_name(const char *name, uint64_t global_id);
 
 kern_return_t
 names_check_in(const char *name, mach_port_name_t *port)
 {
 	broker_client_ensure();
 	ipc_port_allocate(MACH_PORT_RIGHT_RECEIVE, port);
-	register_name(name, ipc_names_hold(*port));
-	return KERN_SUCCESS;
+	uint32_t holder = register_name(name, ipc_names_hold(*port));
+	if (holder == BROKER_NAME_FREE) {
+		return KERN_SUCCESS;
+	}
+	ipc_port_mod_refs(*port, MACH_PORT_RIGHT_RECEIVE, -1);
+	*port = MACH_PORT_NULL;
+	return holder == BROKER_NAME_ASKERS ? BOOTSTRAP_SERVICE_ACTIVE
+					    : BOOTSTRAP_NOT_PRIVILEGED;
 }
 
 kern_return_t
 names_register(const char *name, mach_port_name_t port)
 {
 	broker_client_ensure();
-	register_name(name, ipc_names_hold(port));
-	return KERN_SUCCESS;
+	uint32_t holder = register_name(name, ipc_names_hold(port));
+	if (holder == BROKER_NAME_FREE) {
+		return KERN_SUCCESS;
+	}
+	ipc_names_release(port);
+	return holder == BROKER_NAME_ASKERS ? BOOTSTRAP_NAME_IN_USE
+					    : BOOTSTRAP_NOT_PRIVILEGED;
 }
 
 kern_return_t
@@ -73,11 +84,13 @@ names_look_up(const char *name, mach_port_name_t *port)
 	return KERN_SUCCESS;
 }
 
-static void
+static uint32_t
 register_name(const char *name, uint64_t global_id)
 {
 	struct broker_register request = {.global_id = global_id};
 	strncpy(request.name, name, sizeof(request.name) - 1);
+	struct broker_registered reply = {.holder = BROKER_NAME_FREE};
 	broker_client_call(BROKER_REGISTER, &request, sizeof(request),
-			BROKER_REGISTERED, NULL, 0);
+			BROKER_REGISTERED, &reply, sizeof(reply));
+	return reply.holder;
 }

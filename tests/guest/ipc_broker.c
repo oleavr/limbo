@@ -1227,9 +1227,13 @@ check_registration_answered(void)
 	strncpy(registration.name, ANSWERED_NAME,
 			sizeof(registration.name) - 1);
 	send_raw(fd, BROKER_REGISTER, &registration, sizeof(registration));
-	struct broker_frame registered;
-	receive_raw(fd, &registered, sizeof(registered));
-	CHECK(registered.type == BROKER_REGISTERED);
+	struct {
+		struct broker_frame frame;
+		struct broker_registered registered;
+	} answer;
+	receive_raw(fd, &answer, sizeof(answer));
+	CHECK(answer.frame.type == BROKER_REGISTERED);
+	CHECK(answer.registered.holder == BROKER_NAME_FREE);
 	close(fd);
 }
 
@@ -1628,9 +1632,12 @@ check_late_add(int fd, uint32_t gone_guest_id)
 	};
 	strncpy(registration.name, RAW_NAME, sizeof(registration.name) - 1);
 	send_raw(fd, BROKER_REGISTER, &registration, sizeof(registration));
-	struct broker_frame registered;
-	receive_raw(fd, &registered, sizeof(registered));
-	CHECK(registered.type == BROKER_REGISTERED);
+	struct {
+		struct broker_frame frame;
+		struct broker_registered registered;
+	} answer;
+	receive_raw(fd, &answer, sizeof(answer));
+	CHECK(answer.frame.type == BROKER_REGISTERED);
 
 	mach_port_t port;
 	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
