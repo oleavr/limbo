@@ -78,5 +78,6 @@ register_name(const char *name, uint64_t global_id)
 {
 	struct broker_register request = {.global_id = global_id};
 	strncpy(request.name, name, sizeof(request.name) - 1);
-	broker_client_post(BROKER_REGISTER, &request, sizeof(request));
+	broker_client_call(BROKER_REGISTER, &request, sizeof(request),
+			BROKER_REGISTERED, NULL, 0);
 }
