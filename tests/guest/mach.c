@@ -91,6 +91,7 @@ static void check_large_message(mach_msg_size_t size);
 static void check_fileports(void);
 static void check_many_fileports(void);
 static void check_port_sets(void);
+static void check_moved_member(void);
 static void check_receive_on_destroyed(void);
 static mach_msg_return_t receive_on_destroyed(mach_port_right_t right);
 static void *receive_nothing(void *arg);
@@ -170,6 +171,7 @@ main(void)
 	check_fileports();
 	check_many_fileports();
 	check_port_sets();
+	check_moved_member();
 	check_receive_on_destroyed();
 	check_queued_rights_destroyed();
 	check_refused_reply();
@@ -760,6 +762,95 @@ check_port_sets(void)
 			== MACH_MSG_SUCCESS);
 	CHECK(received.header.msgh_id == 42);
 	CHECK(received.header.msgh_local_port == member);
+}
+
+static void
+check_moved_member(void)
+{
+	mach_port_t task = mach_task_self();
+	mach_port_t set;
+	CHECK(mach_port_allocate(task, MACH_PORT_RIGHT_PORT_SET, &set)
+			== KERN_SUCCESS);
+	mach_port_t member = allocate_port();
+	CHECK(mach_port_move_member(task, member, set) == KERN_SUCCESS);
+	CHECK(mach_port_set_context(task, member, 7) == KERN_SUCCESS);
+	mach_msg_header_t queued = {
+			.msgh_bits
+			= MACH_MSGH_BITS_SET(MACH_MSG_TYPE_MAKE_SEND, 0, 0, 0),
+			.msgh_size = sizeof(queued),
+			.msgh_remote_port = member,
+			.msgh_id = 42,
+	};
+	CHECK(mach_msg(&queued, MACH_SEND_MSG, sizeof(queued), 0,
+			      MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+			      MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+
+	mach_port_t carrier = allocate_port();
+	struct {
+		mach_msg_header_t header;
+		mach_msg_body_t body;
+		mach_msg_port_descriptor_t port;
+	} moving = {
+			.header = {
+					.msgh_bits = MACH_MSGH_BITS_SET(
+							MACH_MSG_TYPE_MAKE_SEND,
+							0, 0,
+							MACH_MSGH_BITS_COMPLEX),
+					.msgh_size = sizeof(moving),
+					.msgh_remote_port = carrier,
+			},
+			.body = {.msgh_descriptor_count = 1},
+			.port = {
+					.name = member,
+					.disposition = MACH_MSG_TYPE_MOVE_RECEIVE,
+					.type = MACH_MSG_PORT_DESCRIPTOR,
+			},
+	};
+	CHECK(mach_msg(&moving.header, MACH_SEND_MSG, sizeof(moving), 0,
+			      MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+			      MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	struct {
+		mach_msg_header_t header;
+		mach_msg_trailer_t trailer;
+	} received;
+	CHECK(mach_msg(&received.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof(received), set, 100, MACH_PORT_NULL)
+			== MACH_RCV_TIMED_OUT);
+
+	struct {
+		mach_msg_header_t header;
+		mach_msg_body_t body;
+		mach_msg_port_descriptor_t port;
+		mach_msg_trailer_t trailer;
+	} carried;
+	CHECK(mach_msg(&carried.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof(carried), carrier, 1000, MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	mach_port_t moved = carried.port.name;
+	mach_port_status_t status;
+	mach_msg_type_number_t count = MACH_PORT_RECEIVE_STATUS_COUNT;
+	CHECK(mach_port_get_attributes(task, moved, MACH_PORT_RECEIVE_STATUS,
+			      (mach_port_info_t)&status, &count)
+			== KERN_SUCCESS);
+	CHECK(status.mps_mscount == 0);
+	CHECK(status.mps_seqno == 0);
+	CHECK(status.mps_msgcount == 1);
+	mach_port_context_t context = 1;
+	CHECK(mach_port_get_context(task, moved, &context) == KERN_SUCCESS);
+	CHECK(context == 0);
+	CHECK(mach_msg(&received.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof(received), moved, 1000, MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	CHECK(received.header.msgh_id == 42);
+
+	CHECK(mach_port_mod_refs(task, moved, MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+	CHECK(mach_port_mod_refs(task, carrier, MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+	CHECK(mach_port_mod_refs(task, set, MACH_PORT_RIGHT_PORT_SET, -1)
+			== KERN_SUCCESS);
 }
 
 static void

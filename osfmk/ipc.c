@@ -291,6 +291,7 @@ static mach_msg_return_t copyin_body(mach_msg_header_t *header,
 static mach_msg_return_t transfer_right(mach_port_name_t name,
 		mach_msg_type_name_t disposition, ipc_side_t sender,
 		ipc_side_t receiver, mach_msg_type_name_t *type);
+static void prepare_move(struct ipc_port *port);
 static bool has_right(
 		struct ipc_entry *entry, mach_msg_type_name_t disposition);
 static mach_msg_type_name_t received_type(mach_msg_type_name_t disposition);
@@ -2094,6 +2095,9 @@ transfer_right(mach_port_name_t name, mach_msg_type_name_t disposition,
 		if (!has_right(entry, disposition)) {
 			return MACH_SEND_INVALID_RIGHT;
 		}
+		if (disposition == MACH_MSG_TYPE_MOVE_RECEIVE) {
+			prepare_move(entry->port);
+		}
 		if (receiver == IPC_KERNEL) {
 			switch (disposition) {
 			case MACH_MSG_TYPE_MOVE_SEND:
@@ -2140,6 +2144,15 @@ transfer_right(mach_port_name_t name, mach_msg_type_name_t disposition,
 	}
 
 	return MACH_MSG_SUCCESS;
+}
+
+static void
+prepare_move(struct ipc_port *port)
+{
+	port_leave_all_sets(port);
+	port->mscount = 0;
+	port->seqno = 0;
+	port->context = 0;
 }
 
 static bool
