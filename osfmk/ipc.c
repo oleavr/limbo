@@ -1830,45 +1830,9 @@ gone_guest_index(uint32_t guest_id)
 	return low;
 }
 
-mach_port_name_t
-ipc_service_check_in(const char *name)
+uint64_t
+ipc_names_hold(mach_port_name_t port)
 {
-	broker_client_ensure();
-	pthread_mutex_lock(&lock);
-	struct ipc_entry *entry = entry_alloc(port_alloc(IPC_KOBJECT_NONE));
-	entry->type = MACH_PORT_TYPE_RECEIVE;
-	entry->port->global_id = broker_global_id(
-			broker_client_guest_id(), ++export_counter);
-	count_sender_guest(entry->port, BROKER_GUEST_ID, 1);
-	mach_port_name_t name_out = entry->port->name;
-	uint64_t global_id = entry->port->global_id;
-	pthread_mutex_unlock(&lock);
-	broker_client_register(name, global_id);
-	return name_out;
-}
-
-mach_port_name_t
-ipc_service_look_up(const char *name)
-{
-	broker_client_ensure();
-	if (!broker_client_available()) {
-		return MACH_PORT_NULL;
-	}
-	uint64_t global_id;
-	if (!broker_client_look_up(name, &global_id)) {
-		return MACH_PORT_NULL;
-	}
-	pthread_mutex_lock(&lock);
-	mach_port_name_t name_out = import_remote_send(
-			global_id, MACH_MSG_TYPE_PORT_SEND, BROKER_GUEST_ID);
-	pthread_mutex_unlock(&lock);
-	return name_out;
-}
-
-void
-ipc_service_register(const char *name, mach_port_name_t port)
-{
-	broker_client_ensure();
 	pthread_mutex_lock(&lock);
 	uint64_t global_id = export_local_port(port);
 	struct ipc_entry *entry = lookup(port);
@@ -1885,7 +1849,17 @@ ipc_service_register(const char *name, mach_port_name_t port)
 	}
 	pthread_mutex_unlock(&lock);
 	flush_notices();
-	broker_client_register(name, global_id);
+	return global_id;
+}
+
+mach_port_name_t
+ipc_names_send_right(uint64_t global_id)
+{
+	pthread_mutex_lock(&lock);
+	mach_port_name_t name = import_remote_send(
+			global_id, MACH_MSG_TYPE_PORT_SEND, BROKER_GUEST_ID);
+	pthread_mutex_unlock(&lock);
+	return name;
 }
 
 static mach_msg_return_t

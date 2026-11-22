@@ -1,5 +1,6 @@
 /*
  * Copyright © 2021 Keegan Saunders
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -30,31 +31,27 @@
 #include <stdlib.h>
 
 #include "bootstrap.h"
-#include "ipc.h"
+#include "names.h"
 
 kern_return_t
 bootstrap_check_in(mach_port_t bootstrap_port, name_t service_name,
 		mach_port_t *service_port)
 {
-	*service_port = ipc_service_check_in(service_name);
-	return KERN_SUCCESS;
+	return names_check_in(service_name, service_port);
 }
 
 kern_return_t
 bootstrap_register(mach_port_t bootstrap_port, name_t service_name,
 		mach_port_t service_port)
 {
-	ipc_service_register(service_name, service_port);
-	return KERN_SUCCESS;
+	return names_register(service_name, service_port);
 }
 
 kern_return_t
 bootstrap_look_up(mach_port_t bootstrap_port, name_t service_name,
 		mach_port_t *service_port)
 {
-	*service_port = ipc_service_look_up(service_name);
-	return (*service_port != MACH_PORT_NULL) ? KERN_SUCCESS
-						 : BOOTSTRAP_UNKNOWN_SERVICE;
+	return names_look_up(service_name, service_port);
 }
 
 kern_return_t
