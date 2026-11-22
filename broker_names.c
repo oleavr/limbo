@@ -75,6 +75,18 @@ broker_names_forget(uint32_t guest_id)
 	service_count = kept;
 }
 
+void
+broker_names_forget_port(uint64_t global_id)
+{
+	size_t kept = 0;
+	for (size_t i = 0; i != service_count; i++) {
+		if (services[i].global_id != global_id) {
+			services[kept++] = services[i];
+		}
+	}
+	service_count = kept;
+}
+
 static struct service *
 service_named(const char *name)
 {

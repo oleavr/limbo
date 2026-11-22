@@ -1167,9 +1167,6 @@ tell_holders_dead(struct ipc_port *port)
 {
 	for (uint32_t i = 0; i < port->sender_guest_count; i++) {
 		uint32_t guest_id = port->sender_guests[i];
-		if (guest_id == BROKER_GUEST_ID) {
-			continue;
-		}
 		queue_notice((struct pending_notice){
 				.global_id = broker_global_id(guest_id, 0),
 				.notice = {
