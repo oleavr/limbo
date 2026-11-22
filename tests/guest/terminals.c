@@ -25,6 +25,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,6 +53,33 @@ main(void)
 	struct stat st, named;
 	CHECK(fstat(slave, &st) == 0 && stat(path, &named) == 0);
 	CHECK(S_ISCHR(st.st_mode) && st.st_rdev == named.st_rdev);
+	const char *tty = ttyname(slave);
+	CHECK(tty != NULL && strcmp(tty, path) == 0);
+	const char *dev = devname(st.st_rdev, S_IFCHR);
+	CHECK(dev != NULL && strcmp(dev, path + strlen("/dev/")) == 0);
+
+	DIR *dir = opendir("/dev");
+	CHECK(dir != NULL);
+	int seen = 0;
+	long position = -1;
+	for (struct dirent *d; (d = readdir(dir)) != NULL;) {
+		if (strcmp(d->d_name, path + strlen("/dev/")) == 0) {
+			seen++;
+			position = telldir(dir);
+		}
+	}
+	CHECK(seen == 1);
+	rewinddir(dir);
+	seen = 0;
+	for (struct dirent *d; (d = readdir(dir)) != NULL;) {
+		seen += strcmp(d->d_name, path + strlen("/dev/")) == 0;
+	}
+	CHECK(seen == 1);
+	seekdir(dir, position);
+	for (struct dirent *d; (d = readdir(dir)) != NULL;) {
+		CHECK(strcmp(d->d_name, path + strlen("/dev/")) != 0);
+	}
+	closedir(dir);
 
 	CHECK(close(slave) == 0);
 	CHECK(close(master) == 0);
