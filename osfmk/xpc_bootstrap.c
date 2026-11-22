@@ -28,13 +28,13 @@
  */
 
 #include <stdint.h>
-#include <string.h>
 #include <unistd.h>
 
 #include "ipc.h"
 #include "names.h"
 #include "xpc_bootstrap.h"
 #include "xpc_serial.h"
+#include "xpc_service.h"
 
 #define REPLY_MAX 256
 
@@ -84,13 +84,8 @@ xpc_bootstrap_serve(mach_msg_header_t *request)
 static bool
 look_up(mach_msg_header_t *request, const char *name)
 {
-	if (strcmp(name, "com.apple.system.opendirectoryd.libinfo") == 0) {
-		reply_with_port(request, ipc_libinfo_self(),
-				MACH_MSG_TYPE_COPY_SEND, true);
-		return true;
-	}
 	mach_port_name_t service;
-	kern_return_t kr = names_look_up(name, &service);
+	kern_return_t kr = xpc_service_look_up(name, &service);
 	if (kr != KERN_SUCCESS) {
 		reply_with_error(request, kr);
 	} else {

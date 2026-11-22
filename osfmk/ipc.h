@@ -62,7 +62,7 @@ typedef enum {
 	IPC_KOBJECT_IO_OBJECT,
 	IPC_KOBJECT_SEMAPHORE,
 	IPC_KOBJECT_BOOTSTRAP,
-	IPC_KOBJECT_LIBINFO,
+	IPC_KOBJECT_XPC_SERVICE,
 	IPC_KOBJECT_PROCESSOR_SET,
 	IPC_KOBJECT_VOUCHER,
 	IPC_KOBJECT_MEMORY_ENTRY,
@@ -107,8 +107,8 @@ uint64_t ipc_names_hold(mach_port_name_t port);
 void ipc_names_release(mach_port_name_t port);
 bool ipc_names_lives(uint64_t global_id);
 mach_port_name_t ipc_names_send_right(uint64_t global_id);
-mach_port_name_t ipc_libinfo_self(void);
-void ipc_port_adopt_kotype(mach_port_name_t name, ipc_kobject_type_t type);
+void ipc_port_adopt_kobject(
+		mach_port_name_t name, ipc_kobject_type_t type, void *kobject);
 
 kern_return_t ipc_port_allocate(
 		mach_port_right_t right, mach_port_name_t *name);

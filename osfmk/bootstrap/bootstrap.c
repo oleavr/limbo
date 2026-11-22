@@ -32,6 +32,7 @@
 
 #include "bootstrap.h"
 #include "names.h"
+#include "xpc_service.h"
 
 kern_return_t
 bootstrap_check_in(mach_port_t bootstrap_port, name_t service_name,
@@ -51,7 +52,7 @@ kern_return_t
 bootstrap_look_up(mach_port_t bootstrap_port, name_t service_name,
 		mach_port_t *service_port)
 {
-	return names_look_up(service_name, service_port);
+	return xpc_service_look_up(service_name, service_port);
 }
 
 kern_return_t

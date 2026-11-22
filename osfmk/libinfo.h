@@ -1,5 +1,6 @@
 /*
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -27,8 +28,6 @@
 
 #pragma once
 
-#include <mach/mach.h>
-#include <stdbool.h>
+#include "xpc_service.h"
 
-bool libinfo_is_handshake(mach_msg_id_t id);
-void libinfo_serve(mach_msg_header_t *request);
+extern const struct xpc_service libinfo_service;
