@@ -45,6 +45,7 @@
 
 #include "broker.h"
 #include "broker_names.h"
+#include "osfmk/ipc_remote.h"
 
 #define CONNECTION_FDS  (2 * BROKER_FDS_MAX)
 #define ACCEPT_RETRY_MS 1000
@@ -68,6 +69,7 @@ static void welcome_guest(struct connection *conn);
 static void look_up_service(struct connection *conn,
 		const struct broker_lookup *req);
 static void route_send(struct broker_wire_frame *frame);
+static void take_notice(const struct broker_wire_frame *frame);
 static struct connection *connection_for_fd(int fd);
 static struct connection *connection_for_guest(uint32_t guest_id);
 static void add_connection(int fd);
@@ -250,12 +252,18 @@ static void
 route_send(struct broker_wire_frame *frame)
 {
 	struct broker_send send;
-	struct connection *owner = frame->inline_length >= sizeof(send)
-					&& broker_wire_read(frame, 0, &send,
-							sizeof(send))
-			? connection_for_guest(
-					  broker_guest_of(send.dest_global_id))
-			: NULL;
+	if (frame->inline_length < sizeof(send)
+			|| !broker_wire_read(frame, 0, &send, sizeof(send))) {
+		broker_wire_free(frame);
+		return;
+	}
+	uint32_t guest_id = broker_guest_of(send.dest_global_id);
+	if (guest_id == BROKER_GUEST_ID) {
+		take_notice(frame);
+		broker_wire_free(frame);
+		return;
+	}
+	struct connection *owner = connection_for_guest(guest_id);
 	if (owner == NULL) {
 		broker_wire_free(frame);
 		return;
@@ -263,6 +271,22 @@ route_send(struct broker_wire_frame *frame)
 
 	frame->type = BROKER_DELIVER | (frame->type & BROKER_FRAME_OOL);
 	queue_frame(owner, frame);
+}
+
+static void
+take_notice(const struct broker_wire_frame *frame)
+{
+	struct {
+		struct broker_send send;
+		struct remote_header header;
+		struct remote_notice notice;
+	} blob;
+	if (frame->inline_length >= sizeof(blob)
+			&& broker_wire_read(frame, 0, &blob, sizeof(blob))
+			&& blob.header.message_size == 0
+			&& blob.notice.kind == REMOTE_NOTICE_DEAD) {
+		broker_names_forget_port(blob.notice.count);
+	}
 }
 
 static struct connection *

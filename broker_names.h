@@ -35,3 +35,4 @@ void broker_names_register(const struct broker_register *reg);
 struct broker_lookup_reply broker_names_look_up(
 		const struct broker_lookup *req);
 void broker_names_forget(uint32_t guest_id);
+void broker_names_forget_port(uint64_t global_id);
