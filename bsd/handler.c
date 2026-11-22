@@ -234,6 +234,7 @@ sys_fork(void)
 		thread_fork_child();
 		trace_fork_child();
 		broker_client_reset();
+		credentials_fork_child();
 		signals_fork_child();
 		aio_fork_child();
 	}
@@ -3237,24 +3238,22 @@ sys_access_extended(user_addr_t entries, size_t size, user_addr_t results,
 	return 0;
 }
 
-static __thread bool thread_identity;
-static __thread uid_t thread_uid;
-static __thread gid_t thread_gid;
-
 int
 sys_settid(void *uid, void *gid)
 {
-	unimplemented();
+	return credentials_settid((uid_t)(uintptr_t)uid, (gid_t)(uintptr_t)gid);
 }
 
 int
 sys_gettid(void *uidp, void *gidp)
 {
-	if (!thread_identity) {
+	uid_t uid;
+	gid_t gid;
+	if (!credentials_gettid(&uid, &gid)) {
 		return _ESRCH;
 	}
-	*(uint32_t *)uidp = thread_uid;
-	*(uint32_t *)gidp = thread_gid;
+	*(uint32_t *)uidp = uid;
+	*(uint32_t *)gidp = gid;
 	return 0;
 }
 
@@ -3335,7 +3334,14 @@ sys_getsid(uint64_t pid)
 int
 sys_settid_with_pid(uint64_t pid, int assume)
 {
-	unimplemented();
+	if (!assume) {
+		return credentials_settid(KAUTH_UID_NONE, KAUTH_GID_NONE);
+	}
+	struct process process;
+	if (pid == 0 || process_lookup((int32_t)pid, &process) != 0) {
+		return _ESRCH;
+	}
+	return credentials_settid(process.uid[1], process.gid[1]);
 }
 
 struct darwin_sigevent {
