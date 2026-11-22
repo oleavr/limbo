@@ -100,6 +100,13 @@ test('ipc_broker', python,
   timeout: 300,
 )
 
+test('names', python,
+  args: [runner, limbo, files('guest' / 'names.c'),
+    meson.current_build_dir(), limbo_broker],
+  suite: 'guest',
+  timeout: 300,
+)
+
 test('traced', python,
   args: [files('run-trace.py'), runner, limbo, limbo_trace,
     files('guest' / 'traced.c'), meson.current_build_dir()],

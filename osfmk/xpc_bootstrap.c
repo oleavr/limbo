@@ -88,7 +88,7 @@ static bool reply_event_publish(mach_msg_header_t *request);
 static void reply_with_port(mach_msg_header_t *request, mach_port_name_t port,
 		mach_msg_type_name_t disposition, uint32_t port_type,
 		bool with_metadata);
-static void reply_with_error(mach_msg_header_t *request);
+static void reply_with_error(mach_msg_header_t *request, kern_return_t error);
 static void parse_request(const void *body, uint32_t length,
 		struct xpc_request *out);
 static bool read_member(struct xpc_cursor *cursor, const char *name,
@@ -102,8 +102,8 @@ static void end_dictionary(struct xpc_builder *builder);
 static void append_key(struct xpc_builder *builder, const char *key);
 static void append_port(struct xpc_builder *builder, const char *key,
 		uint32_t port_type);
-static void append_string(struct xpc_builder *builder, const char *key,
-		const char *value);
+static void append_int64(
+		struct xpc_builder *builder, const char *key, int64_t value);
 static void append_bool(struct xpc_builder *builder, const char *key,
 		bool value);
 static void append_empty_array(struct xpc_builder *builder, const char *key);
@@ -149,8 +149,9 @@ look_up(mach_msg_header_t *request, const char *name)
 		return true;
 	}
 	mach_port_name_t service;
-	if (names_look_up(name, &service) != KERN_SUCCESS) {
-		reply_with_error(request);
+	kern_return_t kr = names_look_up(name, &service);
+	if (kr != KERN_SUCCESS) {
+		reply_with_error(request, kr);
 	} else {
 		reply_with_port(request, service, MACH_MSG_TYPE_MOVE_SEND,
 				XPC_SERIAL_MACH_SEND, true);
@@ -239,7 +240,7 @@ reply_event_publish(mach_msg_header_t *request)
 }
 
 static void
-reply_with_error(mach_msg_header_t *request)
+reply_with_error(mach_msg_header_t *request, kern_return_t error)
 {
 	uint8_t storage[256] = { 0 };
 	mach_msg_header_t *reply = (mach_msg_header_t *)storage;
@@ -251,7 +252,7 @@ reply_with_error(mach_msg_header_t *request)
 	append_u32(&builder, XPC_SERIAL_MAGIC);
 	append_u32(&builder, XPC_SERIAL_VERSION);
 	begin_dictionary(&builder, 1);
-	append_string(&builder, "error", "unknown service");
+	append_int64(&builder, "error", error);
 	end_dictionary(&builder);
 
 	reply->msgh_bits = MACH_MSGH_BITS(
@@ -432,15 +433,11 @@ append_uint64(struct xpc_builder *builder, const char *key, uint64_t value)
 }
 
 static void
-append_string(struct xpc_builder *builder, const char *key, const char *value)
+append_int64(struct xpc_builder *builder, const char *key, int64_t value)
 {
 	append_key(builder, key);
-	append_u32(builder, XPC_SERIAL_STRING);
-	uint32_t length = strlen(value) + 1;
-	append_u32(builder, length);
-	memcpy(builder->buffer + builder->offset, value, length);
-	builder->offset += length;
-	builder_align(builder);
+	append_u32(builder, XPC_SERIAL_INT64);
+	append_u64(builder, value);
 }
 
 static void
