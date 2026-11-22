@@ -53,8 +53,10 @@ static void dispatch_frame(const struct broker_frame *header,
 static void discard_frame(
 		const struct broker_frame *header, const void *payload);
 static uint32_t least_length(uint32_t type);
-static void expect_reply(void);
-static struct broker_lookup_reply await_reply(void);
+static void take_reply(const struct broker_frame *header, const void *payload);
+static void expect_reply(uint32_t type, void *reply, uint32_t length);
+static void stop_expecting(void);
+static bool await_reply(void);
 static int send_frame(uint32_t type, const void *payload, uint32_t length);
 static int send_parts(uint32_t type, const struct iovec *parts, int part_count,
 		const int *fds, size_t fd_count);
@@ -67,9 +69,11 @@ static pthread_mutex_t send_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t reply_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t reply_ready = PTHREAD_COND_INITIALIZER;
 static bool reply_pending;
+static bool reply_taken;
 static bool reader_ended;
-static struct broker_lookup_reply pending_lookup_reply;
-static struct broker_welcome pending_welcome;
+static uint32_t reply_type;
+static void *reply_buffer;
+static uint32_t reply_length;
 
 void
 broker_client_ensure(void)
@@ -113,29 +117,27 @@ broker_client_guest_id(void)
 }
 
 void
-broker_client_register(const char *name, uint64_t global_id)
+broker_client_post(uint32_t type, const void *request, uint32_t length)
 {
-	struct broker_register reg = { .global_id = global_id };
-	strncpy(reg.name, name, sizeof(reg.name) - 1);
 	pthread_mutex_lock(&call_lock);
-	send_frame(BROKER_REGISTER, &reg, sizeof(reg));
+	send_frame(type, request, length);
 	pthread_mutex_unlock(&call_lock);
 }
 
 bool
-broker_client_look_up(const char *name, uint64_t *global_id)
+broker_client_call(uint32_t type, const void *request, uint32_t length,
+		uint32_t reply_type, void *reply, uint32_t reply_length)
 {
-	struct broker_lookup req = { 0 };
-	strncpy(req.name, name, sizeof(req.name) - 1);
 	pthread_mutex_lock(&call_lock);
-	expect_reply();
-	struct broker_lookup_reply reply = {0};
-	if (send_frame(BROKER_LOOKUP, &req, sizeof(req)) == 0) {
-		reply = await_reply();
+	expect_reply(reply_type, reply, reply_length);
+	bool answered = false;
+	if (send_frame(type, request, length) == 0) {
+		answered = await_reply();
+	} else {
+		stop_expecting();
 	}
 	pthread_mutex_unlock(&call_lock);
-	*global_id = reply.global_id;
-	return reply.found;
+	return answered;
 }
 
 bool
@@ -172,10 +174,14 @@ connect_to_broker(const char *path)
 	pthread_t thread;
 	thread_create_own(&thread, NULL, read_until_end, NULL);
 
-	expect_reply();
-	send_parts(BROKER_HELLO, NULL, 0, NULL, 0);
-	await_reply();
-	guest_id = pending_welcome.guest_id;
+	struct broker_welcome welcome = {0};
+	expect_reply(BROKER_WELCOME, &welcome, sizeof(welcome));
+	if (send_parts(BROKER_HELLO, NULL, 0, NULL, 0) == 0) {
+		await_reply();
+	} else {
+		stop_expecting();
+	}
+	guest_id = welcome.guest_id;
 }
 
 static void *
@@ -186,7 +192,6 @@ read_until_end(void *user)
 	pthread_mutex_lock(&reply_lock);
 	reader_ended = true;
 	reply_pending = false;
-	pending_lookup_reply = (struct broker_lookup_reply){0};
 	pthread_cond_signal(&reply_ready);
 	pthread_mutex_unlock(&reply_lock);
 	ipc_remote_all_gone();
@@ -243,18 +248,8 @@ dispatch_frame(const struct broker_frame *header, const void *payload,
 
 	switch (header->type) {
 	case BROKER_WELCOME:
-		pthread_mutex_lock(&reply_lock);
-		pending_welcome = *(const struct broker_welcome *)payload;
-		reply_pending = false;
-		pthread_cond_signal(&reply_ready);
-		pthread_mutex_unlock(&reply_lock);
-		break;
 	case BROKER_LOOKUP_REPLY:
-		pthread_mutex_lock(&reply_lock);
-		pending_lookup_reply = *(const struct broker_lookup_reply *)payload;
-		reply_pending = false;
-		pthread_cond_signal(&reply_ready);
-		pthread_mutex_unlock(&reply_lock);
+		take_reply(header, payload);
 		break;
 	case BROKER_GUEST_GONE:
 		ipc_remote_guest_gone(
@@ -302,24 +297,50 @@ least_length(uint32_t type)
 }
 
 static void
-expect_reply(void)
+take_reply(const struct broker_frame *header, const void *payload)
 {
 	pthread_mutex_lock(&reply_lock);
-	reply_pending = !reader_ended;
-	pending_lookup_reply = (struct broker_lookup_reply){0};
+	if (reply_pending && header->type == reply_type) {
+		memcpy(reply_buffer, payload,
+				header->length < reply_length ? header->length
+							      : reply_length);
+		reply_pending = false;
+		reply_taken = true;
+		pthread_cond_signal(&reply_ready);
+	}
 	pthread_mutex_unlock(&reply_lock);
 }
 
-static struct broker_lookup_reply
+static void
+expect_reply(uint32_t type, void *reply, uint32_t length)
+{
+	pthread_mutex_lock(&reply_lock);
+	reply_type = type;
+	reply_buffer = reply;
+	reply_length = length;
+	reply_pending = !reader_ended;
+	reply_taken = false;
+	pthread_mutex_unlock(&reply_lock);
+}
+
+static void
+stop_expecting(void)
+{
+	pthread_mutex_lock(&reply_lock);
+	reply_pending = false;
+	pthread_mutex_unlock(&reply_lock);
+}
+
+static bool
 await_reply(void)
 {
 	pthread_mutex_lock(&reply_lock);
 	while (reply_pending) {
 		pthread_cond_wait(&reply_ready, &reply_lock);
 	}
-	struct broker_lookup_reply reply = pending_lookup_reply;
+	bool taken = reply_taken;
 	pthread_mutex_unlock(&reply_lock);
-	return reply;
+	return taken;
 }
 
 static int

@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -27,6 +28,7 @@
  */
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -34,7 +36,7 @@
 #include "broker.h"
 #include "broker_client.h"
 #include "ipc.h"
-#include <stdio.h>
+#include "names.h"
 #include "xpc_bootstrap.h"
 
 #define XPC_SERIAL_MAGIC 0x40585043
@@ -146,8 +148,8 @@ look_up(mach_msg_header_t *request, const char *name)
 				true);
 		return true;
 	}
-	mach_port_name_t service = ipc_service_look_up(name);
-	if (service == MACH_PORT_NULL) {
+	mach_port_name_t service;
+	if (names_look_up(name, &service) != KERN_SUCCESS) {
 		reply_with_error(request);
 	} else {
 		reply_with_port(request, service, MACH_MSG_TYPE_MOVE_SEND,
@@ -159,7 +161,8 @@ look_up(mach_msg_header_t *request, const char *name)
 static bool
 check_in(mach_msg_header_t *request, const char *name)
 {
-	mach_port_name_t service = ipc_service_check_in(name);
+	mach_port_name_t service;
+	names_check_in(name, &service);
 	reply_with_port(request, service, MACH_MSG_TYPE_MOVE_RECEIVE,
 			XPC_SERIAL_MACH_RECV, false);
 	return true;

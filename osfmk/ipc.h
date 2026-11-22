@@ -103,11 +103,10 @@ void ipc_remote_lost(
 		uint64_t dest_global_id, const void *blob, uint32_t length);
 void ipc_remote_guest_gone(uint32_t guest_id);
 void ipc_remote_all_gone(void);
-mach_port_name_t ipc_service_check_in(const char *name);
-mach_port_name_t ipc_service_look_up(const char *name);
+uint64_t ipc_names_hold(mach_port_name_t port);
+mach_port_name_t ipc_names_send_right(uint64_t global_id);
 mach_port_name_t ipc_libinfo_self(void);
 void ipc_port_adopt_kotype(mach_port_name_t name, ipc_kobject_type_t type);
-void ipc_service_register(const char *name, mach_port_name_t port);
 
 kern_return_t ipc_port_allocate(
 		mach_port_right_t right, mach_port_name_t *name);
