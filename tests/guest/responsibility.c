@@ -200,9 +200,14 @@ run_child(char *argv[])
 		check_heads();
 	}
 	if (strcmp(argv[1], "executes") == 0) {
-		char own[16];
-		snprintf(own, sizeof(own), "%d", getpid());
-		execl(self, self, "is", own, NULL);
+		char text[16];
+		snprintf(text, sizeof(text), "%d", number);
+		execl(self, self, "is", text, NULL);
+		return 1;
+	}
+	if (strcmp(argv[1], "respawns") == 0) {
+		spawn_self("is", number, NO_ATTRIBUTE, POSIX_SPAWN_SETEXEC,
+				environ);
 		return 1;
 	}
 	if (strcmp(argv[1], "replaces") == 0) {
@@ -432,6 +437,12 @@ check_spawned(void)
 			      "is", responsible, NO_ATTRIBUTE, 0, environ))
 			== 0);
 	check_held(NO_ATTRIBUTE, environ, false);
+	CHECK(exit_status_of(spawn_self("executes", responsible, NO_ATTRIBUTE,
+			      0, environ))
+			== 0);
+	CHECK(exit_status_of(spawn_self("respawns", responsible, NO_ATTRIBUTE,
+			      0, environ))
+			== 0);
 }
 
 static void
@@ -455,6 +466,9 @@ check_environment(void)
 			== 0);
 	check_held(NO_ATTRIBUTE, another, false);
 	check_held(1, named, true);
+	CHECK(exit_status_of(spawn_self("executes", responsible, NO_ATTRIBUTE,
+			      0, another))
+			== 0);
 }
 
 static void
