@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -36,6 +37,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -49,6 +51,10 @@ typedef ssize_t user_ssize_t;
 
 #define _MAXPATHLEN 1024
 
+#define PTY_POSITION (1LL << 40)
+#define PTYS_MAX     1024
+#define PTYS_END     (PTY_POSITION + PTYS_MAX)
+
 struct __darwin_struct_dirent {
 	uint64_t d_ino;
 	uint64_t d_seekoff;
@@ -57,6 +63,12 @@ struct __darwin_struct_dirent {
 	uint8_t d_type;
 	char d_name[_MAXPATHLEN];
 };
+
+static bool is_dev(int fd);
+static bool takes_pty_positions(int fd);
+static bool list_ptys(int dirfd, void *buf, user_size_t bufsize, size_t *used,
+		off_t index);
+static int by_number(const void *a, const void *b);
 
 user_ssize_t
 sys_getdirentries64(int dirfd, void *buf, user_size_t bufsize, off_t *position)
@@ -70,6 +82,12 @@ sys_getdirentries64(int dirfd, void *buf, user_size_t bufsize, off_t *position)
 	off_t resume = start;
 	bool full = false;
 	char entries[4096];
+	bool dev = is_dev(dirfd);
+	if (dev && start >= PTY_POSITION) {
+		full = !list_ptys(dirfd, buf, bufsize, &used,
+				start - PTY_POSITION);
+		goto done;
+	}
 	while (true) {
 		long size = syscall(SYS_getdents64, dirfd, entries,
 				sizeof(entries));
@@ -77,6 +95,9 @@ sys_getdirentries64(int dirfd, void *buf, user_size_t bufsize, off_t *position)
 			return err_map(errno);
 		}
 		if (size == 0) {
+			full = dev && takes_pty_positions(dirfd)
+					&& !list_ptys(dirfd, buf, bufsize,
+							&used, 0);
 			break;
 		}
 
@@ -129,4 +150,81 @@ sys_getdirentriesattr(int fd, void *alist, void *buffer, size_t buffersize,
 		void *count, void *basep, void *newstate, uint64_t options)
 {
 	unimplemented();
+}
+
+static bool
+is_dev(int fd)
+{
+	struct stat dir, dev;
+	return fstat(fd, &dir) == 0 && stat("/dev", &dev) == 0
+			&& dir.st_dev == dev.st_dev && dir.st_ino == dev.st_ino;
+}
+
+static bool
+takes_pty_positions(int fd)
+{
+	off_t end = lseek(fd, 0, SEEK_CUR);
+	bool takes = lseek(fd, PTYS_END, SEEK_SET) == PTYS_END
+			&& lseek(fd, PTY_POSITION, SEEK_SET) == PTY_POSITION;
+	if (!takes) {
+		lseek(fd, end, SEEK_SET);
+	}
+	return takes;
+}
+
+static bool
+list_ptys(int dirfd, void *buf, user_size_t bufsize, size_t *used, off_t index)
+{
+	static const size_t header
+			= offsetof(struct __darwin_struct_dirent, d_name);
+	unsigned long numbers[PTYS_MAX];
+	off_t count = 0;
+	DIR *pts = opendir("/dev/pts");
+	if (pts == NULL) {
+		return true;
+	}
+	struct dirent *d;
+	while ((d = readdir(pts)) != NULL && count < PTYS_MAX) {
+		char *end;
+		unsigned long number = strtoul(d->d_name, &end, 10);
+		if (end != d->d_name && *end == '\0') {
+			numbers[count++] = number;
+		}
+	}
+	closedir(pts);
+	qsort(numbers, count, sizeof(numbers[0]), by_number);
+	for (off_t i = index; i < count; i++) {
+		char path[32];
+		struct stat st = {0};
+		snprintf(path, sizeof(path), "/dev/pts/%lu", numbers[i]);
+		stat(path, &st);
+		struct __darwin_struct_dirent *ent
+				= (struct __darwin_struct_dirent *)((char *)buf
+						+ *used);
+		char name[32];
+		size_t namlen = snprintf(
+				name, sizeof(name), "ttys%03lu", numbers[i]);
+		size_t reclen = (header + namlen + 1 + 7) & ~7;
+		if (*used + reclen > bufsize) {
+			lseek(dirfd, PTY_POSITION + i, SEEK_SET);
+			return false;
+		}
+		ent->d_ino = st.st_ino;
+		ent->d_seekoff = PTY_POSITION + i + 1;
+		ent->d_reclen = reclen;
+		ent->d_namlen = namlen;
+		ent->d_type = DT_CHR;
+		memcpy(ent->d_name, name, namlen + 1);
+		*used += reclen;
+	}
+	lseek(dirfd, PTY_POSITION + count, SEEK_SET);
+	return true;
+}
+
+static int
+by_number(const void *a, const void *b)
+{
+	unsigned long x = *(const unsigned long *)a;
+	unsigned long y = *(const unsigned long *)b;
+	return x < y ? -1 : x > y;
 }
