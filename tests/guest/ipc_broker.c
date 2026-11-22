@@ -129,6 +129,7 @@ static const char DOOMED_NAME[] = "com.limbo.test.ipc.doomed";
 static const char RAW_NAME[] = "com.limbo.test.ipc.raw";
 static const char SINK_NAME[] = "com.limbo.test.ipc.sink";
 static const char KEEPER_NAME[] = "com.limbo.test.ipc.keeper";
+static const char RETURNER_NAME[] = "com.limbo.test.ipc.returner";
 static const char ANSWERED_NAME[] = "com.limbo.test.ipc.answered";
 static const mach_msg_id_t CHECK_IN = 402;
 static const mach_msg_id_t LOOK_UP = 404;
@@ -165,6 +166,7 @@ static const mach_msg_id_t FEED_ID = 7927;
 static const mach_msg_id_t BAD_REPLY_ID = 7928;
 static const mach_msg_id_t FAIL_HOME_ID = 7929;
 static const mach_msg_id_t RECEIVE_KEPT_ID = 7930;
+static const mach_msg_id_t DESTROY_KEPT_ID = 7931;
 static const mach_port_name_t NO_SUCH_NAME = 0x00fffe03;
 static const char FROM_SENDER[] = "from the sender";
 static const char FROM_RECEIVER[] = "from the receiver";
@@ -962,6 +964,12 @@ serve_peer(void)
 			answer(&message.Head,
 					fail_home(message.carrier.port.name,
 							held_reply));
+		} else if (message.Head.msgh_id == DESTROY_KEPT_ID) {
+			answer(&message.Head,
+					mach_port_mod_refs(mach_task_self(),
+							kept,
+							MACH_PORT_RIGHT_RECEIVE,
+							-1));
 		} else if (message.Head.msgh_id == RECEIVE_KEPT_ID) {
 			answer(&message.Head, receive_id(kept));
 		} else if (message.Head.msgh_id == LARGE_ID) {
@@ -2024,6 +2032,25 @@ check_failed_send(mach_port_t to)
 }
 
 static mach_port_t
+receive_destroyed(mach_port_t notify)
+{
+	struct {
+		mach_port_destroyed_notification_t notification;
+		mach_msg_trailer_t trailer;
+	} message;
+	CHECK(mach_msg(&message.notification.not_header,
+			      MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof(message), notify, ANSWER_MS,
+			      MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	CHECK(message.notification.not_header.msgh_id
+			== MACH_NOTIFY_PORT_DESTROYED);
+	mach_port_t port = message.notification.not_port.name;
+	CHECK(type_of(port) & MACH_PORT_TYPE_RECEIVE);
+	return port;
+}
+
+static mach_port_t
 move_to_keeper(mach_port_t keeper, mach_port_t port)
 {
 	carrier_t carrier = carrier_of(keeper, KEEP_ID, port);
@@ -2062,7 +2089,25 @@ check_moved_rights(void)
 	send_request(&queued);
 	move_to_keeper(keeper.port, port);
 	CHECK(ask_for(keeper.port, RECEIVE_KEPT_ID) == MARK_ID);
+
+	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
+	mach_port_t notify = request_notification(
+			port, MACH_NOTIFY_PORT_DESTROYED);
+	move_to_keeper(keeper.port, port);
+	CHECK(ask_for(keeper.port, DESTROY_KEPT_ID) == KERN_SUCCESS);
+	port = receive_destroyed(notify);
+	mach_port_t previous;
+	CHECK(mach_port_request_notification(mach_task_self(), port,
+			      MACH_NOTIFY_PORT_DESTROYED, 0, notify,
+			      MACH_MSG_TYPE_MAKE_SEND_ONCE, &previous)
+			== KERN_SUCCESS);
 	end_peer(&keeper);
+
+	child_t returner = start_peer(RETURNER_NAME);
+	move_to_keeper(returner.port, port);
+	end_peer(&returner);
+	destroy_port(receive_destroyed(notify));
+	destroy_port(notify);
 }
 
 static void
