@@ -31,7 +31,8 @@
 
 #include "broker.h"
 
-void broker_names_register(const struct broker_register *reg);
+struct broker_registered broker_names_register(
+		uint32_t guest_id, const struct broker_register *reg);
 struct broker_lookup_reply broker_names_look_up(
 		const struct broker_lookup *req);
 void broker_names_forget(uint32_t guest_id);

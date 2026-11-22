@@ -31,6 +31,7 @@
 #include "broker_names.h"
 
 struct service {
+	uint32_t guest_id;
 	uint64_t global_id;
 	char name[LIMBO_BROKER_SERVICE_NAME_MAX];
 };
@@ -40,17 +41,26 @@ static struct service *service_named(const char *name);
 static struct service *services;
 static size_t service_count;
 
-void
-broker_names_register(const struct broker_register *reg)
+struct broker_registered
+broker_names_register(uint32_t guest_id, const struct broker_register *reg)
 {
 	struct service *service = service_named(reg->name);
-	if (service == NULL) {
-		services = reallocarray(
-				services, service_count + 1, sizeof(*services));
-		service = &services[service_count++];
-		strncpy(service->name, reg->name, sizeof(service->name) - 1);
+	if (service != NULL) {
+		return (struct broker_registered){
+				.holder = service->guest_id == guest_id
+						? BROKER_NAME_ASKERS
+						: BROKER_NAME_ANOTHERS,
+		};
 	}
-	service->global_id = reg->global_id;
+
+	services = reallocarray(services, service_count + 1, sizeof(*services));
+	service = &services[service_count++];
+	*service = (struct service){
+			.guest_id = guest_id,
+			.global_id = reg->global_id,
+	};
+	strncpy(service->name, reg->name, sizeof(service->name) - 1);
+	return (struct broker_registered){.holder = BROKER_NAME_FREE};
 }
 
 struct broker_lookup_reply
@@ -68,7 +78,9 @@ broker_names_forget(uint32_t guest_id)
 {
 	size_t kept = 0;
 	for (size_t i = 0; i != service_count; i++) {
-		if (broker_guest_of(services[i].global_id) != guest_id) {
+		if (services[i].guest_id != guest_id
+				&& broker_guest_of(services[i].global_id)
+						!= guest_id) {
 			services[kept++] = services[i];
 		}
 	}

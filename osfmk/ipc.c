@@ -1849,6 +1849,27 @@ ipc_names_hold(mach_port_name_t port)
 	return global_id;
 }
 
+void
+ipc_names_release(mach_port_name_t port)
+{
+	pthread_mutex_lock(&lock);
+	struct ipc_entry *entry = lookup(port);
+	if (entry != NULL && (entry->type & MACH_PORT_TYPE_RECEIVE)) {
+		release_grants(entry, BROKER_GUEST_ID, 1);
+	} else if (entry != NULL && entry->port->remote) {
+		queue_notice((struct pending_notice){
+				.global_id = entry->port->global_id,
+				.notice = {
+						.kind = REMOTE_NOTICE_RELEASE,
+						.guest_id = BROKER_GUEST_ID,
+						.count = 1,
+				},
+		});
+	}
+	pthread_mutex_unlock(&lock);
+	flush_notices();
+}
+
 mach_port_name_t
 ipc_names_send_right(uint64_t global_id)
 {

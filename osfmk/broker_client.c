@@ -280,6 +280,8 @@ least_length(uint32_t type)
 		return sizeof(struct broker_welcome);
 	case BROKER_LOOKUP_REPLY:
 		return sizeof(struct broker_lookup_reply);
+	case BROKER_REGISTERED:
+		return sizeof(struct broker_registered);
 	case BROKER_DELIVER:
 		return sizeof(struct broker_send);
 	case BROKER_GUEST_GONE:

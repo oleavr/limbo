@@ -211,8 +211,11 @@ handle_guest(int fd)
 				&& broker_wire_read(frame, 0, &request.reg,
 						sizeof(request.reg))) {
 			request.reg.name[sizeof(request.reg.name) - 1] = '\0';
-			broker_names_register(&request.reg);
-			send_frame(conn, BROKER_REGISTERED, NULL, 0);
+			struct broker_registered registered
+					= broker_names_register(conn->guest_id,
+							&request.reg);
+			send_frame(conn, BROKER_REGISTERED, &registered,
+					sizeof(registered));
 		}
 		break;
 	case BROKER_LOOKUP:

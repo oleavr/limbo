@@ -72,6 +72,16 @@ struct broker_register {
 	char name[LIMBO_BROKER_SERVICE_NAME_MAX];
 };
 
+enum broker_name_holder {
+	BROKER_NAME_FREE,
+	BROKER_NAME_ASKERS,
+	BROKER_NAME_ANOTHERS,
+};
+
+struct broker_registered {
+	uint32_t holder;
+};
+
 struct broker_lookup {
 	char name[LIMBO_BROKER_SERVICE_NAME_MAX];
 };

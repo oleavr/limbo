@@ -163,7 +163,11 @@ static bool
 check_in(mach_msg_header_t *request, const char *name)
 {
 	mach_port_name_t service;
-	names_check_in(name, &service);
+	kern_return_t kr = names_check_in(name, &service);
+	if (kr != KERN_SUCCESS) {
+		reply_with_error(request, kr);
+		return true;
+	}
 	reply_with_port(request, service, MACH_MSG_TYPE_MOVE_RECEIVE,
 			XPC_SERIAL_MACH_RECV, false);
 	return true;
