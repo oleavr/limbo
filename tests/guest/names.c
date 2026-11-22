@@ -49,6 +49,7 @@ typedef struct {
 static const char UNKNOWN_NAME[] = "com.limbo.test.names.unknown";
 static const char DOOMED_NAME[] = "com.limbo.test.names.doomed";
 static const char TAKEN_NAME[] = "com.limbo.test.names.taken";
+static const char COUNTED_NAME[] = "com.limbo.test.names.counted";
 
 static server_t start_server(const char *name);
 static void serve(const char *name, int commands, int answers);
@@ -103,6 +104,54 @@ check_taken_names(void)
 			== KERN_SUCCESS);
 }
 
+static void
+check_looked_up_right_counted(void)
+{
+	server_t server = start_server(COUNTED_NAME);
+	mach_port_t port = MACH_PORT_NULL;
+	CHECK(bootstrap_look_up(bootstrap_port, COUNTED_NAME, &port)
+			== KERN_SUCCESS);
+	mach_port_t notify = MACH_PORT_NULL;
+	CHECK(mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+			      &notify)
+			== KERN_SUCCESS);
+	mach_port_t previous;
+	CHECK(mach_port_request_notification(mach_task_self(), port,
+			      MACH_NOTIFY_DEAD_NAME, 0, notify,
+			      MACH_MSG_TYPE_MAKE_SEND_ONCE, &previous)
+			== KERN_SUCCESS);
+
+	tell(&server, 'd');
+	struct {
+		mach_dead_name_notification_t notification;
+		mach_msg_trailer_t trailer;
+	} message;
+	CHECK(mach_msg(&message.notification.not_header,
+			      MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof(message), notify, ANSWER_MS,
+			      MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	CHECK(message.notification.not_header.msgh_id == MACH_NOTIFY_DEAD_NAME);
+	CHECK(message.notification.not_port == port);
+	mach_msg_header_t request = {
+			.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0),
+			.msgh_size = sizeof(request),
+			.msgh_remote_port = port,
+	};
+	CHECK(mach_msg(&request, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+			      sizeof(request), 0, MACH_PORT_NULL, ANSWER_MS,
+			      MACH_PORT_NULL)
+			== MACH_SEND_INVALID_DEST);
+
+	stop_server(&server);
+	CHECK(mach_port_mod_refs(mach_task_self(), port,
+			      MACH_PORT_RIGHT_DEAD_NAME, -2)
+			== KERN_SUCCESS);
+	CHECK(mach_port_mod_refs(mach_task_self(), notify,
+			      MACH_PORT_RIGHT_RECEIVE, -1)
+			== KERN_SUCCESS);
+}
+
 int
 main(void)
 {
@@ -110,6 +159,7 @@ main(void)
 	check_unknown_name();
 	check_dead_port_forgotten();
 	check_taken_names();
+	check_looked_up_right_counted();
 	return 0;
 }
 
