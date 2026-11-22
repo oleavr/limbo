@@ -52,10 +52,10 @@
 #include "eventlink.h"
 #include "ipc.h"
 #include "ipc_remote.h"
-#include "libinfo.h"
 #include "mach_vm.h"
 #include "trace.h"
 #include "xpc_bootstrap.h"
+#include "xpc_service.h"
 
 typedef enum {
 	IPC_USER,
@@ -471,19 +471,15 @@ ipc_bootstrap_self(void)
 	return kobject_send_right(IPC_KOBJECT_BOOTSTRAP);
 }
 
-mach_port_name_t
-ipc_libinfo_self(void)
-{
-	return kobject_send_right(IPC_KOBJECT_LIBINFO);
-}
-
 void
-ipc_port_adopt_kotype(mach_port_name_t name, ipc_kobject_type_t type)
+ipc_port_adopt_kobject(
+		mach_port_name_t name, ipc_kobject_type_t type, void *kobject)
 {
 	pthread_mutex_lock(&lock);
 	struct ipc_entry *entry = lookup(name);
 	if (entry != NULL) {
 		entry->port->kotype = type;
+		entry->port->kobject = kobject;
 	}
 	pthread_mutex_unlock(&lock);
 }
@@ -724,11 +720,12 @@ send(mach_msg_header_t *msg, mach_msg_size_t size, ipc_side_t sender,
 	write_trailer(kmsg->header, dest, kmsg->sender_pid);
 	bool serve_xpc = dest->kotype == IPC_KOBJECT_BOOTSTRAP
 			&& xpc_bootstrap_is_message(kmsg->header->msgh_id);
-	bool serve_libinfo = dest->kotype == IPC_KOBJECT_LIBINFO;
+	void *service = dest->kotype == IPC_KOBJECT_XPC_SERVICE ? dest->kobject
+								: NULL;
 	pthread_mutex_unlock(&lock);
 
-	if (serve_libinfo) {
-		libinfo_serve(kmsg->header);
+	if (service != NULL) {
+		xpc_service_serve(service, kmsg->header);
 	} else if (!serve_xpc || !xpc_bootstrap_serve(kmsg->header)) {
 		serve_kobject(kmsg->header);
 	}
@@ -3809,7 +3806,8 @@ entry_release_if_unused(struct ipc_entry *entry)
 	} else if (port->kotype == IPC_KOBJECT_EVENTLINK) {
 		eventlink_port_gone(port->kobject);
 		free(port);
-	} else if (port->kotype == IPC_KOBJECT_TASK_NAME) {
+	} else if (port->kotype == IPC_KOBJECT_TASK_NAME
+			|| port->kotype == IPC_KOBJECT_XPC_SERVICE) {
 		free(port);
 	}
 	entry->port = NULL;

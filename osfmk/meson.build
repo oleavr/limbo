@@ -37,6 +37,7 @@ osfmk_lib = static_library('osfmk',
     'libinfo.c',
     'xpc_bootstrap.c',
     'xpc_serial.c',
+    'xpc_service.c',
   ],
   include_directories: include_dir,
   c_args: [

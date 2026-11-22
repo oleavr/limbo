@@ -33,11 +33,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "ipc.h"
 #include "sysroot.h"
-#include "xpc_serial.h"
 
-#define LIBINFO_HANDSHAKE_ID 0x77303074
 #define REPLY_MAX            4096
 
 struct passwd_entry {
@@ -50,53 +47,29 @@ struct passwd_entry {
 	char shell[256];
 };
 
-static void adopt_request_port(mach_msg_header_t *request);
+static void serve(mach_msg_header_t *request, const struct xpc_object *message);
 static bool passwd_lookup(uint64_t uid, struct passwd_entry *out);
 static void reply_with_passwd(
 		mach_msg_header_t *request, const struct passwd_entry *entry);
 static void reply_empty(mach_msg_header_t *request);
 
-bool
-libinfo_is_handshake(mach_msg_id_t id)
-{
-	return id == LIBINFO_HANDSHAKE_ID;
-}
+const struct xpc_service libinfo_service = {
+		.name = "com.apple.system.opendirectoryd.libinfo",
+		.handler = serve,
+};
 
-void
-libinfo_serve(mach_msg_header_t *request)
+static void
+serve(mach_msg_header_t *request, const struct xpc_object *message)
 {
-	if (libinfo_is_handshake(request->msgh_id)) {
-		adopt_request_port(request);
-		return;
-	}
-
-	struct xpc_object message;
-	const char *rpc_name = xpc_serial_payload(request, &message)
-			? xpc_serial_get_string(&message, "rpc_name")
-			: NULL;
+	const char *rpc_name = xpc_serial_get_string(message, "rpc_name");
 	uint64_t uid = 0;
 	struct passwd_entry entry;
 	if (rpc_name != NULL && strcmp(rpc_name, "getpwuid") == 0
-			&& xpc_serial_get_int(&message, "uid", &uid)
+			&& xpc_serial_get_int(message, "uid", &uid)
 			&& passwd_lookup(uid, &entry)) {
 		reply_with_passwd(request, &entry);
 	} else {
 		reply_empty(request);
-	}
-}
-
-static void
-adopt_request_port(mach_msg_header_t *request)
-{
-	mach_msg_body_t *body = (mach_msg_body_t *)(request + 1);
-	mach_msg_port_descriptor_t *descriptor
-			= (mach_msg_port_descriptor_t *)(body + 1);
-	for (mach_msg_size_t i = 0; i < body->msgh_descriptor_count; i++) {
-		if (descriptor->disposition == MACH_MSG_TYPE_PORT_RECEIVE) {
-			ipc_port_adopt_kotype(
-					descriptor->name, IPC_KOBJECT_LIBINFO);
-		}
-		descriptor++;
 	}
 }
 
@@ -162,7 +135,7 @@ reply_with_passwd(mach_msg_header_t *request, const struct passwd_entry *entry)
 	xpc_encoder_uuid(&encoder, "pw_uuid", uuid);
 	xpc_encoder_int64(&encoder, "rpc_version", 2);
 	xpc_encoder_end(&encoder);
-	xpc_serial_reply(request, &encoder, ipc_kernel_send);
+	xpc_service_reply(request, &encoder);
 }
 
 static void
@@ -173,5 +146,5 @@ reply_empty(mach_msg_header_t *request)
 	xpc_encoder_init(&encoder, buffer, sizeof(buffer));
 	xpc_encoder_begin_dictionary(&encoder, NULL);
 	xpc_encoder_end(&encoder);
-	xpc_serial_reply(request, &encoder, ipc_kernel_send);
+	xpc_service_reply(request, &encoder);
 }
