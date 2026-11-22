@@ -105,6 +105,7 @@ void ipc_remote_guest_gone(uint32_t guest_id);
 void ipc_remote_all_gone(void);
 uint64_t ipc_names_hold(mach_port_name_t port);
 void ipc_names_release(mach_port_name_t port);
+bool ipc_names_lives(uint64_t global_id);
 mach_port_name_t ipc_names_send_right(uint64_t global_id);
 mach_port_name_t ipc_libinfo_self(void);
 void ipc_port_adopt_kotype(mach_port_name_t name, ipc_kobject_type_t type);

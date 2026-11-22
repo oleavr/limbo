@@ -161,7 +161,11 @@ connect_to_broker(const char *path)
 	broker_fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
 	struct sockaddr_un addr = { .sun_family = AF_UNIX };
 	strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
-	connect(broker_fd, (struct sockaddr *)&addr, sizeof(addr));
+	if (connect(broker_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+		close(broker_fd);
+		broker_fd = -1;
+		return;
+	}
 
 	pthread_t thread;
 	thread_create_own(&thread, NULL, read_until_end, NULL);
