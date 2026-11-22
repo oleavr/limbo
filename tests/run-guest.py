@@ -31,7 +31,8 @@ def main():
     register_binfmt(Path(limbo).resolve(), Path(outdir) / "binfmt")
     drop_privileges()
     binary = compile_program(xcrun, Path(source), Path(outdir))
-    broker_process = start_broker(broker, Path(outdir)) if broker else None
+    broker_process = (start_broker(broker, Path(outdir) / f"{binary.name}.sock")
+                      if broker else None)
     try:
         result = subprocess.run([binary], cwd=outdir, timeout=240)
     finally:
@@ -40,8 +41,7 @@ def main():
     sys.exit(result.returncode)
 
 
-def start_broker(broker, outdir):
-    socket_path = outdir / "broker.sock"
+def start_broker(broker, socket_path):
     if socket_path.exists():
         socket_path.unlink()
     process = subprocess.Popen([broker, str(socket_path)])
