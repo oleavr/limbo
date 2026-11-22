@@ -1291,6 +1291,16 @@ receive_notice(uint64_t dest_global_id, const struct remote_notice *notice)
 		queue_send_once_notifications(entry,
 				forget_send_onces(port->name, notice->guest_id,
 						notice->count));
+	} else if (port == NULL && notice->kind == REMOTE_NOTICE_ADD
+			&& !guest_is_gone(notice->guest_id)) {
+		queue_notice((struct pending_notice){
+				.global_id = broker_global_id(
+						notice->guest_id, 0),
+				.notice = {
+						.kind = REMOTE_NOTICE_DEAD,
+						.count = dest_global_id,
+				},
+		});
 	}
 	pthread_mutex_unlock(&lock);
 	flush_notices();
@@ -1874,9 +1884,21 @@ mach_port_name_t
 ipc_names_send_right(uint64_t global_id)
 {
 	pthread_mutex_lock(&lock);
+	uint32_t guest_id = broker_client_guest_id();
 	mach_port_name_t name = import_remote_send(
-			global_id, MACH_MSG_TYPE_PORT_SEND, BROKER_GUEST_ID);
+			global_id, MACH_MSG_TYPE_PORT_SEND, guest_id);
+	if (MACH_PORT_VALID(name) && lookup(name)->port->remote) {
+		queue_notice((struct pending_notice){
+				.global_id = global_id,
+				.notice = {
+						.kind = REMOTE_NOTICE_ADD,
+						.guest_id = guest_id,
+						.count = 1,
+				},
+		});
+	}
 	pthread_mutex_unlock(&lock);
+	flush_notices();
 	return name;
 }
 

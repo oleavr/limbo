@@ -127,6 +127,7 @@ static const char HOLDER_NAME[] = "com.limbo.test.ipc.holder";
 static const char THIRD_NAME[] = "com.limbo.test.ipc.third";
 static const char DOOMED_NAME[] = "com.limbo.test.ipc.doomed";
 static const char RAW_NAME[] = "com.limbo.test.ipc.raw";
+static const char SINK_NAME[] = "com.limbo.test.ipc.sink";
 static const char ANSWERED_NAME[] = "com.limbo.test.ipc.answered";
 static const mach_msg_id_t CHECK_IN = 402;
 static const mach_msg_id_t LOOK_UP = 404;
@@ -168,6 +169,8 @@ static const char FROM_RECEIVER[] = "from the receiver";
 
 static const char *peer_name = PEER_NAME;
 
+static child_t start_peer(const char *name);
+static void end_peer(const child_t *child);
 int fileport_makeport(int fd, mach_port_t *port);
 int fileport_makefd(mach_port_t port);
 static const char REQUEST_DATA[] = "out of line";
@@ -564,7 +567,9 @@ call(void)
 			sizeof(message), notify, 100, MACH_PORT_NULL);
 	CHECK(kr == MACH_RCV_TIMED_OUT);
 
-	move_receive_right_away(service);
+	child_t sink = start_peer(SINK_NAME);
+	move_receive_right_away(sink.port);
+	end_peer(&sink);
 }
 
 static void
@@ -1610,8 +1615,14 @@ receive_raw_id(int fd)
 		carrier_t carrier;
 		uint64_t id;
 	} delivered;
-	receive_raw(fd, &delivered, sizeof(delivered));
-	CHECK(delivered.frame.type == BROKER_DELIVER);
+	ssize_t length;
+	do {
+		struct pollfd polled = {.fd = fd, .events = POLLIN};
+		CHECK(poll(&polled, 1, ANSWER_MS) == 1);
+		length = recv(fd, &delivered, sizeof(delivered), 0);
+	} while (length != sizeof(delivered)
+			|| delivered.frame.type != BROKER_DELIVER
+			|| delivered.remote.message_size != sizeof(carrier_t));
 	return delivered.id;
 }
 
@@ -2036,11 +2047,20 @@ check_send_once_rights(void)
 	CHECK(ask_for(holder.port, CHECK_IN_ID) == 1);
 	mach_port_t doomed = look_up(DOOMED_NAME);
 	CHECK(ask_for(holder.port, DESTROY_ID) == KERN_SUCCESS);
-	reply = post_for(doomed, MARK_ID);
-	CHECK(receive_notification(
-			      reply, MACH_NOTIFY_SEND_ONCE, ANSWER_MS, &unused)
-			== MACH_MSG_SUCCESS);
-	destroy_port(reply);
+	CHECK(type_of(doomed) == MACH_PORT_TYPE_DEAD_NAME);
+	mach_msg_header_t marked = {
+			.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0),
+			.msgh_size = sizeof(marked),
+			.msgh_remote_port = doomed,
+			.msgh_id = MARK_ID,
+	};
+	CHECK(mach_msg(&marked, MACH_SEND_MSG, sizeof(marked), 0,
+			      MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+			      MACH_PORT_NULL)
+			== MACH_SEND_INVALID_DEST);
+	CHECK(mach_port_mod_refs(mach_task_self(), doomed,
+			      MACH_PORT_RIGHT_DEAD_NAME, -1)
+			== KERN_SUCCESS);
 
 	reply = post_for(holder.port, HOLD_REPLY_ID);
 	CHECK(ask_for(holder.port, TYPE_ID) == 0);
