@@ -2576,6 +2576,13 @@ map_page_aligned(size_t len, int prot, int tflags, int fd, off_t pos)
 }
 #endif
 
+#ifndef __x86_64__
+static void *map_code(void *addr, size_t len, int prot, int tflags, int fd,
+		off_t pos);
+static uint64_t patch_mapped_thread_self_reads(
+		uint8_t *mapped, size_t len, int fd, off_t pos);
+#endif
+
 user_addr_t
 sys_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t pos)
 {
@@ -2608,7 +2615,10 @@ sys_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t pos)
 #ifdef __x86_64__
 	r = mmap(addr, len, prot, tflags, fd, pos);
 #else
-	if (tflags & MAP_FIXED) {
+	if ((prot & PROT_EXEC) && (tflags & MAP_PRIVATE)
+			&& !(tflags & MAP_ANON)) {
+		r = map_code(addr, len, prot, tflags, fd, pos);
+	} else if (tflags & MAP_FIXED) {
 		r = mmap(addr, len, prot, tflags, fd, pos);
 	} else {
 		r = map_page_aligned(len, prot, tflags, fd, pos);
@@ -2624,6 +2634,87 @@ sys_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t pos)
 	}
 	return r;
 }
+
+#ifndef __x86_64__
+static void *
+map_code(void *addr, size_t len, int prot, int tflags, int fd, off_t pos)
+{
+	void *r = map_page_aligned(len, PROT_READ | PROT_WRITE,
+			tflags & ~MAP_FIXED, fd, pos);
+	if (r == MAP_FAILED) {
+		return r;
+	}
+	uint64_t patched = patch_mapped_thread_self_reads(r, len, fd, pos);
+	void *placed = r;
+	if (mprotect(r, len, prot) == -1
+			|| ((tflags & MAP_FIXED)
+					&& (placed = mremap(r, len, len,
+							    MREMAP_MAYMOVE | MREMAP_FIXED,
+							    addr))
+							== MAP_FAILED)) {
+		int error = errno;
+		munmap(r, len);
+		errno = error;
+		return MAP_FAILED;
+	}
+	__builtin___clear_cache((char *)placed, (char *)placed + patched);
+	return placed;
+}
+
+static uint64_t
+patch_mapped_thread_self_reads(uint8_t *mapped, size_t len, int fd, off_t pos)
+{
+	struct stat file;
+	if (fstat(fd, &file) == -1 || file.st_size <= pos) {
+		return 0;
+	}
+	uint64_t size = (uint64_t)(file.st_size - pos);
+	size = size < len ? size : len;
+	const struct mach_header_64 *header = (const void *)mapped;
+	if (size < sizeof(*header) || header->magic != MH_MAGIC_64
+			|| header->sizeofcmds > size - sizeof(*header)) {
+		return 0;
+	}
+	const uint32_t instructions
+			= S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS;
+	uint32_t count = header->ncmds, commands_size = header->sizeofcmds;
+	uint64_t commands_end = sizeof(*header) + commands_size;
+	const uint8_t *commands = (const uint8_t *)(header + 1);
+	uint32_t at = 0;
+	for (uint32_t i = 0; i < count; i++) {
+		const struct load_command *command
+				= (const void *)(commands + at);
+		if (commands_size - at < sizeof(*command)
+				|| command->cmdsize < sizeof(*command)
+				|| command->cmdsize > commands_size - at) {
+			return size;
+		}
+		at += command->cmdsize;
+		const struct segment_command_64 *segment
+				= (const void *)command;
+		if (command->cmd != LC_SEGMENT_64
+				|| command->cmdsize < sizeof(*segment)) {
+			continue;
+		}
+		const struct section_64 *sections = (const void *)(segment + 1);
+		uint32_t room = (command->cmdsize - sizeof(*segment))
+				/ sizeof(sections[0]);
+		for (uint32_t s = 0; s < segment->nsects && s < room; s++) {
+			uint64_t offset = sections[s].offset;
+			uint64_t length = sections[s].size;
+			bool inside = offset >= commands_end && length <= size
+					&& offset <= size - length;
+			if ((sections[s].flags & instructions) && inside
+					&& offset % sizeof(uint32_t) == 0) {
+				patch_thread_self_reads(
+						(uintptr_t)mapped + offset,
+						length);
+			}
+		}
+	}
+	return size;
+}
+#endif
 
 #define _SEEK_SET 0
 #define _SEEK_CUR 1
