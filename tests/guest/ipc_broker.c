@@ -128,6 +128,7 @@ static const char THIRD_NAME[] = "com.limbo.test.ipc.third";
 static const char DOOMED_NAME[] = "com.limbo.test.ipc.doomed";
 static const char RAW_NAME[] = "com.limbo.test.ipc.raw";
 static const char SINK_NAME[] = "com.limbo.test.ipc.sink";
+static const char KEEPER_NAME[] = "com.limbo.test.ipc.keeper";
 static const char ANSWERED_NAME[] = "com.limbo.test.ipc.answered";
 static const mach_msg_id_t CHECK_IN = 402;
 static const mach_msg_id_t LOOK_UP = 404;
@@ -1869,15 +1870,6 @@ check_sender_counts(void)
 	destroy_port(port);
 	end_peer(&third);
 
-	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
-	carrier = carrier_of(holder.port, KEEP_ID, port);
-	carrier.port.disposition = MACH_MSG_TYPE_MOVE_RECEIVE;
-	CHECK(ask(&carrier.Head) == 1);
-	CHECK(ask_for(holder.port, WATCH_ID) == 1);
-	CHECK(ask_for(holder.port, WATCHED_ID) == 0);
-	CHECK(mach_port_deallocate(mach_task_self(), port) == KERN_SUCCESS);
-	CHECK(ask_for(holder.port, WATCHED_ID) == 1);
-
 	port = give_send_right(holder.port);
 	CHECK(ask_for(holder.port, TYPE_ID) == MACH_PORT_TYPE_SEND);
 	destroy_port(port);
@@ -2025,6 +2017,37 @@ check_failed_send(mach_port_t to)
 			      reply, MACH_NOTIFY_SEND_ONCE, ANSWER_MS, &unused)
 			== MACH_MSG_SUCCESS);
 	destroy_port(reply);
+}
+
+static mach_port_t
+move_to_keeper(mach_port_t keeper, mach_port_t port)
+{
+	carrier_t carrier = carrier_of(keeper, KEEP_ID, port);
+	carrier.port.disposition = MACH_MSG_TYPE_MOVE_RECEIVE;
+	CHECK(ask(&carrier.Head) == 1);
+	CHECK(ask_for(keeper, WATCH_ID) == 1);
+	return port;
+}
+
+static void
+check_moved_rights(void)
+{
+	child_t keeper = start_peer(KEEPER_NAME);
+	mach_port_t port;
+	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
+	move_to_keeper(keeper.port, port);
+	CHECK(type_of(port) == 0);
+	CHECK(ask_for(keeper.port, WATCHED_ID) == 1);
+
+	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
+	mach_port_insert_right(
+			mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND);
+	move_to_keeper(keeper.port, port);
+	CHECK(type_of(port) == MACH_PORT_TYPE_SEND);
+	CHECK(ask_for(keeper.port, WATCHED_ID) == 0);
+	CHECK(mach_port_deallocate(mach_task_self(), port) == KERN_SUCCESS);
+	CHECK(ask_for(keeper.port, WATCHED_ID) == 1);
+	end_peer(&keeper);
 }
 
 static void
@@ -2299,6 +2322,7 @@ main(int argc, char *argv[])
 	check_gone_process();
 	check_sender_counts();
 	check_send_once_rights();
+	check_moved_rights();
 	check_forwarded_send_once();
 	check_remote_notify_port();
 	return 0;

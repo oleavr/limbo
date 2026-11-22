@@ -982,10 +982,6 @@ export_body_port(mach_port_name_t name, mach_msg_type_name_t disposition,
 					| (++transfer_counter & 0xfffff));
 	entry->port->remote = true;
 	entry->port->grants = 1;
-	entry->type = MACH_PORT_TYPE_SEND;
-	if (entry->urefs == 0) {
-		entry->urefs = 1;
-	}
 	return entry->port->global_id;
 }
 
