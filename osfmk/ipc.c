@@ -1682,8 +1682,11 @@ count_right(mach_port_name_t name, mach_msg_type_name_t type,
 	struct ipc_entry *entry = lookup(name);
 	bool owned = entry != NULL && entry->port->global_id == global_id
 			&& (entry->type & MACH_PORT_TYPE_RECEIVE);
-	uint32_t owner = broker_guest_of(global_id);
-	bool elsewhere = !owned && global_id != 0 && owner != UINT32_MAX
+	uint64_t owner_id = broker_guest_of(global_id) == BROKER_GUEST_ID
+			? 0
+			: global_id;
+	uint32_t owner = broker_guest_of(owner_id);
+	bool elsewhere = !owned && owner_id != 0 && owner != UINT32_MAX
 			&& ((entry != NULL && entry->port->remote)
 					|| owner != broker_client_guest_id());
 	if (owned && type == MACH_MSG_TYPE_PORT_SEND && sent) {
@@ -1697,7 +1700,7 @@ count_right(mach_port_name_t name, mach_msg_type_name_t type,
 				forget_send_onces(name, dest_guest_id, 1));
 	} else if (elsewhere && type == MACH_MSG_TYPE_PORT_SEND_ONCE) {
 		queue_notice((struct pending_notice){
-				.global_id = global_id,
+				.global_id = owner_id,
 				.notice = {
 						.kind = sent ? REMOTE_NOTICE_SEND_ONCE_MOVED
 							     : REMOTE_NOTICE_SEND_ONCE,
@@ -1708,7 +1711,7 @@ count_right(mach_port_name_t name, mach_msg_type_name_t type,
 		});
 	} else if (elsewhere && type == MACH_MSG_TYPE_PORT_SEND) {
 		queue_notice((struct pending_notice){
-				.global_id = global_id,
+				.global_id = owner_id,
 				.notice = {
 						.kind = sent ? REMOTE_NOTICE_ADD
 							     : REMOTE_NOTICE_RELEASE,
@@ -3022,10 +3025,11 @@ mach_port_name_t
 ipc_names_send_right(uint64_t global_id)
 {
 	pthread_mutex_lock(&lock);
+	bool held = broker_guest_of(global_id) == BROKER_GUEST_ID;
 	uint32_t guest_id = broker_client_guest_id();
 	mach_port_name_t name = import_remote_send(
 			global_id, MACH_MSG_TYPE_PORT_SEND, guest_id, guest_id);
-	if (MACH_PORT_VALID(name) && lookup(name)->port->remote) {
+	if (MACH_PORT_VALID(name) && !held && lookup(name)->port->remote) {
 		queue_notice((struct pending_notice){
 				.global_id = global_id,
 				.notice = {
@@ -3038,6 +3042,17 @@ ipc_names_send_right(uint64_t global_id)
 	pthread_mutex_unlock(&lock);
 	flush_notices();
 	return name;
+}
+
+void
+ipc_names_keep(uint64_t global_id, uint64_t held_global_id)
+{
+	pthread_mutex_lock(&lock);
+	struct ipc_port *port = port_for_global_id(global_id);
+	if (port != NULL) {
+		port->global_id = held_global_id;
+	}
+	pthread_mutex_unlock(&lock);
 }
 
 static mach_msg_return_t
@@ -4881,7 +4896,9 @@ port_has_receiver(const struct ipc_port *port)
 static void
 queue_send_once_notifications(struct ipc_entry *entry, uint32_t count)
 {
-	if (entry->port->remote && count != 0) {
+	if (entry->port->remote && count != 0
+			&& broker_guest_of(entry->port->global_id)
+					!= BROKER_GUEST_ID) {
 		queue_notice((struct pending_notice){
 				.global_id = entry->port->global_id,
 				.notice = {
