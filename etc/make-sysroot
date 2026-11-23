@@ -38,7 +38,7 @@ cp /System/Library/CoreServices/SystemVersion.plist \
 	"$small/System/Library/CoreServices/"
 cp -RP /System/Library/PrivateFrameworks/AppleSystemInfo.framework \
 	"$small/System/Library/PrivateFrameworks/"
-cp -RP /bin/sh /bin/bash /bin/echo /bin/ls "$small/bin/"
+cp -RP /bin/sh /bin/bash /bin/echo /bin/ls /bin/sleep "$small/bin/"
 cp -RP /usr/bin/xcrun /usr/bin/xcode-select "$small/usr/bin/"
 cp -RP /usr/lib/dyld /usr/lib/*.dylib "$small/usr/lib/"
 cp -RP /usr/share/firmlinks "$small/usr/share/"
