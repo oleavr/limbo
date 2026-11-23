@@ -55,7 +55,13 @@ xpc_service_look_up(const char *name, mach_port_name_t *port)
 	if (kr != BOOTSTRAP_UNKNOWN_SERVICE) {
 		return kr;
 	}
+	*port = xpc_service_stand_in(name);
+	return *port != MACH_PORT_NULL ? KERN_SUCCESS : kr;
+}
 
+mach_port_name_t
+xpc_service_stand_in(const char *name)
+{
 	for (size_t i = 0; i < sizeof(services) / sizeof(services[0]); i++) {
 		struct service_port *service = &services[i];
 		if (strcmp(service->service->name, name) != 0) {
@@ -69,11 +75,11 @@ xpc_service_look_up(const char *name, mach_port_name_t *port)
 			service->port = ipc_kobject_alloc(
 					IPC_KOBJECT_XPC_SERVICE, service);
 		}
-		*port = ipc_kobject_copy_send(service->port);
+		mach_port_name_t port = ipc_kobject_copy_send(service->port);
 		pthread_mutex_unlock(&lock);
-		return KERN_SUCCESS;
+		return port;
 	}
-	return kr;
+	return MACH_PORT_NULL;
 }
 
 void
@@ -95,6 +101,19 @@ mach_msg_return_t
 xpc_service_reply(mach_msg_header_t *request, const struct xpc_encoder *encoder)
 {
 	return xpc_serial_reply(request, encoder, ipc_kernel_send);
+}
+
+void
+xpc_launchd_reply(mach_msg_header_t *request, const struct xpc_encoder *encoder)
+{
+	xpc_serial_reply(request, encoder, ipc_launchd_send);
+}
+
+void
+xpc_launchd_send(mach_port_name_t port, mach_msg_type_name_t disposition,
+		const struct xpc_encoder *encoder)
+{
+	xpc_serial_send(port, disposition, encoder, ipc_launchd_send);
 }
 
 static void
