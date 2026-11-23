@@ -263,18 +263,23 @@ broker_client_task_for_pid(int32_t pid)
 
 mach_msg_return_t
 broker_client_send(uint64_t dest_global_id, const void *blob, uint32_t length,
-		const int *fds, size_t fd_count)
+		const int *fds, size_t fd_count, const uint64_t *moved,
+		size_t moved_count)
 {
 
 	struct broker_send send = {
 			.dest_global_id = dest_global_id,
 			.blob_length = length,
 	};
-	struct iovec parts[2] = {
+	struct iovec parts[3] = {
 			{.iov_base = &send, .iov_len = sizeof(send)},
 			{.iov_base = (void *)blob, .iov_len = length},
+			{.iov_base = (void *)moved,
+					.iov_len
+					= moved_count * sizeof(*moved)},
 	};
-	return send_result(send_parts(BROKER_SEND, parts, 2, fds, fd_count));
+	return send_result(send_parts(BROKER_SEND, parts,
+			moved_count != 0 ? 3 : 2, fds, fd_count));
 }
 
 static void
@@ -377,6 +382,12 @@ dispatch_frame(const struct broker_frame *header, const void *payload,
 	case BROKER_REGISTERED:
 		take_reply(header, payload);
 		break;
+	case BROKER_MOVED:
+		ipc_remote_port_moved(((const struct broker_moved *)payload)
+						      ->global_id,
+				((const struct broker_moved *)payload)
+						->guest_id);
+		break;
 	case BROKER_GUEST_GONE:
 		ipc_remote_guest_gone(
 				((const struct broker_guest_gone *)payload)
@@ -418,6 +429,8 @@ least_length(uint32_t type)
 		return sizeof(struct broker_registered);
 	case BROKER_DELIVER:
 		return sizeof(struct broker_send);
+	case BROKER_MOVED:
+		return sizeof(struct broker_moved);
 	case BROKER_GUEST_GONE:
 		return sizeof(struct broker_guest_gone);
 	default:

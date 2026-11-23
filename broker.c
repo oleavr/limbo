@@ -67,6 +67,11 @@ union broker_request {
 	struct broker_task_for_pid task_for_pid;
 };
 
+struct route {
+	uint64_t global_id;
+	uint32_t guest_id;
+};
+
 struct service {
 	uint32_t guest_id;
 	uint64_t global_id;
@@ -88,8 +93,15 @@ static void look_up_service(struct connection *conn,
 		const struct broker_lookup *req);
 static void task_for_pid(
 		struct connection *conn, const struct broker_task_for_pid *req);
-static void route_send(struct broker_wire_frame *frame);
-static void take_notice(const struct broker_wire_frame *frame);
+static void route_send(
+		struct connection *conn, struct broker_wire_frame *frame);
+static void pass_on(struct broker_wire_frame *frame, struct broker_send *send);
+static void set_route(uint64_t global_id, uint32_t guest_id);
+static struct route *route_for(uint64_t global_id);
+static uint32_t route_of(uint64_t global_id);
+static void forget_routes(uint32_t guest_id);
+static void take_notice(
+		struct connection *conn, const struct broker_wire_frame *frame);
 static struct connection *connection_for_fd(int fd);
 static struct connection *connection_for_guest(uint32_t guest_id);
 static struct service *service_named(const char *name);
@@ -105,6 +117,8 @@ static void send_pending(struct connection *conn);
 static bool send_data(int fd, struct broker_wire_frame *frame);
 
 static struct connection *connections;
+static struct route *routes;
+static size_t route_count;
 static size_t connection_count;
 static struct service *services;
 static size_t service_count;
@@ -220,7 +234,7 @@ handle_guest(int fd)
 	}
 	uint32_t type = frame->type & ~BROKER_FRAME_OOL;
 	if (type == BROKER_SEND && !frame->lost) {
-		route_send(frame);
+		route_send(conn, frame);
 		return;
 	}
 
@@ -344,7 +358,7 @@ task_for_pid(struct connection *conn, const struct broker_task_for_pid *req)
 }
 
 static void
-route_send(struct broker_wire_frame *frame)
+route_send(struct connection *conn, struct broker_wire_frame *frame)
 {
 	struct broker_send send;
 	if (frame->inline_length < sizeof(send)
@@ -354,24 +368,85 @@ route_send(struct broker_wire_frame *frame)
 	}
 	uint32_t guest_id = broker_guest_of(send.dest_global_id);
 	if (guest_id == BROKER_GUEST_ID) {
-		take_notice(frame);
+		take_notice(conn, frame);
 		broker_wire_free(frame);
 		return;
 	}
-	struct connection *owner = connection_for_guest(guest_id);
+	pass_on(frame, &send);
+}
+
+static void
+pass_on(struct broker_wire_frame *frame, struct broker_send *send)
+{
+	struct connection *owner
+			= connection_for_guest(route_of(send->dest_global_id));
 	if (owner == NULL) {
 		broker_wire_free(frame);
 		return;
 	}
+	uint32_t moved_at = sizeof(*send) + send->blob_length;
+	uint32_t moved_count
+			= send->blob_length <= frame->length - sizeof(*send)
+			? (frame->length - moved_at) / sizeof(uint64_t)
+			: 0;
+	uint64_t *moved = moved_count != 0
+			? malloc(moved_count * sizeof(*moved))
+			: NULL;
+	if (moved != NULL
+			&& !broker_wire_read(frame, moved_at, moved,
+					moved_count * sizeof(*moved))) {
+		moved_count = 0;
+	}
 
-	send.sender = (struct broker_sender){0};
-	memcpy(frame->payload, &send, sizeof(send));
+	send->sender = (struct broker_sender){0};
+	memcpy(frame->payload, send, sizeof(*send));
 	frame->type = BROKER_DELIVER | (frame->type & BROKER_FRAME_OOL);
+	uint32_t guest_id = owner->guest_id;
 	queue_frame(owner, frame);
+	for (uint32_t i = 0; i != moved_count; i++) {
+		set_route(moved[i], guest_id);
+	}
+	free(moved);
 }
 
 static void
-take_notice(const struct broker_wire_frame *frame)
+set_route(uint64_t global_id, uint32_t guest_id)
+{
+	struct route *route = route_for(global_id);
+	if (route == NULL && guest_id == broker_guest_of(global_id)) {
+		return;
+	}
+	if (route == NULL) {
+		routes = reallocarray(routes, route_count + 1, sizeof(*routes));
+		route = &routes[route_count++];
+		*route = (struct route){.global_id = global_id};
+	}
+	route->guest_id = guest_id;
+	if (guest_id == broker_guest_of(global_id)) {
+		*route = routes[--route_count];
+	}
+}
+
+static struct route *
+route_for(uint64_t global_id)
+{
+	for (size_t i = 0; i != route_count; i++) {
+		if (routes[i].global_id == global_id) {
+			return &routes[i];
+		}
+	}
+	return NULL;
+}
+
+static uint32_t
+route_of(uint64_t global_id)
+{
+	struct route *route = route_for(global_id);
+	return route != NULL ? route->guest_id : broker_guest_of(global_id);
+}
+
+static void
+take_notice(struct connection *conn, const struct broker_wire_frame *frame)
 {
 	struct {
 		struct broker_send send;
@@ -383,6 +458,10 @@ take_notice(const struct broker_wire_frame *frame)
 			&& blob.header.message_size == 0
 			&& blob.notice.kind == REMOTE_NOTICE_DEAD) {
 		broker_names_forget_port(blob.notice.count);
+	} else if (frame->inline_length >= sizeof(blob)
+			&& blob.header.message_size == 0
+			&& blob.notice.kind == REMOTE_NOTICE_RETURNED) {
+		set_route(blob.notice.count, conn->guest_id);
 	}
 }
 
@@ -480,9 +559,39 @@ remove_connection(size_t index)
 	connections[index] = connections[--connection_count];
 
 	broker_names_forget(gone.guest_id);
+	if (gone.guest_id != 0) {
+		forget_routes(gone.guest_id);
+	}
 	for (size_t i = 0; gone.guest_id != 0 && i != connection_count; i++) {
 		send_frame(&connections[i], BROKER_GUEST_GONE, &gone,
 				sizeof(gone));
+	}
+}
+
+static void
+forget_routes(uint32_t guest_id)
+{
+	for (size_t i = 0; i != route_count;) {
+		struct broker_moved moved = {
+				.global_id = routes[i].global_id,
+				.guest_id = routes[i].guest_id,
+		};
+		bool lost = routes[i].guest_id == guest_id;
+		bool outlives = !lost
+				&& broker_guest_of(routes[i].global_id)
+						== guest_id;
+		if (lost) {
+			broker_names_forget_port(routes[i].global_id);
+			moved.guest_id = 0;
+			routes[i] = routes[--route_count];
+		} else {
+			i++;
+		}
+		for (size_t c = 0; (lost || outlives) && c != connection_count;
+				c++) {
+			send_frame(&connections[c], BROKER_MOVED, &moved,
+					sizeof(moved));
+		}
 	}
 }
 

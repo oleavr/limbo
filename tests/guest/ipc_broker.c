@@ -99,6 +99,12 @@ typedef struct {
 } carriers_t;
 
 typedef struct {
+	mach_msg_header_t Head;
+	mach_msg_body_t body;
+	mach_msg_port_descriptor_t port;
+} right_message_t;
+
+typedef struct {
 	pid_t pid;
 	pid_t guardian;
 	mach_port_t port;
@@ -135,6 +141,9 @@ static const char RETURNER_NAME[] = "com.limbo.test.ipc.returner";
 static const char ANSWERED_NAME[] = "com.limbo.test.ipc.answered";
 static const mach_msg_id_t CHECK_IN = 402;
 static const mach_msg_id_t LOOK_UP = 404;
+static const char RETURNED_SERVICE_NAME[] = "com.limbo.test.ipc.returned";
+static const char SEND_ONCE_BACK_SERVICE_NAME[]
+		= "com.limbo.test.ipc.send-once-back";
 static const mach_msg_id_t REQUEST_ID = 7777;
 static const mach_msg_id_t REPLY_ID = 7877;
 static const mach_msg_id_t QUIT_ID = 7900;
@@ -180,6 +189,15 @@ static child_t start_peer(const char *name);
 static void end_peer(const child_t *child);
 static bool is_broker_socket(int fd);
 static void look_up_after_dup2_over_low_fds(void);
+static void send_right_outlives_mover(void);
+static void receive_right_comes_back(void);
+static void send_once_comes_back(void);
+static mach_port_t receive_right(mach_port_t port);
+static void send_right(mach_port_t dest, mach_port_t right,
+		mach_msg_type_name_t disposition);
+static void send_empty(mach_port_t dest, mach_msg_id_t id);
+static void signal_to(int fd);
+static void wait_for(int fd);
 int fileport_makeport(int fd, mach_port_t *port);
 int fileport_makefd(mach_port_t port);
 static const char REQUEST_DATA[] = "out of line";
@@ -2419,5 +2437,343 @@ main(int argc, char *argv[])
 	check_moved_rights();
 	check_forwarded_send_once();
 	check_remote_notify_port();
+	send_right_outlives_mover();
+	receive_right_comes_back();
+	send_once_comes_back();
 	return 0;
+}
+
+static void
+send_right_outlives_mover(void)
+{
+	static const char HOLDER[] = "com.limbo.test.ipc.outlasting";
+	static const char OWNER[] = "com.limbo.test.ipc.owner";
+	int to_parent[2], got[2], to_mover[2];
+	CHECK(pipe(to_parent) == 0 && pipe(got) == 0 && pipe(to_mover) == 0);
+
+	pid_t owner = fork();
+	CHECK(owner >= 0);
+	if (owner == 0) {
+		mach_port_t service = bootstrap_call(CHECK_IN, OWNER);
+		CHECK(service != MACH_PORT_NULL);
+		signal_to(to_parent[1]);
+		mach_port_t port = receive_right(service);
+		mach_port_type_t type;
+		CHECK(mach_port_type(mach_task_self(), port, &type)
+				== KERN_SUCCESS);
+		CHECK(type & MACH_PORT_TYPE_RECEIVE);
+		CHECK(receive_id(port) == REQUEST_ID + 3);
+		signal_to(got[1]);
+		_exit(0);
+	}
+	wait_for(to_parent[0]);
+	pid_t mover = fork();
+	CHECK(mover >= 0);
+	if (mover == 0) {
+		wait_for(to_mover[0]);
+		mach_port_t port;
+		CHECK(mach_port_allocate(mach_task_self(),
+				      MACH_PORT_RIGHT_RECEIVE, &port)
+				== KERN_SUCCESS);
+		mach_port_t to_the_holder = bootstrap_call(LOOK_UP, HOLDER);
+		CHECK(to_the_holder != MACH_PORT_NULL);
+		send_right(to_the_holder, port, MACH_MSG_TYPE_MAKE_SEND);
+		mach_port_t to_the_owner = bootstrap_call(LOOK_UP, OWNER);
+		CHECK(to_the_owner != MACH_PORT_NULL);
+		send_right(to_the_owner, port, MACH_MSG_TYPE_MOVE_RECEIVE);
+		_exit(0);
+	}
+	mach_port_t holder = bootstrap_call(CHECK_IN, HOLDER);
+	CHECK(holder != MACH_PORT_NULL);
+	signal_to(to_mover[1]);
+	mach_port_t port = receive_right(holder);
+	int status;
+	CHECK(waitpid(mover, &status, 0) == mover && WIFEXITED(status)
+			&& WEXITSTATUS(status) == 0);
+	sleep(1);
+
+	mach_port_type_t type;
+	CHECK(mach_port_type(mach_task_self(), port, &type) == KERN_SUCCESS);
+	CHECK(type & MACH_PORT_TYPE_SEND);
+	send_empty(port, REQUEST_ID + 3);
+	wait_for(got[0]);
+	CHECK(waitpid(owner, &status, 0) == owner && WIFEXITED(status)
+			&& WEXITSTATUS(status) == 0);
+}
+
+static void
+receive_right_comes_back(void)
+{
+	pid_t pid = fork();
+	CHECK(pid >= 0);
+	if (pid == 0) {
+		mach_port_t service = bootstrap_call(
+				CHECK_IN, RETURNED_SERVICE_NAME);
+		CHECK(service != MACH_PORT_NULL);
+		struct {
+			mach_msg_header_t Head;
+			mach_msg_body_t body;
+			mach_msg_port_descriptor_t port;
+			mach_msg_trailer_t trailer;
+		} request;
+		memset(&request, 0, sizeof(request));
+		CHECK(mach_msg(&request.Head, MACH_RCV_MSG, 0, sizeof(request),
+				      service, MACH_MSG_TIMEOUT_NONE,
+				      MACH_PORT_NULL)
+				== MACH_MSG_SUCCESS);
+		CHECK(request.Head.msgh_bits & MACH_MSGH_BITS_COMPLEX);
+		mach_port_t port = request.port.name;
+		CHECK(mach_port_mod_refs(mach_task_self(), port,
+				      MACH_PORT_RIGHT_RECEIVE, -1)
+				== KERN_SUCCESS);
+		sleep(3);
+		_exit(0);
+	}
+
+	mach_port_t service = MACH_PORT_NULL;
+	for (int attempt = 0; attempt != 50 && service == MACH_PORT_NULL;
+			attempt++) {
+		service = bootstrap_call(LOOK_UP, RETURNED_SERVICE_NAME);
+		if (service == MACH_PORT_NULL) {
+			usleep(100000);
+		}
+	}
+	CHECK(service != MACH_PORT_NULL);
+
+	mach_port_t port;
+	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
+	CHECK(mach_port_insert_right(mach_task_self(), port, port,
+			      MACH_MSG_TYPE_MAKE_SEND)
+			== KERN_SUCCESS);
+	mach_port_t notify;
+	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &notify);
+	mach_port_t previous = MACH_PORT_NULL;
+	CHECK(mach_port_request_notification(mach_task_self(), port,
+			      MACH_NOTIFY_PORT_DESTROYED, 0, notify,
+			      MACH_MSG_TYPE_MAKE_SEND_ONCE, &previous)
+			== KERN_SUCCESS);
+
+	struct {
+		mach_msg_header_t Head;
+		mach_msg_body_t body;
+		mach_msg_port_descriptor_t port;
+	} message;
+	memset(&message, 0, sizeof(message));
+	message.Head.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0)
+			| MACH_MSGH_BITS_COMPLEX;
+	message.Head.msgh_remote_port = service;
+	message.Head.msgh_size = sizeof(message);
+	message.Head.msgh_id = REQUEST_ID;
+	message.body.msgh_descriptor_count = 1;
+	message.port.name = port;
+	message.port.disposition = MACH_MSG_TYPE_MOVE_RECEIVE;
+	message.port.type = MACH_MSG_PORT_DESCRIPTOR;
+	CHECK(mach_msg(&message.Head, MACH_SEND_MSG, sizeof(message), 0,
+			      MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+			      MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+
+	struct {
+		mach_port_destroyed_notification_t notification;
+		char padding[64];
+	} back;
+	CHECK(mach_msg(&back.notification.not_header,
+			      MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(back),
+			      notify, 1500, MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	CHECK(back.notification.not_header.msgh_id
+			== MACH_NOTIFY_PORT_DESTROYED);
+	mach_port_type_t type;
+	CHECK(mach_port_type(mach_task_self(), back.notification.not_port.name,
+			      &type)
+			== KERN_SUCCESS);
+	CHECK(type & MACH_PORT_TYPE_RECEIVE);
+
+	int status;
+	waitpid(pid, &status, 0);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
+static void
+send_once_comes_back(void)
+{
+	pid_t pid = fork();
+	CHECK(pid >= 0);
+	if (pid == 0) {
+		mach_port_t service = bootstrap_call(
+				CHECK_IN, SEND_ONCE_BACK_SERVICE_NAME);
+		CHECK(service != MACH_PORT_NULL);
+		struct {
+			mach_msg_header_t Head;
+			mach_msg_body_t body;
+			mach_msg_port_descriptor_t port;
+			mach_msg_trailer_t trailer;
+		} request;
+		memset(&request, 0, sizeof(request));
+		CHECK(mach_msg(&request.Head, MACH_RCV_MSG, 0, sizeof(request),
+				      service, MACH_MSG_TIMEOUT_NONE,
+				      MACH_PORT_NULL)
+				== MACH_MSG_SUCCESS);
+		CHECK(request.port.disposition == MACH_MSG_TYPE_PORT_SEND_ONCE);
+
+		struct {
+			mach_msg_header_t Head;
+			mach_msg_body_t body;
+			mach_msg_port_descriptor_t port;
+		} reply;
+		memset(&reply, 0, sizeof(reply));
+		reply.Head.msgh_bits
+				= MACH_MSGH_BITS(MACH_MSGH_BITS_REMOTE(
+								 request.Head.msgh_bits),
+						  0)
+				| MACH_MSGH_BITS_COMPLEX;
+		reply.Head.msgh_remote_port = request.Head.msgh_remote_port;
+		reply.Head.msgh_size = sizeof(reply);
+		reply.Head.msgh_id = REPLY_ID;
+		reply.body.msgh_descriptor_count = 1;
+		reply.port.name = request.port.name;
+		reply.port.disposition = MACH_MSG_TYPE_MOVE_SEND_ONCE;
+		reply.port.type = MACH_MSG_PORT_DESCRIPTOR;
+		CHECK(mach_msg(&reply.Head, MACH_SEND_MSG, sizeof(reply), 0,
+				      MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+				      MACH_PORT_NULL)
+				== MACH_MSG_SUCCESS);
+		sleep(2);
+		_exit(0);
+	}
+
+	mach_port_t service = MACH_PORT_NULL;
+	for (int attempt = 0; attempt != 50 && service == MACH_PORT_NULL;
+			attempt++) {
+		service = bootstrap_call(LOOK_UP, SEND_ONCE_BACK_SERVICE_NAME);
+		if (service == MACH_PORT_NULL) {
+			usleep(100000);
+		}
+	}
+	CHECK(service != MACH_PORT_NULL);
+
+	mach_port_t dropped, reply_port;
+	CHECK(mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+			      &dropped)
+			== KERN_SUCCESS);
+	CHECK(mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+			      &reply_port)
+			== KERN_SUCCESS);
+	struct {
+		mach_msg_header_t Head;
+		mach_msg_body_t body;
+		mach_msg_port_descriptor_t port;
+	} request;
+	memset(&request, 0, sizeof(request));
+	request.Head.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+						 MACH_MSG_TYPE_MAKE_SEND_ONCE)
+			| MACH_MSGH_BITS_COMPLEX;
+	request.Head.msgh_remote_port = service;
+	request.Head.msgh_local_port = reply_port;
+	request.Head.msgh_size = sizeof(request);
+	request.Head.msgh_id = REQUEST_ID;
+	request.body.msgh_descriptor_count = 1;
+	request.port.name = dropped;
+	request.port.disposition = MACH_MSG_TYPE_MAKE_SEND_ONCE;
+	request.port.type = MACH_MSG_PORT_DESCRIPTOR;
+	CHECK(mach_msg(&request.Head, MACH_SEND_MSG, sizeof(request), 0,
+			      MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+			      MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+
+	struct {
+		mach_msg_header_t Head;
+		mach_msg_body_t body;
+		mach_msg_port_descriptor_t port;
+		char padding[64];
+	} message;
+	memset(&message, 0, sizeof(message));
+	CHECK(mach_msg(&message.Head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof(message), reply_port, 5000, MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	CHECK(message.Head.msgh_id == REPLY_ID);
+	CHECK(message.port.name == dropped);
+	CHECK(message.port.disposition == MACH_MSG_TYPE_PORT_SEND_ONCE);
+	mach_port_type_t type;
+	CHECK(mach_port_type(mach_task_self(), dropped, &type) == KERN_SUCCESS);
+	CHECK(type & MACH_PORT_TYPE_SEND_ONCE);
+	CHECK(mach_port_deallocate(mach_task_self(), dropped) == KERN_SUCCESS);
+
+	memset(&message, 0, sizeof(message));
+	CHECK(mach_msg(&message.Head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof(message), dropped, 1500, MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	CHECK(message.Head.msgh_id == MACH_NOTIFY_SEND_ONCE);
+
+	int status;
+	waitpid(pid, &status, 0);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	CHECK(mach_msg(&message.Head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof(message), dropped, 500, MACH_PORT_NULL)
+			== MACH_RCV_TIMED_OUT);
+}
+
+static mach_port_t
+receive_right(mach_port_t port)
+{
+	struct {
+		right_message_t message;
+		mach_msg_trailer_t trailer;
+		char padding[64];
+	} buffer;
+	memset(&buffer, 0, sizeof(buffer));
+	kern_return_t kr = mach_msg(&buffer.message.Head, MACH_RCV_MSG, 0,
+			sizeof(buffer), port, 8000, MACH_PORT_NULL);
+	CHECK(kr == MACH_MSG_SUCCESS);
+	CHECK(buffer.message.Head.msgh_bits & MACH_MSGH_BITS_COMPLEX);
+	return buffer.message.port.name;
+}
+
+static void
+send_right(mach_port_t dest, mach_port_t right,
+		mach_msg_type_name_t disposition)
+{
+	right_message_t message;
+	memset(&message, 0, sizeof(message));
+	message.Head.msgh_bits = MACH_MSGH_BITS_COMPLEX
+			| MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	message.Head.msgh_remote_port = dest;
+	message.Head.msgh_size = sizeof(message);
+	message.Head.msgh_id = REQUEST_ID;
+	message.body.msgh_descriptor_count = 1;
+	message.port.name = right;
+	message.port.disposition = disposition;
+	message.port.type = MACH_MSG_PORT_DESCRIPTOR;
+	kern_return_t kr = mach_msg(&message.Head, MACH_SEND_MSG,
+			sizeof(message), 0, MACH_PORT_NULL,
+			MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	CHECK(kr == MACH_MSG_SUCCESS);
+}
+
+static void
+send_empty(mach_port_t dest, mach_msg_id_t id)
+{
+	mach_msg_header_t message;
+	memset(&message, 0, sizeof(message));
+	message.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	message.msgh_remote_port = dest;
+	message.msgh_size = sizeof(message);
+	message.msgh_id = id;
+	CHECK(mach_msg(&message, MACH_SEND_MSG, sizeof(message), 0,
+			      MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+			      MACH_PORT_NULL)
+			== KERN_SUCCESS);
+}
+
+static void
+signal_to(int fd)
+{
+	CHECK(write(fd, "x", 1) == 1);
+}
+
+static void
+wait_for(int fd)
+{
+	char byte;
+	CHECK(read(fd, &byte, 1) == 1);
 }

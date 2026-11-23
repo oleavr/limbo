@@ -170,6 +170,11 @@ struct port_return {
 	struct ipc_port *notify;
 };
 
+struct moved_away {
+	struct moved_away *next;
+	uint64_t global_id;
+};
+
 struct own_name {
 	uint64_t global_id;
 	char name[LIMBO_BROKER_SERVICE_NAME_MAX];
@@ -234,7 +239,8 @@ static struct ipc_entry *entries;
 static uint32_t entry_count;
 static struct ipc_port *kobjects[IPC_KOBJECT_VOUCHER + 1];
 static uint32_t export_counter;
-static uint32_t transfer_counter;
+static struct moved_away *moved_aways;
+static struct moved_away *outliving_ports;
 struct guest_pid {
 	uint32_t guest_id;
 	int32_t pid;
@@ -260,6 +266,14 @@ static mach_msg_return_t remote_send(mach_msg_header_t *header,
 static void finish_moves(struct moved_port *queued, bool sent);
 static void return_ports(uint64_t global_id, uint32_t guest_id);
 static void return_port(uint64_t global_id, struct ipc_port *notify);
+static bool port_is_gone(uint64_t global_id);
+static bool moved_away(struct moved_away *list, uint64_t global_id);
+static void forget_moved_away(struct moved_away **list, uint64_t global_id);
+static bool forward_frame(uint64_t global_id, const void *blob, uint32_t length,
+		const int *fds, size_t fd_count);
+static void export_holders(
+		struct ipc_entry *entry, uint8_t **data, uint32_t *data_length);
+static void import_holders(struct ipc_entry *entry, const uint8_t **data);
 static void release_out_of_line(mach_msg_header_t *header);
 static void release_ool_ports(mach_msg_header_t *header);
 static mach_msg_return_t remote_copyin(
@@ -300,11 +314,12 @@ static bool remote_right_fits(
 		uint64_t global_id, mach_msg_type_name_t disposition);
 static void import_body_ports(mach_msg_header_t *header,
 		const uint64_t *global_ids, const uint8_t *data, const int *fds,
-		size_t fd_count, uint32_t sender_guest_id);
+		size_t fd_count, uint32_t sender_guest_id,
+		uint32_t meant_guest_id);
 static mach_port_name_t import_body_port(uint64_t global_id,
 		mach_msg_type_name_t type, const int **fds,
 		const uint8_t **data, const int *all_fds, size_t fd_count,
-		uint32_t sender_guest_id);
+		uint32_t sender_guest_id, uint32_t meant_guest_id);
 static mach_port_name_t import_fileport(int fd);
 static void turn_dead(struct ipc_entry *entry);
 static void remember_gone(uint32_t guest_id);
@@ -352,7 +367,8 @@ static void remember_guest_pid(uint32_t guest_id, int32_t pid);
 static void forget_guest_pid(uint32_t guest_id);
 static struct ipc_port *port_for_global_id(uint64_t global_id);
 static mach_port_name_t import_remote_send(uint64_t global_id,
-		mach_msg_type_name_t type, uint32_t sender_guest_id);
+		mach_msg_type_name_t type, uint32_t sender_guest_id,
+		uint32_t meant_guest_id);
 
 static void kill_kobject_port(struct ipc_entry *entry);
 static mach_port_name_t kobject_send_right(ipc_kobject_type_t type);
@@ -500,6 +516,11 @@ ipc_fork_child(void)
 		port_free_if_unheld(record->notify);
 		free(record);
 	}
+	while (moved_aways != NULL) {
+		struct moved_away *away = moved_aways;
+		moved_aways = away->next;
+		free(away);
+	}
 	for (uint32_t i = 1; i < entry_count; i++) {
 		if (entries[i].port != NULL) {
 			entries[i].port->sender_guest_count = 0;
@@ -543,8 +564,9 @@ ipc_task_for_pid(int32_t pid)
 		return MACH_PORT_NULL;
 	}
 	pthread_mutex_lock(&lock);
-	mach_port_name_t name = import_remote_send(
-			global_id, MACH_MSG_TYPE_PORT_SEND, BROKER_GUEST_ID);
+	mach_port_name_t name = import_remote_send(global_id,
+			MACH_MSG_TYPE_PORT_SEND, BROKER_GUEST_ID,
+			broker_client_guest_id());
 	remember_guest_pid(broker_guest_of(global_id), pid);
 	pthread_mutex_unlock(&lock);
 	return name;
@@ -1011,8 +1033,15 @@ remote_send(mach_msg_header_t *header, mach_msg_size_t size, ipc_side_t sender,
 		close_fds(&fds);
 		mr = MACH_SEND_NO_BUFFER;
 	} else {
+		uint64_t *moved = malloc((id_count + 1) * sizeof(*moved));
+		size_t moved_count = 0;
+		for (struct moved_port *move = queued; move != NULL;
+				move = move->next) {
+			moved[moved_count++] = move->global_id;
+		}
 		mr = broker_client_send(dest_global_id, blob, blob_length,
-				fds.fds, fds.count);
+				fds.fds, fds.count, moved, moved_count);
+		free(moved);
 	}
 	pthread_mutex_lock(&lock);
 	if (mr != MACH_MSG_SUCCESS) {
@@ -1043,6 +1072,8 @@ finish_moves(struct moved_port *queued, bool sent)
 		queued = move->next;
 		if (move->destroyed_notify != NULL && !sent) {
 			return_port(move->global_id, move->destroyed_notify);
+		} else if (!sent) {
+			forget_moved_away(&moved_aways, move->global_id);
 		} else if (move->destroyed_notify != NULL) {
 			struct port_return *record = malloc(sizeof(*record));
 			*record = (struct port_return){
@@ -1092,8 +1123,9 @@ return_ports(uint64_t global_id, uint32_t guest_id)
 	while (*link != NULL) {
 		struct port_return *record = *link;
 		if (global_id != 0 ? record->global_id != global_id
-				   : broker_guest_of(record->global_id)
-								!= guest_id) {
+				   : broker_guest_of(record->global_id) != guest_id
+								|| moved_away(outliving_ports,
+										record->global_id)) {
 			link = &record->next;
 			continue;
 		}
@@ -1118,14 +1150,54 @@ return_port(uint64_t global_id, struct ipc_port *notify)
 		entry = entry_alloc(port_alloc(IPC_KOBJECT_NONE));
 	}
 	entry->port->remote = false;
-	entry->port->global_id = 0;
+	entry->port->global_id = global_id;
 	entry->port->grants = 0;
 	entry->type |= MACH_PORT_TYPE_RECEIVE;
+	forget_moved_away(&moved_aways, global_id);
+	queue_notice((struct pending_notice){
+			.global_id = broker_global_id(BROKER_GUEST_ID, 0),
+			.notice = {
+					.kind = REMOTE_NOTICE_RETURNED,
+					.count = global_id,
+			},
+	});
 	queue_notice((struct pending_notice){
 			.id = MACH_NOTIFY_PORT_DESTROYED,
 			.notify = notify,
 			.name = entry->port->name,
 	});
+}
+
+static bool
+port_is_gone(uint64_t global_id)
+{
+	return guest_is_gone(broker_guest_of(global_id))
+			&& !moved_away(outliving_ports, global_id);
+}
+
+static bool
+moved_away(struct moved_away *list, uint64_t global_id)
+{
+	for (struct moved_away *away = list; away != NULL; away = away->next) {
+		if (away->global_id == global_id) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void
+forget_moved_away(struct moved_away **list, uint64_t global_id)
+{
+	for (struct moved_away **link = list; *link != NULL;
+			link = &(*link)->next) {
+		struct moved_away *away = *link;
+		if (away->global_id == global_id) {
+			*link = away->next;
+			free(away);
+			return;
+		}
+	}
 }
 
 static void
@@ -1369,26 +1441,85 @@ export_body_port(mach_port_name_t name, mach_msg_type_name_t disposition,
 	}
 
 	struct ipc_entry *entry = lookup(name);
-	entry->port->global_id = broker_global_id(dest_guest_id,
-			0x80000000 | (broker_client_guest_id() & 0x7ff) << 20
-					| (++transfer_counter & 0xfffff));
+	uint64_t global_id = export_local_port(name);
+	if (!moved_away(moved_aways, global_id)) {
+		struct moved_away *away = malloc(sizeof(*away));
+		*away = (struct moved_away){
+				.next = moved_aways,
+				.global_id = global_id,
+		};
+		moved_aways = away;
+	}
+	export_holders(entry, data, data_length);
 	entry->port->remote = true;
 	entry->port->grants = 1;
-	if (entry->port->messages != NULL
-			|| entry->port->destroyed_notify != NULL) {
-		struct moved_port *move = malloc(sizeof(*move));
-		*move = (struct moved_port){
-				.next = *queued,
-				.global_id = entry->port->global_id,
-				.messages = entry->port->messages,
-				.destroyed_notify
-				= entry->port->destroyed_notify,
+	struct moved_port *move = malloc(sizeof(*move));
+	*move = (struct moved_port){
+			.next = *queued,
+			.global_id = global_id,
+			.messages = entry->port->messages,
+			.destroyed_notify = entry->port->destroyed_notify,
+	};
+	*queued = move;
+	entry->port->messages = NULL;
+	entry->port->destroyed_notify = NULL;
+	return global_id;
+}
+
+static void
+export_holders(struct ipc_entry *entry, uint8_t **data, uint32_t *data_length)
+{
+	struct ipc_port *port = entry->port;
+	uint32_t at = *data_length;
+	struct remote_holders holders = {0};
+	struct remote_notice *notices = malloc(
+			(2 + port->sender_guest_count + port->watcher_count)
+			* sizeof(*notices));
+	notices[holders.count++] = (struct remote_notice){
+			.kind = REMOTE_NOTICE_ADD,
+			.guest_id = broker_client_guest_id(),
+			.count = 1,
+	};
+	for (uint32_t i = 0; i < port->sender_guest_count; i++) {
+		notices[holders.count++] = (struct remote_notice){
+				.kind = REMOTE_NOTICE_ADD,
+				.guest_id = port->sender_guests[i],
+				.count = port->sender_grants[i],
 		};
-		*queued = move;
-		entry->port->messages = NULL;
-		entry->port->destroyed_notify = NULL;
 	}
-	return entry->port->global_id;
+	port->sender_guest_count = 0;
+	struct remote_send_once **link = &remote_send_onces;
+	while (*link != NULL) {
+		struct remote_send_once *record = *link;
+		if (record->port != port->name) {
+			link = &record->next;
+			continue;
+		}
+		notices = realloc(notices,
+				(holders.count + 2 + port->watcher_count)
+						* sizeof(*notices));
+		notices[holders.count++] = (struct remote_notice){
+				.kind = REMOTE_NOTICE_SEND_ONCE_MOVED,
+				.guest_id = record->guest_id,
+				.count = 1,
+		};
+		*link = record->next;
+		free(record);
+	}
+	for (uint32_t i = 0; i < port->watcher_count; i++) {
+		notices[holders.count++] = (struct remote_notice){
+				.kind = REMOTE_NOTICE_WATCH,
+				.guest_id = port->watchers[i],
+		};
+	}
+	port->watcher_count = 0;
+	uint32_t length = sizeof(holders) + holders.count * sizeof(*notices);
+	*data = realloc(*data, at + length);
+	memcpy(*data + at, &holders, sizeof(holders));
+	memcpy(*data + at + sizeof(holders), notices,
+			holders.count * sizeof(*notices));
+	*data_length = at + length;
+	free(notices);
 }
 
 static uint64_t
@@ -1544,9 +1675,9 @@ count_right(mach_port_name_t name, mach_msg_type_name_t type,
 	bool owned = entry != NULL && entry->port->global_id == global_id
 			&& (entry->type & MACH_PORT_TYPE_RECEIVE);
 	uint32_t owner = broker_guest_of(global_id);
-	bool elsewhere = global_id != 0 && owner != UINT32_MAX
-			&& owner != broker_client_guest_id()
-			&& owner != dest_guest_id;
+	bool elsewhere = !owned && global_id != 0 && owner != UINT32_MAX
+			&& ((entry != NULL && entry->port->remote)
+					|| owner != broker_client_guest_id());
 	if (owned && type == MACH_MSG_TYPE_PORT_SEND && sent) {
 		count_sender_guest(entry->port, dest_guest_id, 1);
 	} else if (owned && type == MACH_MSG_TYPE_PORT_SEND) {
@@ -1556,9 +1687,6 @@ count_right(mach_port_name_t name, mach_msg_type_name_t type,
 	} else if (owned && type == MACH_MSG_TYPE_PORT_SEND_ONCE) {
 		queue_send_once_notifications(entry,
 				forget_send_onces(name, dest_guest_id, 1));
-	} else if (!sent && type == MACH_MSG_TYPE_PORT_SEND_ONCE
-			&& global_id != 0 && owner == dest_guest_id) {
-		queue_send_once_gone(global_id, broker_client_guest_id());
 	} else if (elsewhere && type == MACH_MSG_TYPE_PORT_SEND_ONCE) {
 		queue_notice((struct pending_notice){
 				.global_id = global_id,
@@ -1742,6 +1870,7 @@ receive_notice(uint64_t dest_global_id, const struct remote_notice *notice)
 	pthread_mutex_lock(&lock);
 	if (notice->kind == REMOTE_NOTICE_DEAD) {
 		return_ports(notice->count, 0);
+		forget_moved_away(&moved_aways, notice->count);
 	}
 	for (uint32_t i = 1;
 			notice->kind == REMOTE_NOTICE_DEAD && i < entry_count;
@@ -1797,7 +1926,8 @@ send_remote_notice(const struct pending_notice *notice)
 		struct remote_header header;
 		struct remote_notice notice;
 	} blob = {.notice = notice->notice};
-	broker_client_send(notice->global_id, &blob, sizeof(blob), NULL, 0);
+	broker_client_send(notice->global_id, &blob, sizeof(blob), NULL, 0,
+			NULL, 0);
 }
 
 static uint64_t
@@ -1884,41 +2014,71 @@ port_for_global_id(uint64_t global_id)
 
 static mach_port_name_t
 import_remote_send(uint64_t global_id, mach_msg_type_name_t type,
-		uint32_t sender_guest_id)
+		uint32_t sender_guest_id, uint32_t meant_guest_id)
 {
-	bool counted = sender_guest_id != BROKER_GUEST_ID;
-	if (global_id == dead_global_id
-			|| guest_is_gone(broker_guest_of(global_id))) {
+	bool counted = sender_guest_id != BROKER_GUEST_ID
+			&& broker_guest_of(global_id) != BROKER_GUEST_ID;
+	if (global_id == dead_global_id) {
 		return MACH_PORT_DEAD;
 	}
 
-	if (broker_guest_of(global_id) == broker_client_guest_id()) {
-		struct ipc_port *port = port_for_global_id(global_id);
-		if (port == NULL) {
-			return MACH_PORT_DEAD;
+	struct ipc_port *own = port_for_global_id(global_id);
+	if (own != NULL) {
+		mach_port_name_t name = own->name;
+		transfer_right(name, type, IPC_KERNEL, IPC_USER, &type);
+		if (counted && type == MACH_MSG_TYPE_PORT_SEND_ONCE) {
+			forget_send_onces(name, meant_guest_id, 1);
+		} else if (counted && type == MACH_MSG_TYPE_PORT_SEND) {
+			release_grants(lookup(name), meant_guest_id, 1);
 		}
-		if (type == MACH_MSG_TYPE_PORT_SEND_ONCE) {
-			forget_send_onces(port->name, sender_guest_id, 1);
+		return name;
+	}
+	if (port_is_gone(global_id)
+			|| (broker_guest_of(global_id) == broker_client_guest_id()
+					&& !moved_away(moved_aways,
+							global_id))) {
+		return MACH_PORT_DEAD;
+	}
+	if (counted && meant_guest_id != broker_client_guest_id()) {
+		bool send_once = type == MACH_MSG_TYPE_PORT_SEND_ONCE;
+		queue_notice((struct pending_notice){
+				.global_id = global_id,
+				.notice = {
+						.kind = send_once ? REMOTE_NOTICE_SEND_ONCE_MOVED
+								  : REMOTE_NOTICE_ADD,
+						.guest_id = broker_client_guest_id(),
+						.count = send_once ? meant_guest_id : 1,
+				},
+		});
+		if (!send_once) {
+			queue_notice((struct pending_notice){
+					.global_id = global_id,
+					.notice = {
+							.kind = REMOTE_NOTICE_RELEASE,
+							.guest_id = meant_guest_id,
+							.count = 1,
+					},
+			});
 		}
-		transfer_right(port->name, type, IPC_KERNEL, IPC_USER, &type);
-		return port->name;
 	}
 
-	for (uint32_t i = 1; i < entry_count; i++) {
+	struct ipc_entry *found = NULL;
+	for (uint32_t i = 1; i < entry_count && found == NULL; i++) {
 		struct ipc_port *port = entries[i].port;
-		if (port != NULL && port->remote && port->global_id == global_id
-				&& (entries[i].type
-						& MACH_PORT_TYPE_DEAD_NAME)) {
-			return MACH_PORT_DEAD;
-		}
 		if (port != NULL && port->remote
 				&& port->global_id == global_id) {
-			transfer_right(port->name, type, IPC_KERNEL, IPC_USER,
-					&type);
-			port->grants += counted
-					&& type == MACH_MSG_TYPE_PORT_SEND;
-			return port->name;
+			found = &entries[i];
 		}
+	}
+	if (found != NULL && (found->type & MACH_PORT_TYPE_DEAD_NAME)) {
+		return MACH_PORT_DEAD;
+	}
+	if (found != NULL) {
+		transfer_right(found->port->name, type, IPC_KERNEL, IPC_USER,
+				&type);
+		found->port->grants
+				+= counted && type == MACH_MSG_TYPE_PORT_SEND;
+		return found->port->name;
 	}
 
 	struct ipc_entry *entry = entry_alloc(port_alloc(IPC_KOBJECT_NONE));
@@ -1952,6 +2112,19 @@ deliver(uint64_t dest_global_id, const struct broker_sender *sender,
 	if (!remote_message_fits(rh, length, fd_count, lost)) {
 		return;
 	}
+	pthread_mutex_lock(&lock);
+	bool moved = !lost && port_for_global_id(dest_global_id) == NULL
+			&& moved_away(moved_aways, dest_global_id);
+	pthread_mutex_unlock(&lock);
+	if (moved
+			&& forward_frame(dest_global_id, blob, length, fds,
+					fd_count)) {
+		return;
+	}
+	if (moved) {
+		fds = NULL;
+		lost = true;
+	}
 	if (rh->message_size == 0) {
 		receive_notice(dest_global_id,
 				(const struct remote_notice *)(rh + 1));
@@ -1981,7 +2154,8 @@ deliver(uint64_t dest_global_id, const struct broker_sender *sender,
 	mach_msg_type_name_t reply_type = received_type(rh->reply_disposition);
 	mach_port_name_t reply_name = (rh->reply_global_id != 0)
 			? import_remote_send(rh->reply_global_id, reply_type,
-					  rh->sender_guest_id)
+					  rh->sender_guest_id,
+					  broker_guest_of(dest_global_id))
 			: MACH_PORT_NULL;
 	if (dest != NULL
 			&& received_type(rh->dest_disposition)
@@ -2002,7 +2176,8 @@ deliver(uint64_t dest_global_id, const struct broker_sender *sender,
 
 	import_body_ports(kmsg->header, global_ids,
 			(const uint8_t *)&global_ids[rh->descriptor_count], fds,
-			fd_count, rh->sender_guest_id);
+			fd_count, rh->sender_guest_id,
+			broker_guest_of(dest_global_id));
 
 	if (dest == NULL || lost) {
 		destroy_rights(kmsg->header);
@@ -2021,6 +2196,31 @@ deliver(uint64_t dest_global_id, const struct broker_sender *sender,
 	}
 	enqueue(dest, kmsg);
 	unlock_and_notify_arrival(dest);
+}
+
+static bool
+forward_frame(uint64_t global_id, const void *blob, uint32_t length,
+		const int *fds, size_t fd_count)
+{
+	int *copies = malloc((fd_count + 1) * sizeof(*copies));
+	size_t copied = 0;
+	while (copied != fd_count
+			&& (copies[copied] = fcntl(
+					    fds[copied], F_DUPFD_CLOEXEC, 0))
+					!= -1) {
+		copied++;
+	}
+	bool forwarded = copied == fd_count;
+	if (forwarded) {
+		broker_client_send(global_id, blob, length, copies, fd_count,
+				NULL, 0);
+	} else {
+		while (copied != 0) {
+			close(copies[--copied]);
+		}
+	}
+	free(copies);
+	return forwarded;
 }
 
 static bool
@@ -2161,6 +2361,23 @@ remote_port_fits(uint64_t global_id, mach_msg_type_name_t disposition,
 			= kobject_ops_for_remote_id(global_id);
 	if (global_id != fileport_global_id
 			&& global_id != memory_entry_global_id && ops == NULL) {
+		if (received_type(disposition) == MACH_MSG_TYPE_PORT_RECEIVE
+				&& global_id != 0
+				&& global_id != dead_global_id) {
+			struct remote_holders holders;
+			if (*room < sizeof(holders)) {
+				return false;
+			}
+			memcpy(&holders, *data, sizeof(holders));
+			uint64_t length = sizeof(holders)
+					+ (uint64_t)holders.count
+							* sizeof(struct remote_notice);
+			if (*room < length) {
+				return false;
+			}
+			*room -= (uint32_t)length;
+			*data += length;
+		}
 		return remote_right_fits(global_id, disposition);
 	}
 	if (received_type(disposition) != MACH_MSG_TYPE_PORT_SEND) {
@@ -2207,7 +2424,7 @@ remote_right_fits(uint64_t global_id, mach_msg_type_name_t disposition)
 static void
 import_body_ports(mach_msg_header_t *header, const uint64_t *global_ids,
 		const uint8_t *data, const int *fds, size_t fd_count,
-		uint32_t sender_guest_id)
+		uint32_t sender_guest_id, uint32_t meant_guest_id)
 {
 	const int *all_fds = fds;
 	if (!(header->msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
@@ -2226,7 +2443,7 @@ import_body_ports(mach_msg_header_t *header, const uint64_t *global_ids,
 			mach_msg_type_name_t type = received_type(d->disposition);
 			d->name = import_body_port(global_ids[count++], type,
 					&fds, &data, all_fds, fd_count,
-					sender_guest_id);
+					sender_guest_id, meant_guest_id);
 			d->disposition = type;
 			cursor += sizeof(*d);
 		} else if (descriptor->type == MACH_MSG_OOL_DESCRIPTOR
@@ -2253,7 +2470,8 @@ import_body_ports(mach_msg_header_t *header, const uint64_t *global_ids,
 			for (mach_msg_size_t j = 0; j < d->count; j++) {
 				names[j] = import_body_port(global_ids[count++],
 						type, &fds, &data, all_fds,
-						fd_count, sender_guest_id);
+						fd_count, sender_guest_id,
+						meant_guest_id);
 			}
 			d->address = address;
 			d->disposition = type;
@@ -2266,7 +2484,7 @@ import_body_ports(mach_msg_header_t *header, const uint64_t *global_ids,
 			mach_msg_type_name_t type = received_type(d->disposition);
 			d->name = import_body_port(global_ids[count++], type,
 					&fds, &data, all_fds, fd_count,
-					sender_guest_id);
+					sender_guest_id, meant_guest_id);
 			d->disposition = type;
 			cursor += sizeof(*d);
 		}
@@ -2276,7 +2494,7 @@ import_body_ports(mach_msg_header_t *header, const uint64_t *global_ids,
 static mach_port_name_t
 import_body_port(uint64_t global_id, mach_msg_type_name_t type, const int **fds,
 		const uint8_t **data, const int *all_fds, size_t fd_count,
-		uint32_t sender_guest_id)
+		uint32_t sender_guest_id, uint32_t meant_guest_id)
 {
 	if (global_id == 0) {
 		return MACH_PORT_NULL;
@@ -2298,13 +2516,58 @@ import_body_port(uint64_t global_id, mach_msg_type_name_t type, const int **fds,
 	}
 
 	if (type == MACH_MSG_TYPE_PORT_RECEIVE && global_id != dead_global_id) {
-		struct ipc_entry *entry = entry_alloc(port_alloc(IPC_KOBJECT_NONE));
-		entry->type = MACH_PORT_TYPE_RECEIVE;
-		entry->port->global_id = global_id;
-		count_sender_guest(entry->port, sender_guest_id, 1);
+		struct ipc_entry *entry = NULL;
+		for (uint32_t i = 1; i < entry_count && entry == NULL; i++) {
+			struct ipc_port *port = entries[i].port;
+			if (port != NULL && port->remote
+					&& port->global_id == global_id
+					&& !(entries[i].type
+							& MACH_PORT_TYPE_DEAD_NAME)) {
+				entry = &entries[i];
+			}
+		}
+		if (entry == NULL) {
+			entry = entry_alloc(port_alloc(IPC_KOBJECT_NONE));
+			entry->port->global_id = global_id;
+		}
+		entry->port->remote = false;
+		entry->port->grants = 0;
+		entry->type |= MACH_PORT_TYPE_RECEIVE;
+		import_holders(entry, data);
+		forget_moved_away(&moved_aways, global_id);
 		return entry->port->name;
 	}
-	return import_remote_send(global_id, type, sender_guest_id);
+	return import_remote_send(
+			global_id, type, sender_guest_id, meant_guest_id);
+}
+
+static void
+import_holders(struct ipc_entry *entry, const uint8_t **data)
+{
+	struct remote_holders holders;
+	memcpy(&holders, *data, sizeof(holders));
+	*data += sizeof(holders);
+	for (uint32_t i = 0; i < holders.count; i++) {
+		struct remote_notice holder;
+		memcpy(&holder, *data, sizeof(holder));
+		*data += sizeof(holder);
+		if (holder.guest_id == broker_client_guest_id()
+				|| guest_is_gone(holder.guest_id)) {
+			continue;
+		}
+		if (holder.kind == REMOTE_NOTICE_ADD) {
+			count_sender_guest(entry->port, holder.guest_id,
+					holder.count);
+		} else if (holder.kind == REMOTE_NOTICE_SEND_ONCE_MOVED) {
+			remember_send_once(entry->port->name, holder.guest_id);
+		} else if (holder.kind == REMOTE_NOTICE_WATCH) {
+			struct ipc_port *port = entry->port;
+			port->watchers = realloc(port->watchers,
+					(port->watcher_count + 1)
+							* sizeof(*port->watchers));
+			port->watchers[port->watcher_count++] = holder.guest_id;
+		}
+	}
 }
 
 static mach_port_name_t
@@ -2415,13 +2678,45 @@ ipc_remote_guest_gone(uint32_t guest_id)
 	for (uint32_t i = 1; i < entry_count; i++) {
 		struct ipc_port *port = entries[i].port;
 		if (port != NULL && port->remote
-				&& broker_guest_of(port->global_id)
-						== guest_id) {
+				&& broker_guest_of(port->global_id) == guest_id
+				&& !moved_away(outliving_ports,
+						port->global_id)) {
 			turn_dead(&entries[i]);
 		}
 		if (port != NULL
 				&& (entries[i].type & MACH_PORT_TYPE_RECEIVE)) {
 			release_grants(&entries[i], guest_id, UINT64_MAX);
+		}
+	}
+	pthread_mutex_unlock(&lock);
+	flush_notices();
+}
+
+void
+ipc_remote_port_moved(uint64_t global_id, uint32_t guest_id)
+{
+	pthread_mutex_lock(&lock);
+	if (guest_id != 0) {
+		if (!moved_away(outliving_ports, global_id)) {
+			struct moved_away *outliving
+					= malloc(sizeof(*outliving));
+			*outliving = (struct moved_away){
+					.next = outliving_ports,
+					.global_id = global_id,
+			};
+			outliving_ports = outliving;
+		}
+		pthread_mutex_unlock(&lock);
+		return;
+	}
+	forget_moved_away(&moved_aways, global_id);
+	forget_moved_away(&outliving_ports, global_id);
+	return_ports(global_id, 0);
+	for (uint32_t i = 1; i < entry_count; i++) {
+		struct ipc_port *port = entries[i].port;
+		if (port != NULL && port->remote
+				&& port->global_id == global_id) {
+			turn_dead(&entries[i]);
 		}
 	}
 	pthread_mutex_unlock(&lock);
@@ -2436,7 +2731,10 @@ ipc_remote_all_gone(void)
 		send_onces_gone(remote_send_onces->guest_id);
 	}
 	while (port_returns != NULL) {
-		return_ports(0, broker_guest_of(port_returns->global_id));
+		struct port_return *record = port_returns;
+		port_returns = record->next;
+		return_port(record->global_id, record->notify);
+		free(record);
 	}
 	for (uint32_t i = 1; i < entry_count; i++) {
 		struct ipc_port *port = entries[i].port;
@@ -2718,7 +3016,7 @@ ipc_names_send_right(uint64_t global_id)
 	pthread_mutex_lock(&lock);
 	uint32_t guest_id = broker_client_guest_id();
 	mach_port_name_t name = import_remote_send(
-			global_id, MACH_MSG_TYPE_PORT_SEND, guest_id);
+			global_id, MACH_MSG_TYPE_PORT_SEND, guest_id, guest_id);
 	if (MACH_PORT_VALID(name) && lookup(name)->port->remote) {
 		queue_notice((struct pending_notice){
 				.global_id = global_id,
@@ -3731,7 +4029,7 @@ deliver_remote_notification(uint64_t global_id, const mach_msg_header_t *msg)
 	char *blob = malloc(length);
 	memcpy(blob, &rh, sizeof(rh));
 	memcpy(blob + sizeof(rh), sent, sent->msgh_size);
-	broker_client_send(global_id, blob, length, NULL, 0);
+	broker_client_send(global_id, blob, length, NULL, 0, NULL, 0);
 	free(blob);
 	return whole;
 }
