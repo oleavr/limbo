@@ -36,7 +36,6 @@
 
 #define LIMBO_BROKER_SOCKET_ENV "LIMBO_BROKER"
 #define LIMBO_LAUNCHD                 "limbo-launchd"
-#define LIMBO_LAUNCHD_DEADLINE_MS     12000
 #define LIMBO_BROKER_SERVICE_NAME_MAX 128
 #define BROKER_GUEST_ID               0
 
@@ -62,6 +61,9 @@ enum broker_frame_type {
 	BROKER_MOVED,
 	BROKER_JOBS_LOADED,
 };
+
+#define LIMBO_LAUNCHD_STOP_MS     3000
+#define LIMBO_LAUNCHD_DEADLINE_MS (4 * LIMBO_LAUNCHD_STOP_MS)
 
 struct broker_frame {
 	uint32_t type;

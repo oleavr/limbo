@@ -101,7 +101,7 @@ struct service {
 };
 
 static void raise_file_limit(void);
-static void start_launchd(void);
+static void start_launchd(const char *table);
 static int launchd_wait(void);
 static int64_t now_ms(void);
 static void run(int listen_fd);
@@ -190,7 +190,7 @@ main(int argc, char *argv[])
 		read_held_names(argv[2]);
 	}
 
-	int listen_fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+	int listen_fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
 	struct sockaddr_un addr = { .sun_family = AF_UNIX };
 	strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
 	unlink(path);
@@ -201,7 +201,17 @@ main(int argc, char *argv[])
 	listen(listen_fd, 64);
 
 	raise_file_limit();
-	start_launchd();
+	char socket_path[PATH_MAX];
+	if (path[0] != '/'
+			&& getcwd(socket_path, sizeof(socket_path)) != NULL) {
+		size_t length = strlen(socket_path);
+		snprintf(socket_path + length, sizeof(socket_path) - length,
+				"/%s", path);
+	} else {
+		snprintf(socket_path, sizeof(socket_path), "%s", path);
+	}
+	setenv(LIMBO_BROKER_SOCKET_ENV, socket_path, 1);
+	start_launchd(argc > 3 ? argv[3] : NULL);
 	run(listen_fd);
 	return 0;
 }
@@ -272,7 +282,7 @@ raise_file_limit(void)
 }
 
 static void
-start_launchd(void)
+start_launchd(const char *table)
 {
 	char self[PATH_MAX], limbo[PATH_MAX];
 	ssize_t length = readlink("/proc/self/exe", self, sizeof(self) - 1);
@@ -288,7 +298,7 @@ start_launchd(void)
 		fcntl(ends[1], F_SETFD, 0);
 		char fd[16];
 		snprintf(fd, sizeof(fd), "%d", ends[1]);
-		char *const argv[] = {LIMBO_LAUNCHD, fd, NULL};
+		char *const argv[] = {LIMBO_LAUNCHD, fd, (char *)table, NULL};
 		execv(limbo, argv);
 		fprintf(stderr, "limbo-broker: %s: %s\n", limbo,
 				strerror(errno));

@@ -49,6 +49,7 @@ limbo = executable('limbo',
   sources: [
     'commpage.c',
     'launchd.c',
+    'launchd_engine.c',
     'linker.c',
     'main.c',
     'plist.c',
@@ -84,6 +85,7 @@ limbo_broker = executable('limbo-broker',
   ],
   install: true,
 )
+
 
 limbo_trace = executable('limbo-trace',
   sources: [
