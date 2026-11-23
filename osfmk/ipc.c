@@ -506,6 +506,9 @@ ipc_fork_child(void)
 			entries[i].port->watcher_count = 0;
 			entries[i].port->grants = 0;
 		}
+		if (entries[i].port != NULL && !entries[i].port->remote) {
+			entries[i].port->global_id = 0;
+		}
 	}
 	pthread_mutex_unlock(&lock);
 	pthread_mutex_unlock(&notice_order);
