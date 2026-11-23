@@ -1112,6 +1112,16 @@ finish_moves(struct moved_port *queued, bool sent)
 			pthread_mutex_lock(&lock);
 			free(kmsg);
 		}
+		if (sent) {
+			queue_notice((struct pending_notice){
+					.global_id = broker_global_id(
+							BROKER_GUEST_ID, 0),
+					.notice = {
+							.kind = REMOTE_NOTICE_QUEUE_SENT,
+							.count = move->global_id,
+					},
+			});
+		}
 		free(move);
 	}
 }
