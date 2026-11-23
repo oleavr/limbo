@@ -189,9 +189,11 @@ static child_t start_peer(const char *name);
 static void end_peer(const child_t *child);
 static bool is_broker_socket(int fd);
 static void look_up_after_dup2_over_low_fds(void);
+static void queue_moves_with_receive_right(void);
 static void send_right_outlives_mover(void);
 static void receive_right_comes_back(void);
 static void send_once_comes_back(void);
+static natural_t queued_on(mach_port_t port);
 static mach_port_t receive_right(mach_port_t port);
 static void send_right(mach_port_t dest, mach_port_t right,
 		mach_msg_type_name_t disposition);
@@ -2437,10 +2439,73 @@ main(int argc, char *argv[])
 	check_moved_rights();
 	check_forwarded_send_once();
 	check_remote_notify_port();
+	queue_moves_with_receive_right();
 	send_right_outlives_mover();
 	receive_right_comes_back();
 	send_once_comes_back();
 	return 0;
+}
+
+static void
+queue_moves_with_receive_right(void)
+{
+	static const char APP[] = "com.limbo.test.ipc.app";
+	static const char SENDER[] = "com.limbo.test.ipc.sender";
+	int to_sender[2], to_parent[2];
+	CHECK(pipe(to_sender) == 0 && pipe(to_parent) == 0);
+
+	pid_t app = fork();
+	CHECK(app >= 0);
+	if (app == 0) {
+		mach_port_t service = bootstrap_call(CHECK_IN, APP);
+		CHECK(service != MACH_PORT_NULL);
+		signal_to(to_parent[1]);
+		mach_port_t port = receive_right(service);
+		mach_port_type_t type;
+		CHECK(mach_port_type(mach_task_self(), port, &type)
+				== KERN_SUCCESS);
+		CHECK(type & MACH_PORT_TYPE_RECEIVE);
+		CHECK(receive_id(port) == REQUEST_ID + 1);
+		CHECK(receive_id(port) == REQUEST_ID + 2);
+		_exit(0);
+	}
+	pid_t sender = fork();
+	CHECK(sender >= 0);
+	if (sender == 0) {
+		mach_port_t service = bootstrap_call(CHECK_IN, SENDER);
+		CHECK(service != MACH_PORT_NULL);
+		signal_to(to_parent[1]);
+		mach_port_t port = receive_right(service);
+		send_empty(port, REQUEST_ID + 1);
+		wait_for(to_sender[0]);
+		send_empty(port, REQUEST_ID + 2);
+		_exit(0);
+	}
+	wait_for(to_parent[0]);
+	wait_for(to_parent[0]);
+
+	mach_port_t port;
+	CHECK(mach_port_allocate(
+			      mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port)
+			== KERN_SUCCESS);
+	mach_port_t to_the_sender = bootstrap_call(LOOK_UP, SENDER);
+	CHECK(to_the_sender != MACH_PORT_NULL);
+	send_right(to_the_sender, port, MACH_MSG_TYPE_MAKE_SEND);
+	for (int i = 0; i != 100 && queued_on(port) == 0; i++) {
+		usleep(50000);
+	}
+	CHECK(queued_on(port) == 1);
+
+	mach_port_t to_the_app = bootstrap_call(LOOK_UP, APP);
+	CHECK(to_the_app != MACH_PORT_NULL);
+	send_right(to_the_app, port, MACH_MSG_TYPE_MOVE_RECEIVE);
+	signal_to(to_sender[1]);
+
+	int status;
+	CHECK(waitpid(sender, &status, 0) == sender && WIFEXITED(status)
+			&& WEXITSTATUS(status) == 0);
+	CHECK(waitpid(app, &status, 0) == app && WIFEXITED(status)
+			&& WEXITSTATUS(status) == 0);
 }
 
 static void
@@ -2711,6 +2776,18 @@ send_once_comes_back(void)
 	CHECK(mach_msg(&message.Head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
 			      sizeof(message), dropped, 500, MACH_PORT_NULL)
 			== MACH_RCV_TIMED_OUT);
+}
+
+static natural_t
+queued_on(mach_port_t port)
+{
+	mach_port_status_t status;
+	mach_msg_type_number_t count = MACH_PORT_RECEIVE_STATUS_COUNT;
+	CHECK(mach_port_get_attributes(mach_task_self(), port,
+			      MACH_PORT_RECEIVE_STATUS,
+			      (mach_port_info_t)&status, &count)
+			== KERN_SUCCESS);
+	return status.mps_msgcount;
 }
 
 static mach_port_t
