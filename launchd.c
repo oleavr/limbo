@@ -46,21 +46,28 @@
 #include "osfmk/broker_client.h"
 
 static void handle_broker(void);
+static void handle_commands(const struct pollfd *ready);
+static void answer_command(int fd);
+static char *control(uid_t uid, char *words, uint32_t length, uint32_t *status);
 static bool send_frame(uint32_t type, const void *payload, size_t length,
 		const int *fds, size_t fd_count);
 static int broker_fd = -1;
 static struct broker_wire_ahead broker_ahead;
 static bool broker_gone;
+static int control_fd = -1;
+static int *commands;
+static size_t command_count;
 
 int
 launchd_main(int argc, char *argv[])
 {
-	if (argc < 2) {
+	if (argc < 3) {
 		fprintf(stderr, "%s: started by limbo-broker, not by hand\n",
 				LIMBO_LAUNCHD);
 		return 1;
 	}
 	broker_fd = atoi(argv[1]);
+	control_fd = atoi(argv[2]);
 	struct ucred maker;
 	socklen_t maker_length = sizeof(maker);
 	if (fcntl(broker_fd, F_SETFD, FD_CLOEXEC) == -1
@@ -72,33 +79,46 @@ launchd_main(int argc, char *argv[])
 				LIMBO_LAUNCHD);
 		return 1;
 	}
+	if (control_fd != -1 && fcntl(control_fd, F_SETFD, FD_CLOEXEC) == -1) {
+		control_fd = -1;
+	}
 	prctl(PR_SET_NAME, LIMBO_LAUNCHD, 0, 0, 0);
 
 	jobs_init(maker.pid);
-	if (argc > 2) {
-		jobs_load(argv[2]);
+	if (argc > 3) {
+		jobs_load(argv[3]);
 	}
 	send_frame(BROKER_JOBS_LOADED, NULL, 0, NULL, 0);
 
 	for (;;) {
 		size_t job_fds = jobs_poll_count();
-		struct pollfd *fds = calloc(1 + job_fds, sizeof(*fds));
+		size_t own = 2 + command_count;
+		struct pollfd *fds = calloc(own + job_fds, sizeof(*fds));
 		fds[0] = (struct pollfd){.fd = broker_fd, .events = POLLIN};
-		jobs_poll_fill(fds + 1);
+		fds[1] = (struct pollfd){.fd = control_fd, .events = POLLIN};
+		for (size_t i = 0; i != command_count; i++) {
+			fds[2 + i] = (struct pollfd){
+					.fd = commands[i], .events = POLLIN};
+		}
+		jobs_poll_fill(fds + own);
 
-		poll(fds, 1 + job_fds, jobs_poll_timeout());
+		poll(fds, own + job_fds, jobs_poll_timeout());
 
 		if (fds[0].revents & (POLLIN | POLLHUP | POLLERR)) {
 			handle_broker();
 		}
-		jobs_poll_handle(fds + 1, job_fds);
+		handle_commands(fds + 1);
+		jobs_poll_handle(fds + own, job_fds);
 
 		free(fds);
 		if (jobs_done()) {
 			break;
 		}
 	}
-	return broker_gone ? 1 : 0;
+	if (broker_gone) {
+		return 1;
+	}
+	return 0;
 }
 
 static void
@@ -141,6 +161,95 @@ handle_broker(void)
 			break;
 		}
 	}
+}
+
+static void
+handle_commands(const struct pollfd *ready)
+{
+	for (size_t i = command_count; i-- != 0;) {
+		if (ready[1 + i].revents & (POLLIN | POLLHUP | POLLERR)) {
+			answer_command(commands[i]);
+			close(commands[i]);
+			commands[i] = commands[--command_count];
+		}
+	}
+	if (!(ready[0].revents & POLLIN)) {
+		return;
+	}
+	int fd = accept4(control_fd, NULL, NULL, SOCK_CLOEXEC);
+	int *grown = fd != -1 ? reallocarray(commands, command_count + 1,
+						sizeof(*commands))
+			      : NULL;
+	if (grown == NULL) {
+		if (fd != -1) {
+			close(fd);
+		}
+		return;
+	}
+	commands = grown;
+	commands[command_count++] = fd;
+}
+
+static void
+answer_command(int fd)
+{
+	static char payload[BROKER_FRAME_MAX + 1];
+	static int fds[BROKER_FDS_MAX];
+	struct broker_wire_ahead ahead = {0};
+	struct broker_frame header;
+	size_t fd_count = 0;
+	bool lost = false;
+	int n = broker_client_receive_frame(
+			fd, &ahead, &header, payload, fds, &fd_count, &lost);
+	broker_wire_forget(&ahead);
+	for (size_t i = 0; i != fd_count; i++) {
+		close(fds[i]);
+	}
+	struct ucred asker;
+	socklen_t asker_length = sizeof(asker);
+	if (n != 1 || header.type != BROKER_CONTROL
+			|| getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &asker,
+					   &asker_length)
+					!= 0) {
+		return;
+	}
+	uint32_t status = 1;
+	char *text = lost ? strdup("the command could not be read\n") : NULL;
+	if (text == NULL) {
+		status = 0;
+		text = control(asker.uid, payload, header.length, &status);
+	}
+	size_t text_length = strlen(text);
+	if (text_length > BROKER_FRAME_MAX - sizeof(status)) {
+		text_length = BROKER_FRAME_MAX - sizeof(status);
+	}
+	char *reply = malloc(sizeof(status) + text_length);
+	memcpy(reply, &status, sizeof(status));
+	memcpy(reply + sizeof(status), text, text_length);
+	broker_client_send_frame(fd, MSG_NOSIGNAL, BROKER_CONTROL_REPLY, reply,
+			(uint32_t)(sizeof(status) + text_length), NULL, 0);
+	free(reply);
+	free(text);
+}
+
+static char *
+control(uid_t uid, char *words, uint32_t length, uint32_t *status)
+{
+	char *argv[64];
+	size_t argc = 0;
+	words[length] = '\0';
+	for (char *word = words; word < words + length && argc != 64;
+			word += strlen(word) + 1) {
+		argv[argc++] = word;
+	}
+	return launchd_command(argv, argc, uid, status);
+}
+
+char *
+launchd_command(char **argv, size_t argc, uid_t uid, uint32_t *status)
+{
+	(void)uid;
+	return jobs_control(argv, argc, status);
 }
 
 static bool

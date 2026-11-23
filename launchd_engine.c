@@ -139,7 +139,9 @@ static bool parse_keepalive(const char *text, struct keepalive *keepalive);
 static char *find_executable(const char *program);
 static const char *program_name(const char *path);
 static char *program_argv0(const char *executable, const char *program);
+static bool job_matches(const struct job *job, const char *word);
 
+static void describe(FILE *out, const struct job *job, bool details);
 static int shell_status(int status);
 static int64_t now_ms(void);
 static char *optional(const char *text);
@@ -461,6 +463,130 @@ jobs_poll_timeout(void)
 		wait = 0;
 	}
 	return wait > INT32_MAX ? INT32_MAX : (int)wait;
+}
+
+static char *control(char **argv, size_t argc, uint32_t *status);
+
+char *
+jobs_control(char **argv, size_t argc, uint32_t *status)
+{
+	char *text = control(argv, argc, status);
+	return text;
+}
+
+static char *
+control(char **argv, size_t argc, uint32_t *status)
+{
+	char *text = NULL;
+	size_t length = 0;
+	FILE *out = open_memstream(&text, &length);
+	*status = 0;
+
+	const char *command = argc > 0 ? argv[0] : "list";
+	if (strcmp(command, "list") == 0) {
+		fprintf(out, "PID\tStatus\tState\tName\n");
+		for (size_t i = 0; i != job_count; i++) {
+			describe(out, jobs[i], false);
+		}
+		fclose(out);
+		return text;
+	}
+	if (strcmp(command, "pid") == 0) {
+		pid_t pid = argc > 1 ? (pid_t)strtol(argv[1], NULL, 10) : 0;
+		struct job *job = NULL;
+		for (size_t i = 0; i != job_count && job == NULL; i++) {
+			if (jobs[i]->state == JOB_RUNNING && jobs[i]->pid == pid
+					&& pid > 0 && jobs[i]->label != NULL) {
+				job = jobs[i];
+			}
+		}
+		if (job != NULL) {
+			fprintf(out, "%s\t/%s\n", job->label,
+					job->plist != NULL ? job->plist : "");
+		} else {
+			*status = 1;
+		}
+		fclose(out);
+		return text;
+	}
+	if (strcmp(command, "print") != 0 && strcmp(command, "start") != 0
+			&& strcmp(command, "stop") != 0
+			&& strcmp(command, "restart") != 0) {
+		fprintf(out, "unknown command %s\n", command);
+		*status = 1;
+		fclose(out);
+		return text;
+	}
+
+	size_t names_end = argc;
+	while (names_end > 1 && strchr(argv[names_end - 1], '=') != NULL) {
+		names_end--;
+	}
+	size_t matched = 0;
+	for (size_t i = 0; i != job_count; i++) {
+		struct job *job = jobs[i];
+		bool match = false;
+		for (size_t a = 1; a < names_end && !match; a++) {
+			match = job_matches(job, argv[a]);
+		}
+		if (!match) {
+			continue;
+		}
+		matched++;
+		if (job->state == JOB_UNLOADED
+				&& strcmp(command, "print") != 0) {
+			fprintf(out, "%s: not loaded, as its session isn't\n",
+					job->name);
+			*status = 1;
+			continue;
+		}
+		if (names_end != argc) {
+			for (size_t v = 0; v != job->variable_count; v++) {
+				free(job->variables[v]);
+			}
+			job->variable_count = argc - names_end;
+			job->variables = reallocarray(job->variables,
+					job->variable_count, sizeof(char *));
+			for (size_t v = 0; v != job->variable_count; v++) {
+				job->variables[v] = strdup(argv[names_end + v]);
+			}
+		}
+		if (strcmp(command, "print") == 0) {
+			describe(out, job, true);
+		} else if (strcmp(command, "start") == 0) {
+			if (job->state != JOB_RUNNING) {
+				job->demanded = true;
+				start(job);
+			}
+			describe(out, job, false);
+		} else if (strcmp(command, "stop") == 0) {
+			if (job->state == JOB_RUNNING) {
+				stop(job);
+			}
+			job->restart = false;
+			set_state(job,
+					job->state == JOB_RUNNING
+							? JOB_RUNNING
+							: JOB_STOPPED);
+			job->demanded = false;
+			describe(out, job, false);
+		} else {
+			if (job->state == JOB_RUNNING) {
+				stop(job);
+				job->restart = true;
+			} else {
+				job->demanded = true;
+				start(job);
+			}
+			describe(out, job, false);
+		}
+	}
+	if (matched == 0) {
+		fprintf(out, "no such job\n");
+		*status = 1;
+	}
+	fclose(out);
+	return text;
 }
 
 bool
@@ -960,6 +1086,77 @@ program_argv0(const char *executable, const char *program)
 		return strdup(executable + length);
 	}
 	return strdup(program_name(program));
+}
+
+static bool
+job_matches(const struct job *job, const char *word)
+{
+	return strcasecmp(job->name, word) == 0
+			|| (job->label != NULL
+					&& strcasecmp(job->label, word) == 0)
+			|| strcasecmp(program_name(job->argv[0]), word) == 0;
+}
+
+static void
+describe(FILE *out, const struct job *job, bool details)
+{
+	static const char *const states[] = {
+			[JOB_UNLOADED] = "unloaded",
+			[JOB_IDLE] = "idle",
+			[JOB_WAITING] = "waiting",
+			[JOB_RUNNING] = "running",
+			[JOB_STOPPED] = "stopped",
+	};
+	static const char *const sessions[] = {
+			[SESSION_BOOT] = "boot",
+			[SESSION_BOOT_TASK] = "boot task",
+	};
+	char pid[16] = "-", status[16] = "-";
+	if (job->state == JOB_RUNNING) {
+		snprintf(pid, sizeof(pid), "%d", (int)job->pid);
+	}
+	if (job->has_status) {
+		snprintf(status, sizeof(status), "%d",
+				shell_status(job->status));
+	}
+	fprintf(out, "%s\t%s\t%s%s\t%s\n", pid, status, states[job->state],
+			job->stopping ? ",stopping" : "", job->name);
+	if (!details) {
+		return;
+	}
+	const struct keepalive *k = &job->keepalive;
+	fprintf(out, "\tprogram: %s\n\tas: %s\n\tloads: %s\n\truns: %u\n",
+			job->executable != NULL ? job->executable : "-",
+			job->root ? "root"
+					: job->account != NULL ? job->account
+							       : user_name,
+			sessions[job->session], job->runs);
+	if (!job->root) {
+		fprintf(out, "\tgroups:");
+		for (size_t i = 0; i != user_group_count; i++) {
+			fprintf(out, " %u", (unsigned)user_groups[i]);
+		}
+		fprintf(out, "\n");
+	}
+	fprintf(out, "\trun at load: %s\n", starts_at_load(job) ? "yes" : "no");
+	fprintf(out, "\tkeepalive: %s", k->always ? "always" : "");
+	if (k->successful_exit != -1) {
+		fprintf(out, " SuccessfulExit=%s",
+				k->successful_exit ? "true" : "false");
+	}
+	if (k->crashed != -1) {
+		fprintf(out, " Crashed=%s", k->crashed ? "true" : "false");
+	}
+	if (k->after_initial_demand) {
+		fprintf(out, " AfterInitialDemand");
+	}
+	fprintf(out, "\n\tthrottle: %u s\n", job->throttle);
+	for (size_t i = 0; i != job->service_count; i++) {
+		fprintf(out, "\tservice: %s\n", job->services[i]);
+	}
+	for (size_t i = 0; i != job->variable_count; i++) {
+		fprintf(out, "\tvariable: %s\n", job->variables[i]);
+	}
 }
 
 static int

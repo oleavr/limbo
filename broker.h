@@ -35,6 +35,7 @@
 #include <sys/uio.h>
 
 #define LIMBO_BROKER_SOCKET_ENV "LIMBO_BROKER"
+#define LIMBO_LAUNCHD_CONTROL_SUFFIX  ".launchd"
 #define LIMBO_LAUNCHD                 "limbo-launchd"
 #define LIMBO_BROKER_SERVICE_NAME_MAX 128
 #define BROKER_GUEST_ID               0
@@ -60,6 +61,8 @@ enum broker_frame_type {
 	BROKER_TASK_FOR_PID,
 	BROKER_MOVED,
 	BROKER_JOBS_LOADED,
+	BROKER_CONTROL,
+	BROKER_CONTROL_REPLY,
 };
 
 #define LIMBO_LAUNCHD_STOP_MS     3000

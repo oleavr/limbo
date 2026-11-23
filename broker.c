@@ -43,6 +43,7 @@
 #include <string.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/uio.h>
 #include <sys/un.h>
 #include <time.h>
@@ -101,7 +102,8 @@ struct service {
 };
 
 static void raise_file_limit(void);
-static void start_launchd(const char *table);
+static int control_socket(const char *path);
+static void start_launchd(const char *table, int control_fd);
 static int launchd_wait(void);
 static int64_t now_ms(void);
 static void run(int listen_fd);
@@ -189,6 +191,7 @@ main(int argc, char *argv[])
 	if (argc > 2) {
 		read_held_names(argv[2]);
 	}
+	int control_fd = control_socket(path);
 
 	int listen_fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
 	struct sockaddr_un addr = { .sun_family = AF_UNIX };
@@ -211,9 +214,35 @@ main(int argc, char *argv[])
 		snprintf(socket_path, sizeof(socket_path), "%s", path);
 	}
 	setenv(LIMBO_BROKER_SOCKET_ENV, socket_path, 1);
-	start_launchd(argc > 3 ? argv[3] : NULL);
+	start_launchd(argc > 3 ? argv[3] : NULL, control_fd);
 	run(listen_fd);
 	return 0;
+}
+
+static int
+control_socket(const char *path)
+{
+	struct sockaddr_un addr = {.sun_family = AF_UNIX};
+	int written = snprintf(addr.sun_path, sizeof(addr.sun_path), "%s%s",
+			path, LIMBO_LAUNCHD_CONTROL_SUFFIX);
+	bool fits = written > 0 && (size_t)written < sizeof(addr.sun_path);
+	int fd = fits ? socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0) : -1;
+	if (fd != -1) {
+		unlink(addr.sun_path);
+	}
+	if (fd == -1 || bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0
+			|| listen(fd, 64) != 0) {
+		fprintf(stderr, "limbo-broker: no control socket for %s: %s\n",
+				LIMBO_LAUNCHD,
+				fits ? strerror(errno)
+				     : "the path is too long");
+		if (fd != -1) {
+			close(fd);
+		}
+		return -1;
+	}
+	chmod(addr.sun_path, 0666);
+	return fd;
 }
 
 static void
@@ -282,7 +311,7 @@ raise_file_limit(void)
 }
 
 static void
-start_launchd(const char *table)
+start_launchd(const char *table, int control_fd)
 {
 	char self[PATH_MAX], limbo[PATH_MAX];
 	ssize_t length = readlink("/proc/self/exe", self, sizeof(self) - 1);
@@ -296,15 +325,23 @@ start_launchd(const char *table)
 	pid_t pid = fork();
 	if (pid == 0) {
 		fcntl(ends[1], F_SETFD, 0);
-		char fd[16];
+		if (control_fd != -1) {
+			fcntl(control_fd, F_SETFD, 0);
+		}
+		char fd[16], control[16];
 		snprintf(fd, sizeof(fd), "%d", ends[1]);
-		char *const argv[] = {LIMBO_LAUNCHD, fd, (char *)table, NULL};
+		snprintf(control, sizeof(control), "%d", control_fd);
+		char *const argv[] = {LIMBO_LAUNCHD, fd, control, (char *)table,
+				NULL};
 		execv(limbo, argv);
 		fprintf(stderr, "limbo-broker: %s: %s\n", limbo,
 				strerror(errno));
 		_exit(127);
 	}
 	close(ends[1]);
+	if (control_fd != -1) {
+		close(control_fd);
+	}
 	if (pid < 0) {
 		perror("limbo-broker: fork");
 		exit(1);
