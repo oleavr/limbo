@@ -226,6 +226,7 @@ int
 sys_fork(void)
 {
 	pid_t parent = getpid();
+	bool on_broker = broker_client_available();
 	pid_t pid = fork();
 	if (pid == -1) {
 		return err_map(errno);
@@ -235,6 +236,9 @@ sys_fork(void)
 		thread_fork_child();
 		trace_fork_child();
 		broker_client_reset();
+		if (on_broker) {
+			broker_client_ensure();
+		}
 		credentials_fork_child();
 		signals_fork_child();
 		aio_fork_child();
