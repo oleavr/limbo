@@ -208,6 +208,7 @@ static void send_before_check_in(void);
 static void sender_gone_before_check_in(void);
 static void hidden_until_check_in(void);
 static void hidden_again_once_gone(void);
+static void service_back_to_launchd(void);
 static void serve_one(mach_port_t service);
 static void call_one(mach_port_t service);
 static long milliseconds_since(const struct timespec *start);
@@ -2470,6 +2471,7 @@ main(int argc, char *argv[])
 	sender_gone_before_check_in();
 	hidden_until_check_in();
 	hidden_again_once_gone();
+	service_back_to_launchd();
 	return 0;
 }
 
@@ -3132,6 +3134,54 @@ hidden_again_once_gone(void)
 	CHECK(bootstrap_call(CHECK_IN, REHIDDEN_SERVICE_NAME)
 			!= MACH_PORT_NULL);
 	CHECK(bootstrap_call(LOOK_UP, REHIDDEN_SERVICE_NAME) != MACH_PORT_NULL);
+}
+
+static void
+service_back_to_launchd(void)
+{
+	int to_child[2], to_parent[2];
+	CHECK(pipe(to_child) == 0 && pipe(to_parent) == 0);
+	pid_t pid = fork();
+	CHECK(pid >= 0);
+	if (pid == 0) {
+		mach_port_t service = bootstrap_call(
+				CHECK_IN, RETURNED_SERVICE_NAME);
+		CHECK(service != MACH_PORT_NULL);
+		CHECK(mach_port_mod_refs(mach_task_self(), service,
+				      MACH_PORT_RIGHT_RECEIVE, -1)
+				== KERN_SUCCESS);
+		signal_to(to_parent[1]);
+		wait_for(to_child[0]);
+		service = bootstrap_call(CHECK_IN, RETURNED_SERVICE_NAME);
+		CHECK(service != MACH_PORT_NULL);
+		struct {
+			mach_msg_header_t header;
+			char padding[64];
+		} message;
+		kern_return_t kr = mach_msg(&message.header,
+				MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+				sizeof(message), service, 8000, MACH_PORT_NULL);
+		CHECK(kr == MACH_MSG_SUCCESS);
+		CHECK(message.header.msgh_id == REQUEST_ID);
+		_exit(0);
+	}
+	wait_for(to_parent[0]);
+	mach_port_t service = bootstrap_call(LOOK_UP, RETURNED_SERVICE_NAME);
+	CHECK(service != MACH_PORT_NULL);
+	mach_msg_header_t message = {
+			.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0),
+			.msgh_size = sizeof(message),
+			.msgh_remote_port = service,
+			.msgh_id = REQUEST_ID,
+	};
+	CHECK(mach_msg(&message, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+			      sizeof(message), 0, MACH_PORT_NULL, 8000,
+			      MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	signal_to(to_child[1]);
+	int status;
+	waitpid(pid, &status, 0);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 }
 
 static void
