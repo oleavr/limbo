@@ -91,11 +91,13 @@ struct job {
 	uid_t account_uid;
 	gid_t account_gid;
 	char *account_home;
+	bool in_account_domain;
 	enum job_session session;
 	bool run_at_load;
 	bool unheld;
 	bool names_held;
 	bool untold;
+	bool for_root;
 	bool required;
 	bool system_session;
 	int persona_type;
@@ -135,6 +137,7 @@ static void load_user_groups(void);
 static void add_user_group(gid_t gid);
 static void set_state(struct job *job, enum job_state state);
 static void tell_changes(void);
+static void load(struct job *job);
 static void load_session(enum job_session session);
 static bool load_into(struct job *job);
 static void load_start(struct job *job);
@@ -163,6 +166,8 @@ static char *log_path(
 		const char *prefix, const char *program, char **arguments);
 static bool job_matches(const struct job *job, const char *word);
 static uint32_t job_domain_of(const struct job *job);
+static const struct job *account_job_with(const char *name);
+static struct job *account_instance(const struct job *template, uid_t uid);
 static uint32_t *name_awaited(const char *name);
 struct awaited_name {
 	char *name;
@@ -178,7 +183,8 @@ static void say(const char *format, ...);
 
 static struct job **jobs;
 static size_t job_count;
-
+static struct job **account_jobs;
+static size_t account_job_count;
 static int signal_fd = -1;
 static pid_t broker;
 static bool shutting_down;
@@ -287,8 +293,15 @@ jobs_load(const char *path)
 			continue;
 		}
 		job->untold = true;
-		jobs = reallocarray(jobs, job_count + 1, sizeof(*jobs));
-		jobs[job_count++] = job;
+		if (strncmp(job->name, "account/", 8) == 0) {
+			account_jobs = reallocarray(account_jobs,
+					account_job_count + 1,
+					sizeof(*account_jobs));
+			account_jobs[account_job_count++] = job;
+		} else {
+			jobs = reallocarray(jobs, job_count + 1, sizeof(*jobs));
+			jobs[job_count++] = job;
+		}
 	}
 	free(line);
 	fclose(file);
@@ -315,6 +328,9 @@ next_boot_task(void)
 		}
 	}
 	booted = true;
+	for (size_t i = 0; i != account_job_count; i++) {
+		hold_names(account_jobs[i]);
+	}
 	for (size_t i = 0; i != job_count; i++) {
 		hold_names(jobs[i]);
 	}
@@ -402,6 +418,14 @@ set_state(struct job *job, enum job_state state)
 					!= (state != JOB_UNLOADED
 							&& state != JOB_STOPPED)) {
 		job->untold = true;
+	}
+}
+
+static void
+load(struct job *job)
+{
+	if (load_into(job)) {
+		load_start(job);
 	}
 }
 
@@ -572,10 +596,110 @@ jobs_demand(const char *name, uint32_t domain)
 			}
 		}
 	}
+	const struct job *template = account_job_with(name);
+	if (!own && broker_domain_is_account(domain) && template != NULL) {
+		struct job *instance = account_instance(
+				template, domain & ~BROKER_DOMAIN_ACCOUNT);
+		if (instance != NULL) {
+			demand(instance, name);
+			return true;
+		}
+	}
 	if (!own && other != NULL) {
 		demand(other, name);
 	}
 	return own;
+}
+
+static const struct job *
+account_job_with(const char *name)
+{
+	for (size_t i = 0; i != account_job_count; i++) {
+		const struct job *job = account_jobs[i];
+		for (size_t j = 0; !job->unheld && j != job->service_count;
+				j++) {
+			if (strcmp(job->services[j], name) == 0) {
+				return job;
+			}
+		}
+	}
+	return NULL;
+}
+
+static struct job *account_job(const struct job *template, uid_t uid);
+
+static struct job *
+account_instance(const struct job *template, uid_t uid)
+{
+	struct job *job = account_job(template, uid);
+	if (job != NULL) {
+		jobs = reallocarray(jobs, job_count + 1, sizeof(*jobs));
+		jobs[job_count++] = job;
+		load(job);
+	}
+	return job;
+}
+
+static struct job *
+account_job(const struct job *template, uid_t uid)
+{
+	char path[PATH_MAX];
+	snprintf(path, sizeof(path), "%s/private/etc/passwd", sysroot);
+	FILE *file = fopen(path, "re");
+	struct passwd *found = NULL;
+	for (struct passwd *pw; file != NULL && (pw = fgetpwent(file));) {
+		if (pw->pw_uid == uid) {
+			found = pw;
+			break;
+		}
+	}
+	if (found == NULL) {
+		if (file != NULL) {
+			fclose(file);
+		}
+		say("%s: no account for uid %u", template->name, (unsigned)uid);
+		return NULL;
+	}
+	struct job *job = calloc(1, sizeof(*job));
+	asprintf(&job->name, "user/%u/%s", (unsigned)uid,
+			template->name + strlen("account/"));
+	job->account = strdup(found->pw_name);
+	job->account_uid = found->pw_uid;
+	job->account_gid = found->pw_gid;
+	job->account_home = strdup(found->pw_dir);
+	fclose(file);
+	job->in_account_domain = true;
+	job->session = SESSION_BOOT;
+	job->label = template->label != NULL ? strdup(template->label) : NULL;
+	job->plist = template->plist != NULL ? strdup(template->plist) : NULL;
+	job->environment = template->environment != NULL
+			? strdup(template->environment)
+			: NULL;
+	job->keepalive = template->keepalive;
+	job->throttle = template->throttle;
+	job->service_count = template->service_count;
+	job->services = calloc(job->service_count, sizeof(char *));
+	job->services_hidden = calloc(job->service_count, sizeof(bool));
+	for (size_t i = 0; i != job->service_count; i++) {
+		job->services[i] = strdup(template->services[i]);
+		job->services_hidden[i] = template->services_hidden[i];
+	}
+	job->executable = template->executable != NULL
+			? strdup(template->executable)
+			: NULL;
+	size_t argc = 0;
+	while (template->argv[argc] != NULL) {
+		argc++;
+	}
+	job->argv = calloc(argc + 1, sizeof(char *));
+	for (size_t i = 0; i != argc; i++) {
+		job->argv[i] = strdup(template->argv[i]);
+	}
+	char prefix[80];
+	snprintf(prefix, sizeof(prefix), "%s-", job->account);
+	job->log = log_path(prefix, program_name(job->argv[0]), job->argv + 1);
+	job->persona_type = template->persona_type;
+	return job;
 }
 
 static char *control(char **argv, size_t argc, uint32_t *status);
@@ -1091,6 +1215,7 @@ make_environment(const struct job *job)
 			"LIMBO_LAUNCHD_ENVIRONMENT",
 			"LIMBO_LAUNCHD_PERSONA_TYPE",
 			"LIMBO_SYSROOT",
+			BROKER_DOMAIN_VARIABLE,
 	};
 	extern char **environ;
 	size_t count = 0;
@@ -1128,6 +1253,10 @@ make_environment(const struct job *job)
 		asprintf(&env[n++], "HOME=%s", user_home);
 		asprintf(&env[n++], "USER=%s", user_name);
 		asprintf(&env[n++], "LOGNAME=%s", user_name);
+	}
+	if (job->in_account_domain || job->account != NULL) {
+		asprintf(&env[n++], BROKER_DOMAIN_VARIABLE "=%#x",
+				job_domain_of(job));
 	}
 	if (job->environment != NULL) {
 		asprintf(&env[n++], "LIMBO_LAUNCHD_ENVIRONMENT=%s",
@@ -1231,6 +1360,7 @@ parse_job(char *line)
 
 	job->run_at_load = strstr(fields[5], "runatload") != NULL;
 	job->unheld = strstr(fields[5], "unheld") != NULL;
+	job->for_root = strstr(fields[5], "forroot") != NULL;
 	job->required = strstr(fields[5], "required") != NULL;
 	job->system_session = strstr(fields[5], "systemsession") != NULL;
 	const char *persona = strstr(fields[5], "persona=");
@@ -1426,6 +1556,9 @@ job_matches(const struct job *job, const char *word)
 static uint32_t
 job_domain_of(const struct job *job)
 {
+	if (job->in_account_domain) {
+		return broker_domain_account(job->account_uid);
+	}
 	return (job->root || job->account != NULL) ? BROKER_DOMAIN_SYSTEM
 						   : BROKER_DOMAIN_USER;
 }
@@ -1642,7 +1775,19 @@ tell_name(const char *name)
 	}
 	uint32_t domain_count = 0, flags = 0;
 	bool held = false, hides = false;
-	bool found = false, loaded = false;
+	const struct job *template = account_job_with(name);
+	if (template != NULL) {
+		flags |= BROKER_NAME_ACCOUNTS;
+		for (size_t j = 0; j != template->service_count; j++) {
+			if (template->names_held && !held
+					&& strcmp(template->services[j], name)
+							== 0) {
+				held = true;
+				hides = template->services_hidden[j];
+			}
+		}
+	}
+	bool found = false, loaded = false, system = false;
 	for (size_t i = 0; i != job_count; i++) {
 		const struct job *job = jobs[i];
 		for (size_t j = 0; j != job->service_count; j++) {
@@ -1662,6 +1807,7 @@ tell_name(const char *name)
 				continue;
 			}
 			uint32_t domain = job_domain_of(job);
+			system = system || domain == BROKER_DOMAIN_SYSTEM;
 			bool listed = false;
 			for (uint32_t d = 0; d != domain_count; d++) {
 				listed = listed || domains[d] == domain;
@@ -1676,6 +1822,9 @@ tell_name(const char *name)
 	}
 	if (found && !loaded) {
 		flags |= BROKER_NAME_UNLOADED;
+	}
+	if (template != NULL && template->for_root && !system) {
+		flags |= BROKER_NAME_ROOT_ACCOUNT;
 	}
 	struct broker_name *record = calloc(
 			1, sizeof(*record) + domain_count * sizeof(uint32_t));
@@ -1695,8 +1844,10 @@ tell_name(const char *name)
 static void
 tell_changes(void)
 {
-	for (size_t i = 0; i != job_count; i++) {
-		struct job *job = jobs[i];
+	for (size_t i = 0; i != account_job_count + job_count; i++) {
+		struct job *job = i < account_job_count
+				? account_jobs[i]
+				: jobs[i - account_job_count];
 		if (!job->untold) {
 			continue;
 		}

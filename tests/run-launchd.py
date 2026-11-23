@@ -16,7 +16,7 @@ from pathlib import Path
 NAME_MAX = 128
 NAME_HELD, NAME_UNLOADED = 0x1, 0x4
 AWAITED_DEMANDED = 0x1
-DOMAIN_USER = 0
+DOMAIN_USER, DOMAIN_SYSTEM = 0, 1
 FRAME_OOL = 0x80000000
 
 FRAMES = {}
@@ -172,10 +172,13 @@ def broker_and_launchd(broker, tool, outdir):
     sysroot = with_sleep()
     if not sysroot:
         NOT_RUN.append("the real broker and limbo-launchd with jobs: a job "
-                       "runs as limbo-launchd's child without its connection")
+                       "runs as limbo-launchd's child without its connection; "
+                       "a system account with no user")
     table = outdir / "launchd-jobs.txt"
+    agent = "com.limbo.test.launchd.agent"
     table.write_text(job_table(sysroot, [
-        ("com.limbo.test.launchd.sleep", "runatload", "-")]))
+        ("com.limbo.test.launchd.sleep", "runatload", "-"),
+        ("account/" + agent, "-", agent)]))
     path = outdir / "launchd-broker.sock"
     env = dict(os.environ, LIMBO_JOB_LOGS=str(outdir), LIMBO_BROKER=str(path))
 
@@ -265,6 +268,9 @@ def broker_and_launchd(broker, tool, outdir):
                   unwanted=("WELCOME",))
         twice.close()
 
+        if sysroot:
+            no_user(path, agent, sysroot)
+
         process.kill()
         process.wait()
         check(job is None or gone(job), "the job stopped with the broker")
@@ -285,6 +291,46 @@ def look_up(sock, name):
     found, hidden, port = struct.unpack("IIQ", answer_of(
         sock, "LOOKUP_REPLY", f"a look-up of {name}")[:16])
     return port if found else None
+
+
+def no_user_uid(sysroot):
+    taken = set()
+    try:
+        passwd = (Path(sysroot) / "private/etc/passwd").read_text(
+            errors="replace")
+    except OSError:
+        passwd = ""
+    for line in passwd.splitlines():
+        fields = line.split(":")
+        if len(fields) > 2 and fields[2].isdigit():
+            taken.add(int(fields[2]))
+    return next((uid for uid in range(499, 0, -1) if uid not in taken), None)
+
+
+def no_user(path, agent, sysroot):
+    uid = no_user_uid(sysroot)
+    if uid is None:
+        NOT_RUN.append("a system account with no user: the sysroot's "
+                       "passwd has every one")
+        return
+    daemon = connect(path)
+    guest_id = hello(daemon, DOMAIN_SYSTEM, 0)[0]
+    port = (guest_id << 32) | 7
+    daemon.send(frame("REGISTER", struct.pack("Q", port) + name_field(agent)
+                      + struct.pack("I", 0)))
+    registered = answer_of(daemon, "REGISTERED",
+                           "the other domain's daemon checks in")
+    port = struct.unpack("IIQQ", registered[:24])[3]
+    asker = connect(path)
+    hello(asker, DOMAIN_USER, uid)
+    held = look_up(asker, agent)
+    check(held is not None, f"{agent} is held")
+    asker.send(frame("SEND", struct.pack("QI", held, 4) + bytes(12) + b"ping"))
+    answer = answer_of(daemon, "DELIVER", f"uid {uid}'s send to {agent}")
+    check(struct.unpack("Q", answer[:8]) == (port,),
+          f"the other domain's daemon has it: {answer}")
+    asker.close()
+    daemon.close()
 
 
 STAND_IN = r'''#!/usr/bin/env python3

@@ -324,7 +324,13 @@ connect_to_broker(const char *path)
 
 	struct broker_welcome welcome = {0};
 	expect_reply(BROKER_WELCOME, &welcome, sizeof(welcome));
-	struct broker_hello hello = {.domain = broker_client_domain()};
+	const char *domain = getenv(BROKER_DOMAIN_VARIABLE);
+	struct broker_hello hello = {
+			.domain = domain != NULL
+					? (uint32_t)strtoul(domain, NULL, 0)
+					: broker_client_domain(),
+			.uid = (uint32_t)geteuid(),
+	};
 	struct iovec part = {.iov_base = &hello, .iov_len = sizeof(hello)};
 	if (send_parts(BROKER_HELLO, &part, 1, NULL, 0) == 0) {
 		await_reply();

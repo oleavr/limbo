@@ -61,6 +61,7 @@ struct connection {
 	int fd;
 	uint32_t guest_id;
 	uint32_t domain;
+	uint32_t uid;
 	pid_t pid;
 	uid_t peer_uid;
 	gid_t peer_gid;
@@ -177,6 +178,7 @@ static void hide_again(void);
 static struct connection *connection_for_fd(int fd);
 static struct connection *connection_for_guest(uint32_t guest_id);
 static struct service *service_named(const char *name, uint32_t domain);
+static uint32_t account_domain(const struct connection *conn, const char *name);
 static void broker_names_forget(uint32_t guest_id);
 static void broker_names_forget_port(uint64_t global_id);
 static void add_connection(int fd);
@@ -625,6 +627,7 @@ welcome_guest(struct connection *conn, const struct broker_hello *hello,
 	conn->guest_id = next_guest_id++;
 	conn->domain = length >= sizeof(hello->domain) ? hello->domain
 						       : BROKER_DOMAIN_USER;
+	conn->uid = length >= sizeof(*hello) ? hello->uid : (uint32_t)-1;
 	struct broker_welcome welcome = {
 			.guest_id = conn->guest_id,
 			.launchd_pid = launchd_pid,
@@ -694,7 +697,11 @@ look_up_service(struct connection *conn, const struct broker_lookup *req)
 		answer_lookup(conn, false, true, 0);
 		return;
 	}
-	uint32_t domain = req->domain;
+	uint32_t account = conn->uid == 0
+					&& broker_domain_is_account(req->domain)
+			? req->domain
+			: account_domain(conn, req->name);
+	uint32_t domain = account != 0 ? account : req->domain;
 	if (held != NULL && !(held->launchd & BROKER_NAME_UNLOADED)) {
 		if (!has_job(held, domain)
 				&& has_job(held, BROKER_DOMAIN_SYSTEM)) {
@@ -911,6 +918,10 @@ no_job(const struct broker_name_awaited *which)
 static bool
 has_job(const struct held_name *held, uint32_t domain)
 {
+	if (broker_domain_is_account(domain)
+			&& (held->launchd & BROKER_NAME_ACCOUNTS)) {
+		return true;
+	}
 	for (uint32_t i = 0; i != held->domain_count; i++) {
 		if (held->domains[i] == domain) {
 			return true;
@@ -927,8 +938,14 @@ held_of(uint64_t global_id, uint32_t *domain)
 	if (index >= held_count) {
 		return NULL;
 	}
-	*domain = (local & BROKER_HELD_SYSTEM) ? BROKER_DOMAIN_SYSTEM
-					       : BROKER_DOMAIN_USER;
+	if (local & BROKER_HELD_ACCOUNT) {
+		*domain = broker_domain_account((local >> BROKER_HELD_UID_SHIFT)
+				& BROKER_HELD_UID_MASK);
+	} else if (local & BROKER_HELD_SYSTEM) {
+		*domain = BROKER_DOMAIN_SYSTEM;
+	} else {
+		*domain = BROKER_DOMAIN_USER;
+	}
 	struct held_name *held = &held_names[index];
 	return held->held_for_guest || (held->launchd & BROKER_NAME_HELD)
 			? held
@@ -939,7 +956,11 @@ static uint64_t
 held_port(const struct held_name *held, uint32_t domain)
 {
 	uint32_t local = (uint32_t)(held - held_names) + 1;
-	if (domain == BROKER_DOMAIN_SYSTEM) {
+	if (broker_domain_is_account(domain)) {
+		local |= BROKER_HELD_ACCOUNT
+				| ((domain & ~BROKER_DOMAIN_ACCOUNT)
+						<< BROKER_HELD_UID_SHIFT);
+	} else if (domain == BROKER_DOMAIN_SYSTEM) {
 		local |= BROKER_HELD_SYSTEM;
 	}
 	return broker_global_id(BROKER_GUEST_ID, local);
@@ -1215,11 +1236,27 @@ service_named(const char *name, uint32_t domain)
 		if (services[i - 1].domain == domain) {
 			return &services[i - 1];
 		}
-		if (other == NULL) {
+		if (other == NULL
+				&& !broker_domain_is_account(
+						services[i - 1].domain)) {
 			other = &services[i - 1];
 		}
 	}
 	return other;
+}
+
+static uint32_t
+account_domain(const struct connection *conn, const char *name)
+{
+	const struct held_name *known
+			= conn->uid < 500 ? name_known(name) : NULL;
+	if (known == NULL || !(known->launchd & BROKER_NAME_ACCOUNTS)) {
+		return 0;
+	}
+	if (conn->uid == 0 && !(known->launchd & BROKER_NAME_ROOT_ACCOUNT)) {
+		return 0;
+	}
+	return broker_domain_account(conn->uid);
 }
 
 static void
