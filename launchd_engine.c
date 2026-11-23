@@ -98,9 +98,11 @@ struct job {
 	bool names_held;
 	bool untold;
 	bool for_root;
+	bool multiple;
 	bool required;
 	bool system_session;
 	int persona_type;
+	char *instance;
 	struct keepalive keepalive;
 	unsigned throttle;
 	char **services;
@@ -137,6 +139,7 @@ static void load_user_groups(void);
 static void add_user_group(gid_t gid);
 static void set_state(struct job *job, enum job_state state);
 static void tell_changes(void);
+static void forget_name(const char *name);
 static void load(struct job *job);
 static void load_session(enum job_session session);
 static bool load_into(struct job *job);
@@ -698,8 +701,123 @@ account_job(const struct job *template, uid_t uid)
 	char prefix[80];
 	snprintf(prefix, sizeof(prefix), "%s-", job->account);
 	job->log = log_path(prefix, program_name(job->argv[0]), job->argv + 1);
+	job->multiple = template->multiple;
 	job->persona_type = template->persona_type;
 	return job;
+}
+
+static struct job *
+copy_job(const struct job *template)
+{
+	struct job *job = calloc(1, sizeof(*job));
+	job->name = strdup(template->name);
+	job->root = template->root;
+	if (template->account != NULL) {
+		job->account = strdup(template->account);
+		job->account_home = template->account_home != NULL
+				? strdup(template->account_home)
+				: NULL;
+	}
+	job->account_uid = template->account_uid;
+	job->account_gid = template->account_gid;
+	job->session = template->session;
+	job->label = template->label != NULL ? strdup(template->label) : NULL;
+	job->plist = template->plist != NULL ? strdup(template->plist) : NULL;
+	job->environment = template->environment != NULL
+			? strdup(template->environment)
+			: NULL;
+	job->throttle = template->throttle;
+	job->executable = template->executable != NULL
+			? strdup(template->executable)
+			: NULL;
+	size_t argc = 0;
+	while (template->argv[argc] != NULL) {
+		argc++;
+	}
+	job->argv = calloc(argc + 1, sizeof(char *));
+	for (size_t i = 0; i != argc; i++) {
+		job->argv[i] = strdup(template->argv[i]);
+	}
+	job->log = template->log != NULL ? strdup(template->log) : NULL;
+	job->persona_type = template->persona_type;
+	return job;
+}
+
+static bool
+jobs_make_instance(const char *name, uint32_t domain)
+{
+	const char *mark = strrchr(name, '#');
+	if (mark == NULL || mark == name || strlen(mark + 1) != 36) {
+		return false;
+	}
+	for (size_t i = 0; i != job_count; i++) {
+		for (size_t j = 0; j != jobs[i]->service_count; j++) {
+			if (strcmp(jobs[i]->services[j], name) == 0) {
+				return true;
+			}
+		}
+	}
+	char base[LIMBO_BROKER_SERVICE_NAME_MAX];
+	snprintf(base, sizeof(base), "%.*s", (int)(mark - name), name);
+	struct job *job = NULL;
+	if (broker_domain_is_account(domain)) {
+		const struct job *template = account_job_with(base);
+		if (template != NULL && template->multiple) {
+			job = account_job(template,
+					domain & ~BROKER_DOMAIN_ACCOUNT);
+		}
+	} else {
+		const struct job *template = NULL;
+		for (size_t pass = 0; pass != 2 && template == NULL; pass++)
+			for (size_t i = 0; i != job_count && template == NULL;
+					i++) {
+				if (!jobs[i]->multiple
+						|| jobs[i]->instance != NULL
+						|| jobs[i]->in_account_domain
+						|| (pass == 0)
+								!= (job_domain_of(jobs[i])
+										== domain)) {
+					continue;
+				}
+				for (size_t j = 0; j != jobs[i]->service_count;
+						j++) {
+					if (strcmp(jobs[i]->services[j], base)
+							== 0) {
+						template = jobs[i];
+						break;
+					}
+				}
+			}
+		if (template != NULL) {
+			job = copy_job(template);
+		}
+	}
+	if (job == NULL) {
+		return false;
+	}
+	char *named;
+	asprintf(&named, "%s#%.8s", job->name, mark + 1);
+	free(job->name);
+	job->name = named;
+	job->instance = strdup(mark + 1);
+	for (size_t i = 0; i != job->service_count; i++) {
+		free(job->services[i]);
+	}
+	free(job->services);
+	free(job->services_hidden);
+	job->service_count = 1;
+	job->services = calloc(1, sizeof(char *));
+	job->services_hidden = calloc(1, sizeof(bool));
+	job->services[0] = strdup(name);
+	job->keepalive = (struct keepalive){
+			.successful_exit = -1,
+			.crashed = -1,
+	};
+	jobs = reallocarray(jobs, job_count + 1, sizeof(*jobs));
+	jobs[job_count++] = job;
+	hold_names(job);
+	load(job);
+	return true;
 }
 
 static char *control(char **argv, size_t argc, uint32_t *status);
@@ -1216,6 +1334,7 @@ make_environment(const struct job *job)
 			"LIMBO_LAUNCHD_PERSONA_TYPE",
 			"LIMBO_SYSROOT",
 			BROKER_DOMAIN_VARIABLE,
+			BROKER_INSTANCE_VARIABLE,
 	};
 	extern char **environ;
 	size_t count = 0;
@@ -1257,6 +1376,10 @@ make_environment(const struct job *job)
 	if (job->in_account_domain || job->account != NULL) {
 		asprintf(&env[n++], BROKER_DOMAIN_VARIABLE "=%#x",
 				job_domain_of(job));
+	}
+	if (job->instance != NULL) {
+		asprintf(&env[n++], BROKER_INSTANCE_VARIABLE "=%s",
+				job->instance);
 	}
 	if (job->environment != NULL) {
 		asprintf(&env[n++], "LIMBO_LAUNCHD_ENVIRONMENT=%s",
@@ -1361,6 +1484,7 @@ parse_job(char *line)
 	job->run_at_load = strstr(fields[5], "runatload") != NULL;
 	job->unheld = strstr(fields[5], "unheld") != NULL;
 	job->for_root = strstr(fields[5], "forroot") != NULL;
+	job->multiple = strstr(fields[5], "multiple") != NULL;
 	job->required = strstr(fields[5], "required") != NULL;
 	job->system_session = strstr(fields[5], "systemsession") != NULL;
 	const char *persona = strstr(fields[5], "persona=");
@@ -1701,6 +1825,10 @@ jobs_name_awaited(const char *name, uint32_t domain, uint32_t flags,
 			free(copy);
 		}
 	}
+	if ((flags & BROKER_NAME_INSTANCE)
+			&& !jobs_make_instance(name, domain)) {
+		forget_name(name);
+	}
 	if ((flags & BROKER_NAME_DEMANDED) && !jobs_demand(name, domain)
 			&& waiters != 0) {
 		broker_no_job(name, domain);
@@ -1778,6 +1906,9 @@ tell_name(const char *name)
 	const struct job *template = account_job_with(name);
 	if (template != NULL) {
 		flags |= BROKER_NAME_ACCOUNTS;
+		if (template->multiple) {
+			flags |= BROKER_NAME_INSTANCES;
+		}
 		for (size_t j = 0; j != template->service_count; j++) {
 			if (template->names_held && !held
 					&& strcmp(template->services[j], name)
@@ -1798,6 +1929,10 @@ tell_name(const char *name)
 			if (job->names_held && !held) {
 				held = true;
 				hides = job->services_hidden[j];
+			}
+			if (job->multiple && job->instance == NULL
+					&& !job->in_account_domain) {
+				flags |= BROKER_NAME_INSTANCES;
 			}
 			if (job->state == JOB_UNLOADED) {
 				continue;
@@ -1837,6 +1972,20 @@ tell_name(const char *name)
 	if (domain_count != 0) {
 		memcpy(record->domains, domains,
 				domain_count * sizeof(uint32_t));
+	}
+	tell_record(record);
+}
+
+static void
+forget_name(const char *name)
+{
+	struct broker_name *record = calloc(1, sizeof(*record));
+	strncpy(record->name, name, sizeof(record->name) - 1);
+	size_t at = told_at(name);
+	if (at == told_count || strcmp(told_names[at]->name, name) != 0) {
+		broker_name(record);
+		free(record);
+		return;
 	}
 	tell_record(record);
 }

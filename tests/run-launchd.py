@@ -11,11 +11,12 @@ import struct
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 NAME_MAX = 128
-NAME_HELD, NAME_UNLOADED = 0x1, 0x4
-AWAITED_DEMANDED = 0x1
+NAME_HELD, NAME_UNLOADED, NAME_INSTANCES = 0x1, 0x4, 0x8
+AWAITED_DEMANDED, AWAITED_INSTANCE = 0x1, 0x2
 DOMAIN_USER, DOMAIN_SYSTEM = 0, 1
 FRAME_OOL = 0x80000000
 
@@ -168,16 +169,24 @@ def with_sleep():
     return sysroot if sysroot and (Path(sysroot) / "bin/sleep").exists() else None
 
 
+def heap(pid):
+    return int(re.search(r"VmData:\s+(\d+)",
+                         Path(f"/proc/{pid}/status").read_text()).group(1))
+
+
 def broker_and_launchd(broker, tool, outdir):
     sysroot = with_sleep()
     if not sysroot:
         NOT_RUN.append("the real broker and limbo-launchd with jobs: a job "
                        "runs as limbo-launchd's child without its connection; "
-                       "a system account with no user")
+                       "instances; the records' size; a system account with "
+                       "no user")
     table = outdir / "launchd-jobs.txt"
     agent = "com.limbo.test.launchd.agent"
     table.write_text(job_table(sysroot, [
         ("com.limbo.test.launchd.sleep", "runatload", "-"),
+        ("com.limbo.test.launchd.many", "multiple",
+         "com.limbo.test.launchd.many"),
         ("account/" + agent, "-", agent)]))
     path = outdir / "launchd-broker.sock"
     env = dict(os.environ, LIMBO_JOB_LOGS=str(outdir), LIMBO_BROKER=str(path))
@@ -269,6 +278,7 @@ def broker_and_launchd(broker, tool, outdir):
         twice.close()
 
         if sysroot:
+            instances(path, tool, env, process, launchd)
             no_user(path, agent, sysroot)
 
         process.kill()
@@ -285,12 +295,44 @@ def broker_and_launchd(broker, tool, outdir):
               f"and list, with no jobs: {listed}")
 
 
-def look_up(sock, name):
+def look_up(sock, name, instance):
     sock.send(frame("LOOKUP", name_field(name) + struct.pack(
-        "I", DOMAIN_USER)))
+        "II", DOMAIN_USER, 1 if instance else 0)))
     found, hidden, port = struct.unpack("IIQ", answer_of(
         sock, "LOOKUP_REPLY", f"a look-up of {name}")[:16])
     return port if found else None
+
+
+def instances(path, tool, env, process, launchd):
+    asker = connect(path)
+    base = "com.limbo.test.launchd.many"
+    check(look_up(asker, base + "#" + "0" * 36, False) is None,
+          "a name that isn't asked for as an instance isn't made one")
+    made = base + "#01234567-89AB-CDEF-0123-456789ABCDEF"
+    check(look_up(asker, made, True) is not None, "an instance is held")
+    listed = launchctl(tool, env, "list").stdout
+    check("com.limbo.test.launchd.many#01234567" in listed,
+          f"limbo-launchd made the instance's job: {listed}")
+    check(look_up(asker, made, False) is not None, "and holds its name")
+    odd = base + "#" + "0" * 35 + "!"
+    look_up(asker, odd, True)
+    check(process.poll() is None, f"the broker took {odd}")
+    check(launchctl(tool, env, "list").returncode == 0, "and still answers")
+    name = base + "#not-a-uuid"
+    look_up(asker, name, True)
+    check(launchctl(tool, env, "list").returncode == 0, "it still answers")
+    check(look_up(asker, name, False) is None,
+          f"{name} is not held once limbo-launchd took it back")
+
+    count = 4000
+    before = heap(launchd)
+    for _ in range(count):
+        look_up(asker, f"{base}#{str(uuid.uuid4()).upper()}", True)
+    check(launchctl(tool, env, "waiting").returncode == 0, "it still answers")
+    grown = heap(launchd) - before
+    check(grown < 12 * 1024,
+          f"{count} instances take what they are: {grown} KiB")
+    asker.close()
 
 
 def no_user_uid(sysroot):
@@ -323,7 +365,7 @@ def no_user(path, agent, sysroot):
     port = struct.unpack("IIQQ", registered[:24])[3]
     asker = connect(path)
     hello(asker, DOMAIN_USER, uid)
-    held = look_up(asker, agent)
+    held = look_up(asker, agent, False)
     check(held is not None, f"{agent} is held")
     asker.send(frame("SEND", struct.pack("QI", held, 4) + bytes(12) + b"ping"))
     answer = answer_of(daemon, "DELIVER", f"uid {uid}'s send to {agent}")
@@ -355,11 +397,14 @@ if mode == "slow":
     for i in range(3):
         record(f"com.limbo.test.slow{i}", 0x1)
         time.sleep(N["DEADLINE_MS"] * 0.4 / 1000)
+if mode == "instances":
+    record("com.limbo.test.many", 0x1 | 0x8)
 send(N["JOBS_LOADED"])
 if mode == "lost":
     lost_payload(N["NAME"] | N["OOL"])
     record("com.limbo.test.lost", 0x1)
 waiters = {}
+instance = None
 while True:
     ready = select.select([sock, control], [], [])[0]
     if control in ready:
@@ -386,6 +431,10 @@ while True:
         domain, flags, count = struct.unpack("III", body[:12])
         name = body[12:12 + 128].split(b"\0")[0].decode()
         waiters[name] = count
+        if flags & 0x2:
+            instance = name
+        if flags & 0x1 and name == instance and count != 0:
+            record(name, 0)
 '''
 
 
@@ -464,10 +513,29 @@ def broker_and_stand_in(broker, tool, outdir):
         listening(process)
         launchctl(tool, env, "list")
         asker = connect(path)
-        check(look_up(asker, "com.limbo.test.lost") is not None,
+        check(look_up(asker, "com.limbo.test.lost", False) is not None,
               "limbo-launchd's connection outlives a lost frame")
         asker.close()
         check(process.poll() is None, "and the broker goes on")
+
+    process, env, started = start("instances")
+    with Tree(process):
+        listening(process)
+        check(launchctl(tool, env, "list").returncode == 0, "it answers")
+        asker = connect(path)
+        name = "com.limbo.test.many#not-a-uuid"
+        port = look_up(asker, name, True)
+        check(port is not None, f"{name} is held as it is looked up")
+        asker.send(frame("SEND", struct.pack("QI", port, 4) + bytes(12)
+                         + b"ping"))
+        deadline = time.monotonic() + 5
+        waiting = launchctl(tool, env, "waiting")
+        while waiting.stdout != "" and time.monotonic() < deadline:
+            time.sleep(0.1)
+            waiting = launchctl(tool, env, "waiting")
+        check(waiting.returncode == 0 and waiting.stdout == "",
+              f"and launchd that no one waits for it: {waiting}")
+        asker.close()
 
 
 class StandInBroker:
