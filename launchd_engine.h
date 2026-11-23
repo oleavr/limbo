@@ -42,11 +42,13 @@ void jobs_name_awaited(const char *name, uint32_t domain, uint32_t flags,
 		uint32_t waiters);
 char *jobs_control(char **argv, size_t argc, uint32_t *status);
 bool jobs_done(void);
-void jobs_shut_down(void);
+void jobs_shut_down(bool reboot);
 void jobs_process_exited(pid_t pid);
 void jobs_broker_gone(void);
+bool jobs_rebooting(void);
 
 struct broker_name;
 void broker_name(const struct broker_name *record);
+void broker_jobs_stopping(void);
 void broker_process_exited(pid_t pid);
 void broker_no_job(const char *name, uint32_t domain);

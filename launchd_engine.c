@@ -238,6 +238,9 @@ jobs_init(pid_t broker_pid)
 	sigset_t mask;
 	sigemptyset(&mask);
 	sigaddset(&mask, SIGCHLD);
+	sigaddset(&mask, SIGTERM);
+	sigaddset(&mask, SIGINT);
+	sigaddset(&mask, SIGHUP);
 	sigprocmask(SIG_BLOCK, &mask, NULL);
 	signal_fd = signalfd(-1, &mask, SFD_CLOEXEC | SFD_NONBLOCK);
 	prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
@@ -1367,14 +1370,19 @@ jobs_done(void)
 	return true;
 }
 
+static bool rebooting;
+
 void
-jobs_shut_down(void)
+jobs_shut_down(bool reboot)
 {
 	if (shutting_down) {
 		return;
 	}
-	say("stopping every job");
+	say(reboot ? "stopping every job, to boot again"
+		   : "stopping every job");
 	shutting_down = true;
+	rebooting = reboot;
+	broker_jobs_stopping();
 	for (size_t i = 0; i != job_count; i++) {
 		if (jobs[i]->state == JOB_RUNNING) {
 			stop(jobs[i]);
@@ -1384,11 +1392,26 @@ jobs_shut_down(void)
 	tell_changes();
 }
 
+bool
+jobs_rebooting(void)
+{
+	return rebooting;
+}
+
 static void
 handle_signals(void)
 {
 	struct signalfd_siginfo info;
+	bool reap = false;
 	while (read(signal_fd, &info, sizeof(info)) == sizeof(info)) {
+		if (info.ssi_signo == SIGCHLD) {
+			reap = true;
+		} else {
+			jobs_shut_down(false);
+		}
+	}
+	if (!reap) {
+		return;
 	}
 	int status;
 	pid_t pid;
@@ -1446,7 +1469,7 @@ jobs_broker_gone(void)
 			take_exit(jobs[i]);
 		}
 	}
-	jobs_shut_down();
+	jobs_shut_down(false);
 }
 
 static void
