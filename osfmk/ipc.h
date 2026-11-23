@@ -72,6 +72,34 @@ typedef enum {
 	IPC_KOBJECT_TASK_NAME,
 } ipc_kobject_type_t;
 
+struct ipc_memory_record {
+	uint32_t fd_index;
+	uint32_t reserved;
+	uint64_t size;
+	uint64_t data_offset;
+};
+
+struct ipc_export;
+
+struct ipc_kobject_ops {
+	ipc_kobject_type_t type;
+	uint64_t remote_id;
+	size_t record_size;
+	size_t fd_count;
+	bool (*describe)(void *kobject, struct ipc_export *out);
+	void *(*adopt)(const void *record, const int *fds, size_t fd_count);
+	void (*destroy)(void *kobject);
+};
+
+#define IPC_KOBJECT_OPS(name)                                                  \
+	__attribute__((used, retain,                                           \
+			section("limbo_ipc_kobject_ops"))) static const struct \
+			ipc_kobject_ops *const name##_registration = &name
+
+int ipc_export_fd(struct ipc_export *out, int fd, bool closed_after_send);
+void ipc_export_record(struct ipc_export *out, const void *record, size_t size);
+int ipc_import_fd(const int *fds, size_t fd_count, uint32_t index);
+
 mach_port_name_t ipc_task_self(void);
 mach_port_name_t ipc_fileport_alloc(int fd);
 int ipc_fileport_fd(mach_port_name_t name);
