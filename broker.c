@@ -31,6 +31,7 @@
 #define _GNU_SOURCE
 #endif
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <libgen.h>
@@ -43,11 +44,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/prctl.h>
 #include <sys/resource.h>
+#include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -116,6 +120,11 @@ static void start_launchd(const char *table, int control_fd);
 static int launchd_wait(void);
 static int64_t now_ms(void);
 static void run(int listen_fd);
+static void handle_signals(void);
+static void launchd_stopping(void);
+static void launchd_exited(int status);
+static _Noreturn void end_system(void);
+static size_t kill_children(void);
 static void launchd_frames(void);
 static bool accept_guest(int listen_fd);
 static size_t fds_ahead(void);
@@ -205,6 +214,10 @@ static pid_t launchd_pid;
 static int launchd_fd = -1;
 static bool launchd_loaded;
 static int64_t launchd_deadline;
+static bool stopping;
+static int signal_fd = -1;
+static bool finished;
+static int exit_status;
 static pid_t *exited;
 static size_t exited_count;
 
@@ -219,6 +232,15 @@ main(int argc, char *argv[])
 	if (argc > 2) {
 		read_held_names(argv[2]);
 	}
+	sigset_t mask;
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGCHLD);
+	sigaddset(&mask, SIGTERM);
+	sigaddset(&mask, SIGINT);
+	sigaddset(&mask, SIGHUP);
+	sigprocmask(SIG_BLOCK, &mask, NULL);
+	signal_fd = signalfd(-1, &mask, SFD_CLOEXEC | SFD_NONBLOCK);
+	prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
 	int control_fd = control_socket(path);
 
 	int listen_fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
@@ -244,7 +266,7 @@ main(int argc, char *argv[])
 	setenv(LIMBO_BROKER_SOCKET_ENV, socket_path, 1);
 	start_launchd(argc > 3 ? argv[3] : NULL, control_fd);
 	run(listen_fd);
-	return 0;
+	return exit_status;
 }
 
 static int
@@ -406,20 +428,26 @@ start_launchd(const char *table, int control_fd)
 	launchd_fd = ends[0];
 	add_connection(launchd_fd);
 	launchd_deadline = now_ms() + LIMBO_LAUNCHD_DEADLINE_MS;
-	while (!launchd_loaded && launchd_fd != -1) {
-		struct pollfd fd = {.fd = launchd_fd, .events = POLLIN};
-		poll(&fd, 1, launchd_wait());
-		if (fd.revents & (POLLIN | POLLHUP)) {
+	while (!launchd_loaded && !finished) {
+		struct pollfd fds[2] = {
+				{.fd = launchd_fd, .events = POLLIN},
+				{.fd = signal_fd, .events = POLLIN},
+		};
+		poll(fds, 2, launchd_wait());
+		if (launchd_fd != -1 && (fds[0].revents & (POLLIN | POLLHUP))) {
 			handle_guest(launchd_fd);
-			launchd_deadline = now_ms() + LIMBO_LAUNCHD_DEADLINE_MS;
+			if (!stopping) {
+				launchd_deadline = now_ms()
+						+ LIMBO_LAUNCHD_DEADLINE_MS;
+			}
+		}
+		if (fds[1].revents & POLLIN) {
+			handle_signals();
 		}
 	}
-	if (!launchd_loaded) {
-		fprintf(stderr, "limbo-broker: %s ended as it started\n",
-				LIMBO_LAUNCHD);
-		exit(1);
+	if (!stopping) {
+		launchd_deadline = 0;
 	}
-	launchd_deadline = 0;
 }
 
 static int
@@ -432,10 +460,12 @@ launchd_wait(void)
 	if (left > 0) {
 		return (int)left;
 	}
-	fprintf(stderr, "limbo-broker: %s did not load in %d s\n",
-			LIMBO_LAUNCHD, LIMBO_LAUNCHD_DEADLINE_MS / 1000);
-	kill(launchd_pid, SIGKILL);
-	exit(1);
+	fprintf(stderr,
+			"limbo-broker: %s did not %s in %d s: the system "
+			"ends\n",
+			LIMBO_LAUNCHD, stopping ? "stop" : "load its jobs",
+			LIMBO_LAUNCHD_DEADLINE_MS / 1000);
+	end_system();
 }
 
 static int64_t
@@ -450,41 +480,181 @@ static void
 run(int listen_fd)
 {
 	bool listening = true;
-	for (;;) {
+	while (!finished) {
 		size_t polled = connection_count;
-		struct pollfd *fds = calloc(polled + 1, sizeof(*fds));
+		struct pollfd *fds = calloc(polled + 2, sizeof(*fds));
 		fds[0] = (struct pollfd){
 				.fd = listen_fd,
 				.events = listening ? POLLIN : 0,
 		};
+		fds[1] = (struct pollfd){.fd = signal_fd, .events = POLLIN};
 		for (size_t i = 0; i != polled; i++) {
-			fds[i + 1] = (struct pollfd){
+			fds[i + 2] = (struct pollfd){
 					.fd = connections[i].fd,
 					.events
 					= POLLIN | (connections[i].pending != NULL ? POLLOUT : 0),
 			};
 		}
 
-		poll(fds, polled + 1, listening ? -1 : ACCEPT_RETRY_MS);
+		int wait = launchd_wait();
+		if (!listening && (wait < 0 || wait > ACCEPT_RETRY_MS)) {
+			wait = ACCEPT_RETRY_MS;
+		}
+		poll(fds, polled + 2, wait);
 
 		launchd_frames();
 		listening = !(fds[0].revents & POLLIN)
 				|| accept_guest(listen_fd);
 		for (size_t i = 0; i != polled; i++) {
-			if (fds[i + 1].revents & POLLOUT) {
-				send_pending(connection_for_fd(fds[i + 1].fd));
-			}
-			if (fds[i + 1].fd == launchd_fd) {
+			struct connection *conn
+					= connection_for_fd(fds[i + 2].fd);
+			if (conn == NULL) {
 				continue;
 			}
-			if (fds[i + 1].revents & (POLLIN | POLLHUP)) {
-				handle_guest(fds[i + 1].fd);
+			if (fds[i + 2].revents & POLLOUT) {
+				send_pending(conn);
 			}
+			if (fds[i + 2].fd == launchd_fd) {
+				continue;
+			}
+			if (fds[i + 2].revents & (POLLIN | POLLHUP)) {
+				handle_guest(fds[i + 2].fd);
+			}
+		}
+		if (fds[1].revents & POLLIN) {
+			handle_signals();
 		}
 		answer_exited();
 
 		free(fds);
 	}
+}
+
+static void
+handle_signals(void)
+{
+	struct signalfd_siginfo info;
+	bool reap = false;
+	while (read(signal_fd, &info, sizeof(info)) == sizeof(info)) {
+		if (info.ssi_signo == SIGCHLD) {
+			reap = true;
+		} else if (launchd_pid <= 0) {
+			finished = true;
+		} else {
+			kill(launchd_pid, SIGTERM);
+			launchd_stopping();
+		}
+	}
+	if (!reap) {
+		return;
+	}
+	int status;
+	pid_t pid;
+	while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+		if (pid == launchd_pid) {
+			launchd_exited(status);
+		}
+	}
+}
+
+static void
+launchd_stopping(void)
+{
+	if (!stopping) {
+		stopping = true;
+		launchd_deadline = now_ms() + LIMBO_LAUNCHD_DEADLINE_MS;
+	}
+}
+
+static void
+launchd_exited(int status)
+{
+	launchd_pid = 0;
+	launchd_frames();
+	if (launchd_loaded && WIFEXITED(status)
+			&& (WEXITSTATUS(status) == 0
+					|| WEXITSTATUS(status)
+							== BROKER_EXIT_REBOOT)) {
+		exit_status = WEXITSTATUS(status);
+		finished = true;
+		return;
+	}
+	if (WIFSIGNALED(status)) {
+		fprintf(stderr,
+				"limbo-broker: %s was ended by signal %d: the "
+				"system ends\n",
+				LIMBO_LAUNCHD, WTERMSIG(status));
+	} else {
+		fprintf(stderr,
+				"limbo-broker: %s exited with %d: the system "
+				"ends\n",
+				LIMBO_LAUNCHD, WEXITSTATUS(status));
+	}
+	end_system();
+}
+
+static void
+end_system(void)
+{
+	int64_t deadline = now_ms() + LIMBO_LAUNCHD_DEADLINE_MS;
+	for (;;) {
+		int gone;
+		while (waitpid(-1, &gone, WNOHANG) > 0) {
+		}
+		if (kill_children() == 0) {
+			break;
+		}
+		int64_t left = deadline - now_ms();
+		if (left <= 0) {
+			fprintf(stderr,
+					"limbo-broker: processes that can't be "
+					"killed are left\n");
+			break;
+		}
+		struct pollfd fd = {.fd = signal_fd, .events = POLLIN};
+		poll(&fd, 1, (int)left);
+		struct signalfd_siginfo info;
+		while (read(signal_fd, &info, sizeof(info)) == sizeof(info)) {
+		}
+	}
+	exit(BROKER_EXIT_LAUNCHD_DIED);
+}
+
+static size_t
+kill_children(void)
+{
+	DIR *proc = opendir("/proc");
+	if (proc == NULL) {
+		return 0;
+	}
+	size_t killed = 0;
+	struct dirent *entry;
+	while ((entry = readdir(proc)) != NULL) {
+		char *end;
+		long pid = strtol(entry->d_name, &end, 10);
+		if (*end != '\0' || pid <= 0) {
+			continue;
+		}
+		char path[64], line[1024];
+		snprintf(path, sizeof(path), "/proc/%ld/stat", pid);
+		FILE *file = fopen(path, "r");
+		if (file == NULL) {
+			continue;
+		}
+		size_t length = fread(line, 1, sizeof(line) - 1, file);
+		fclose(file);
+		line[length] = '\0';
+		char *field = strrchr(line, ')');
+		int parent;
+		if (field == NULL || sscanf(field + 1, " %*c %d", &parent) != 1
+				|| parent != (int)getpid()) {
+			continue;
+		}
+		kill((pid_t)pid, SIGKILL);
+		killed++;
+	}
+	closedir(proc);
+	return killed;
 }
 
 static void
@@ -591,6 +761,11 @@ handle_guest(int fd)
 	case BROKER_JOBS_LOADED:
 		if (conn->fd == launchd_fd) {
 			launchd_loaded = true;
+		}
+		break;
+	case BROKER_JOBS_STOPPING:
+		if (conn->fd == launchd_fd) {
+			launchd_stopping();
 		}
 		break;
 	case BROKER_NO_JOB:

@@ -31,7 +31,8 @@ def read_header(path):
     body = re.sub(r"/\*.*?\*/", "", body[:body.index("};")], flags=re.S)
     for number, name in enumerate(re.findall(r"\b(BROKER_[A-Z_]+),", body)):
         FRAMES[name[len("BROKER_"):]] = number
-    for name in ("LIMBO_LAUNCHD_STOP_MS",):
+    for name in ("BROKER_EXIT_REBOOT", "BROKER_EXIT_LAUNCHD_DIED",
+                 "LIMBO_LAUNCHD_STOP_MS"):
         DEFINES[name] = int(re.search(rf"#define {name}\s+(\d+)", text).group(1))
     DEFINES["STOP"] = DEFINES["LIMBO_LAUNCHD_STOP_MS"] / 1000
     DEFINES["DEADLINE"] = 4 * DEFINES["STOP"]
@@ -254,6 +255,11 @@ def broker_and_launchd(broker, tool, outdir):
         unknown = launchctl(tool, env, "no-such-command")
         check(unknown.returncode == 1 and "unknown command" in unknown.stdout,
               f"an unknown command is refused: {unknown}")
+        if os.geteuid() != 0:
+            halt = launchctl(tool, env, "halt")
+            check(halt.returncode == 1 and halt.stdout == "not root\n",
+                  f"halt is refused one who isn't root: {halt}")
+            check(process.poll() is None, "the broker still runs")
 
         quiet = connect(path)
         guest = connect(path)
@@ -281,9 +287,26 @@ def broker_and_launchd(broker, tool, outdir):
             instances(path, tool, env, process, launchd)
             no_user(path, agent, sysroot)
 
-        process.kill()
-        process.wait()
-        check(job is None or gone(job), "the job stopped with the broker")
+        process.send_signal(signal.SIGTERM)
+        try:
+            status = process.wait(timeout=DEFINES["DEADLINE"] + 5)
+        except subprocess.TimeoutExpired:
+            check(False, "the broker stops when asked")
+        check(status == 0, f"a halt ends with 0: {status}")
+        check(job is None or gone(job), "the job stopped with the system")
+
+    with Tree(start(str(table))) as process:
+        check(launchctl(tool, env, "list").returncode == 0, "it starts again")
+        launchd = children(process.pid)[0]
+        job = job_pid() if sysroot else None
+        os.kill(launchd, signal.SIGKILL)
+        try:
+            status = process.wait(timeout=DEFINES["DEADLINE"] + 5)
+        except subprocess.TimeoutExpired:
+            check(False, "the broker exits once limbo-launchd has gone")
+        check(status == DEFINES["BROKER_EXIT_LAUNCHD_DIED"],
+              f"limbo-launchd's death ends the system: {status}")
+        check(job is None or not running(job), "the job went with the system")
 
     with Tree(start()) as process:
         waiting = launchctl(tool, env, "waiting")
@@ -293,6 +316,12 @@ def broker_and_launchd(broker, tool, outdir):
         check(listed.returncode == 0
               and listed.stdout == "PID\tStatus\tState\tName\n",
               f"and list, with no jobs: {listed}")
+        process.send_signal(signal.SIGTERM)
+        try:
+            status = process.wait(timeout=DEFINES["DEADLINE"] + 5)
+        except subprocess.TimeoutExpired:
+            check(False, "the broker with no table stops when asked")
+        check(status == 0, f"and ends with 0: {status}")
 
 
 def look_up(sock, name, instance):
@@ -397,12 +426,20 @@ if mode == "slow":
     for i in range(3):
         record(f"com.limbo.test.slow{i}", 0x1)
         time.sleep(N["DEADLINE_MS"] * 0.4 / 1000)
+if mode == "drained":
+    os.kill(os.getppid(), signal.SIGSTOP)
+    record("com.limbo.test.drained", 0x1)
+    send(N["JOBS_LOADED"])
+    sys.exit(0)
 if mode == "instances":
     record("com.limbo.test.many", 0x1 | 0x8)
 send(N["JOBS_LOADED"])
+if mode == "reboot":
+    sys.exit(N["REBOOT"])
 if mode == "lost":
     lost_payload(N["NAME"] | N["OOL"])
     record("com.limbo.test.lost", 0x1)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
 waiters = {}
 instance = None
 while True:
@@ -414,9 +451,15 @@ while True:
             reply = struct.pack("I", status) + text.encode()
             asker.send(struct.pack("II", N["CONTROL_REPLY"], len(reply))
                        + reply)
-        if word == "waiting":
+        if word == "mask":
+            answer(re.search(r"SigBlk:\s+(\w+)",
+                             open("/proc/self/status").read()).group(1))
+        elif word == "waiting":
             answer("".join(f"{n}\t{name}\n"
                            for name, n in waiters.items() if n))
+        elif word == "halt":
+            answer("")
+            send(N["JOBS_STOPPING"])
         else:
             answer("stand-in\n")
         asker.close()
@@ -449,8 +492,9 @@ def broker_and_stand_in(broker, tool, outdir):
     table.write_text("")
     path = folder / "broker.sock"
     numbers = " ".join(f"{name}={FRAMES[name]}" for name in (
-        "NAME", "JOBS_LOADED", "NAME_AWAITED", "CONTROL_REPLY"))
-    numbers += (f" OOL={FRAME_OOL}"
+        "NAME", "JOBS_LOADED", "JOBS_STOPPING", "NAME_AWAITED",
+        "CONTROL_REPLY"))
+    numbers += (f" OOL={FRAME_OOL} REBOOT={DEFINES['BROKER_EXIT_REBOOT']}"
                 f" DEADLINE_MS={int(DEFINES['DEADLINE'] * 1000)}")
 
     def start(mode):
@@ -480,8 +524,9 @@ def broker_and_stand_in(broker, tool, outdir):
             check(False, f"the broker gives up on {why}")
         waited = time.monotonic() - started
         said = process.stderr.read()
-        check(status != 0 and "did not load" in said,
-              f"the broker says so and exits: {status}, {said}")
+        check(status == DEFINES["BROKER_EXIT_LAUNCHD_DIED"]
+              and "the system ends" in said,
+              f"the broker says so and ends the system: {status}, {said}")
         check(DEFINES["DEADLINE"] - 1 <= waited,
               f"it gave it its time: {waited:.1f} s")
 
@@ -496,7 +541,7 @@ def broker_and_stand_in(broker, tool, outdir):
         ends_the_system(process, started,
                         "a limbo-launchd that never loads its table")
         check(stand_in is not None and not running(stand_in),
-              "and limbo-launchd went with it")
+              "and it went with the system")
 
     process, env, started = start("slow")
     with Tree(process):
@@ -508,6 +553,33 @@ def broker_and_stand_in(broker, tool, outdir):
         check(time.monotonic() - started > DEFINES["DEADLINE"],
               "for longer than the broker waits for one that says nothing")
 
+    process, env, started = start("reboot")
+    with Tree(process):
+        try:
+            status = process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            check(False, "the broker goes when limbo-launchd has")
+        check(status == DEFINES["BROKER_EXIT_REBOOT"],
+              f"a reboot ends with {DEFINES['BROKER_EXIT_REBOOT']}: {status}")
+
+    process, env, started = start("drained")
+    with Tree(process):
+        stand_in = None
+        for _ in range(200):
+            stand_in = (children(process.pid) or [None])[0]
+            if stand_in is not None and not running(stand_in):
+                break
+            time.sleep(0.05)
+        check(stand_in is not None and not running(stand_in),
+              "the stand-in loaded and went")
+        os.kill(process.pid, signal.SIGCONT)
+        try:
+            status = process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            check(False, "the broker goes when limbo-launchd has")
+        check(status == 0, f"one that loaded and went ends with 0: {status}, "
+              f"{process.stderr.read()}")
+
     process, env, started = start("lost")
     with Tree(process):
         listening(process)
@@ -517,6 +589,21 @@ def broker_and_stand_in(broker, tool, outdir):
               "limbo-launchd's connection outlives a lost frame")
         asker.close()
         check(process.poll() is None, "and the broker goes on")
+        mask = launchctl(tool, env, "mask")
+        check(mask.returncode == 0 and int(mask.stdout, 16)
+              & (1 << (signal.SIGTERM - 1)),
+              f"limbo-launchd starts with SIGTERM blocked: {mask}")
+        process.send_signal(signal.SIGTERM)
+        ends_the_system(process, time.monotonic(),
+                        "a limbo-launchd that does not stop")
+
+    process, env, started = start("plain")
+    with Tree(process):
+        listening(process)
+        halt = launchctl(tool, env, "halt")
+        check(halt.returncode == 0, f"the stand-in takes the halt: {halt}")
+        ends_the_system(process, time.monotonic(),
+                        "a limbo-launchd that does not stop after a halt")
 
     process, env, started = start("instances")
     with Tree(process):
@@ -576,6 +663,7 @@ class StandInBroker:
         theirs.close()
         control.close()
         self.names = {}
+        self.seen = set()
         self.backlog = []
 
     def until(self, kind, loaded=None, timeout=10.0):
@@ -587,6 +675,7 @@ class StandInBroker:
             got = receive(self.sock, timeout)
             if got is None:
                 check(False, f"limbo-launchd sends a {kind} frame")
+            self.seen.add(got[0])
             if got[0] == FRAMES["NAME"]:
                 flags, count = struct.unpack("II", got[1][:8])
                 name = got[1][8:8 + NAME_MAX].split(b"\0")[0].decode()
@@ -625,6 +714,10 @@ class StandInBroker:
 
     def said(self):
         return Path(self.log).read_text() if self.log else ""
+
+    def drain(self):
+        while (got := receive(self.sock, 1.0)) is not None:
+            self.seen.add(got[0])
 
 
 SENDS = {"aarch64": (206, 211), "x86_64": (44, 46)}.get(platform.machine(), ())
@@ -706,6 +799,25 @@ def exits(limbo, table, outdir, name):
         fourth = broker.job(name)
         check(fourth not in (None, job, second, third), "it starts again")
         goes(fourth)
+        broker.process.send_signal(signal.SIGTERM)
+        check(broker.ends() == 0, "limbo-launchd halts with an exit waiting")
+        check("stops: its exit is taken" in broker.said(),
+              f"which the halt took: {broker.said()[-400:]}")
+        broker.drain()
+        check(FRAMES["JOBS_STOPPING"] in broker.seen,
+              "and it told the broker it stops")
+
+    if os.geteuid() != 0:
+        return
+    broker = StandInBroker(limbo, table, outdir, log=log)
+    with Tree(broker.process):
+        broker.until("JOBS_LOADED")
+        job = broker.job(name)
+        goes(job)
+        check(broker.ask("reboot") == (0, ""), "a reboot is taken")
+        check(broker.ends() == DEFINES["BROKER_EXIT_REBOOT"],
+              "limbo-launchd reboots with an exit waiting")
+        check("stops: its exit is taken" in broker.said(), "which it took")
 
 
 def launchd_and_stand_in(limbo, outdir):
@@ -720,15 +832,24 @@ def launchd_and_stand_in(limbo, outdir):
     broker = StandInBroker(limbo, table, outdir)
     with Tree(broker.process) as process:
         broker.until("JOBS_LOADED")
+        process.send_signal(signal.SIGTERM)
+        check(broker.ends() == 0, "limbo-launchd exits with 0 for a halt")
+        broker.drain()
+        check(FRAMES["JOBS_STOPPING"] in broker.seen,
+              "and told the broker it stops")
+
+    broker = StandInBroker(limbo, table, outdir)
+    with Tree(broker.process) as process:
+        broker.until("JOBS_LOADED")
         broker.sock.close()
         status = broker.ends()
-        check(status != 0,
+        check(status not in (0, DEFINES["BROKER_EXIT_REBOOT"]),
               f"limbo-launchd fails when the broker goes: {status}")
 
     sysroot = with_sleep()
     if not sysroot:
         NOT_RUN.append("limbo-launchd with jobs and a stand-in broker: told "
-                       "before it forks; a job's exit "
+                       "before it forks; halt and reboot by uid; a job's exit "
                        "and the broker's word; jobs stopped as the broker "
                        "goes")
         return
@@ -758,7 +879,25 @@ def launchd_and_stand_in(limbo, outdir):
         broker.until("JOBS_LOADED")
         check(broker.job(first) in children(process.pid), "and then started it")
 
+        if os.geteuid() != 0:
+            check(broker.ask("reboot") == (1, "not root\n"),
+                  "reboot is refused one who isn't root")
+        else:
+            job = broker.job(first)
+            check(broker.ask("reboot") == (0, ""), "and taken from root")
+            check(broker.ends() == DEFINES["BROKER_EXIT_REBOOT"],
+                  "limbo-launchd exits as for a reboot")
+            check(not running(job), "with its job stopped")
+
     exits(limbo, table, outdir, first)
+
+    broker = StandInBroker(limbo, table, outdir)
+    with Tree(broker.process) as process:
+        broker.until("JOBS_LOADED")
+        job = broker.job(first)
+        process.send_signal(signal.SIGTERM)
+        check(broker.ends() == 0, "limbo-launchd exits with 0 for a halt")
+        check(job is not None and not running(job), "with its job stopped")
 
     broker = StandInBroker(limbo, table, outdir)
     with Tree(broker.process) as process:
@@ -766,7 +905,7 @@ def launchd_and_stand_in(limbo, outdir):
         job = broker.job(first)
         broker.sock.close()
         status = broker.ends()
-        check(status != 0,
+        check(status not in (0, DEFINES["BROKER_EXIT_REBOOT"]),
               f"limbo-launchd fails when the broker goes: {status}")
         check(job is not None and not running(job), "with its job stopped")
 

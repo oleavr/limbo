@@ -118,7 +118,7 @@ launchd_main(int argc, char *argv[])
 	if (broker_gone) {
 		return 1;
 	}
-	return 0;
+	return jobs_rebooting() ? BROKER_EXIT_REBOOT : 0;
 }
 
 static void
@@ -268,7 +268,18 @@ control(uid_t uid, char *words, uint32_t length, uint32_t *status)
 char *
 launchd_command(char **argv, size_t argc, uid_t uid, uint32_t *status)
 {
-	(void)uid;
+	if (argc != 0
+			&& (strcmp(argv[0], "halt") == 0
+					|| strcmp(argv[0], "reboot") == 0)) {
+		if (uid != 0) {
+			fprintf(stderr, "%s: %s refused: not root\n",
+					LIMBO_LAUNCHD, argv[0]);
+			*status = 1;
+			return strdup("not root\n");
+		}
+		jobs_shut_down(strcmp(argv[0], "reboot") == 0);
+		return strdup("");
+	}
 	return jobs_control(argv, argc, status);
 }
 
@@ -280,6 +291,12 @@ broker_name(const struct broker_name *record)
 					+ record->domain_count
 							* sizeof(uint32_t),
 			NULL, 0);
+}
+
+void
+broker_jobs_stopping(void)
+{
+	send_frame(BROKER_JOBS_STOPPING, NULL, 0, NULL, 0);
 }
 
 void
