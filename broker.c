@@ -64,6 +64,7 @@ struct connection {
 union broker_request {
 	struct broker_register reg;
 	struct broker_lookup lookup;
+	struct broker_task_for_pid task_for_pid;
 };
 
 struct service {
@@ -85,6 +86,8 @@ static struct broker_lookup_reply broker_names_look_up(
 		const struct broker_lookup *req);
 static void look_up_service(struct connection *conn,
 		const struct broker_lookup *req);
+static void task_for_pid(
+		struct connection *conn, const struct broker_task_for_pid *req);
 static void route_send(struct broker_wire_frame *frame);
 static void take_notice(const struct broker_wire_frame *frame);
 static struct connection *connection_for_fd(int fd);
@@ -257,6 +260,9 @@ handle_guest(int fd)
 		look_up_service(conn, lookup);
 		break;
 	}
+	case BROKER_TASK_FOR_PID:
+		task_for_pid(conn, (const struct broker_task_for_pid *)payload);
+		break;
 	}
 	free(payload);
 	broker_wire_free(frame);
@@ -308,6 +314,32 @@ static void
 look_up_service(struct connection *conn, const struct broker_lookup *req)
 {
 	struct broker_lookup_reply reply = broker_names_look_up(req);
+	send_frame(conn, BROKER_LOOKUP_REPLY, &reply, sizeof(reply));
+}
+
+static void
+task_for_pid(struct connection *conn, const struct broker_task_for_pid *req)
+{
+	struct connection *target = NULL;
+	for (size_t i = 0; i != connection_count; i++) {
+		struct connection *candidate = &connections[i];
+		if (candidate->pid == req->pid && candidate->guest_id != 0
+				&& (target == NULL
+						|| candidate->guest_id
+								> target->guest_id)) {
+			target = candidate;
+		}
+	}
+	bool allowed = target != NULL
+			&& (conn->peer_uid == 0
+					|| conn->peer_uid == target->peer_uid);
+	struct broker_lookup_reply reply = {
+			.found = allowed,
+			.global_id
+			= allowed ? broker_global_id(target->guest_id,
+						    BROKER_TASK_PORT_LOCAL)
+				  : 0,
+	};
 	send_frame(conn, BROKER_LOOKUP_REPLY, &reply, sizeof(reply));
 }
 

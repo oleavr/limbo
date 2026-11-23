@@ -56,6 +56,7 @@ enum broker_frame_type {
 	BROKER_GUEST_GONE,
 	BROKER_CANCEL,
 	BROKER_REGISTERED,
+	BROKER_TASK_FOR_PID,
 };
 
 struct broker_frame {
@@ -85,6 +86,12 @@ struct broker_registered {
 struct broker_lookup {
 	char name[LIMBO_BROKER_SERVICE_NAME_MAX];
 };
+
+struct broker_task_for_pid {
+	int32_t pid;
+};
+
+#define BROKER_TASK_PORT_LOCAL 0x7fffff00u
 
 struct broker_lookup_reply {
 	uint32_t found;

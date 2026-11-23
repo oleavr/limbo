@@ -52,5 +52,7 @@ int broker_client_receive_frame(int fd, struct broker_wire_ahead *ahead,
 bool broker_client_call(uint32_t type, const void *request, uint32_t length,
 		uint32_t reply_type, void *reply, uint32_t reply_length);
 bool broker_client_carries(uint64_t length, size_t fd_count);
+pid_t broker_client_pid(void);
+uint64_t broker_client_task_for_pid(int32_t pid);
 mach_msg_return_t broker_client_send(uint64_t dest_global_id, const void *blob,
 		uint32_t length, const int *fds, size_t fd_count);

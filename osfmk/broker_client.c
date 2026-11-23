@@ -230,6 +230,37 @@ broker_client_carries(uint64_t length, size_t fd_count)
 			sizeof(struct broker_send) + length, fd_count);
 }
 
+pid_t
+broker_client_pid(void)
+{
+	if (broker_fd == -1) {
+		broker_client_ensure();
+	}
+	struct ucred peer;
+	socklen_t length = sizeof(peer);
+	if (broker_fd == -1
+			|| getsockopt(broker_fd, SOL_SOCKET, SO_PEERCRED, &peer,
+					   &length)
+					!= 0) {
+		return 0;
+	}
+	return peer.pid;
+}
+
+uint64_t
+broker_client_task_for_pid(int32_t pid)
+{
+	broker_client_ensure();
+	if (broker_fd == -1) {
+		return 0;
+	}
+	struct broker_task_for_pid req = {.pid = pid};
+	struct broker_lookup_reply reply = {0};
+	broker_client_call(BROKER_TASK_FOR_PID, &req, sizeof(req),
+			BROKER_LOOKUP_REPLY, &reply, sizeof(reply));
+	return reply.found ? reply.global_id : 0;
+}
+
 mach_msg_return_t
 broker_client_send(uint64_t dest_global_id, const void *blob, uint32_t length,
 		const int *fds, size_t fd_count)
