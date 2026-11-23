@@ -327,6 +327,7 @@ static mach_port_name_t kobject_send_right(ipc_kobject_type_t type);
 static struct ipc_port *kobject_port(ipc_kobject_type_t type);
 static mach_msg_return_t send(mach_msg_header_t *msg, mach_msg_size_t size,
 		ipc_side_t sender, pid_t sender_pid);
+static void serve_kernel(struct ipc_port *dest, struct ipc_kmsg *kmsg);
 static struct ipc_sender sender_identity(pid_t pid);
 static bool has_valid_descriptors(const mach_msg_header_t *header);
 static mach_msg_return_t copyin(mach_msg_header_t *header, ipc_side_t sender,
@@ -741,6 +742,13 @@ send(mach_msg_header_t *msg, mach_msg_size_t size, ipc_side_t sender,
 		return MACH_MSG_SUCCESS;
 	}
 
+	serve_kernel(dest, kmsg);
+	return MACH_MSG_SUCCESS;
+}
+
+static void
+serve_kernel(struct ipc_port *dest, struct ipc_kmsg *kmsg)
+{
 	write_trailer(kmsg->header, dest, &kmsg->sender);
 	bool serve_xpc = dest->kotype == IPC_KOBJECT_BOOTSTRAP
 			&& xpc_bootstrap_is_message(kmsg->header->msgh_id);
@@ -759,7 +767,6 @@ send(mach_msg_header_t *msg, mach_msg_size_t size, ipc_side_t sender,
 	pthread_mutex_unlock(&lock);
 
 	free(kmsg);
-	return MACH_MSG_SUCCESS;
 }
 
 static struct ipc_sender
@@ -1763,6 +1770,14 @@ deliver(uint64_t dest_global_id, const struct broker_sender *sender,
 		destroy_rights(kmsg->header);
 		free(kmsg);
 		pthread_mutex_unlock(&lock);
+		flush_notices();
+		return;
+	}
+	if (dest->kotype != IPC_KOBJECT_NONE) {
+		mach_msg_type_name_t type;
+		transfer_right(kmsg->header->msgh_remote_port, reply_type,
+				IPC_USER, IPC_KERNEL, &type);
+		serve_kernel(dest, kmsg);
 		flush_notices();
 		return;
 	}
