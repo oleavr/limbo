@@ -99,6 +99,12 @@ broker_client_reset(void)
 	guest_id = 0;
 	reply_pending = false;
 	reader_ended = false;
+	broker_client_fork_child();
+}
+
+void
+broker_client_fork_child(void)
+{
 	pthread_mutex_init(&call_lock, NULL);
 	pthread_mutex_init(&send_lock, NULL);
 	pthread_mutex_init(&reply_lock, NULL);
