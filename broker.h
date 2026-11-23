@@ -39,6 +39,8 @@
 #define LIMBO_LAUNCHD                 "limbo-launchd"
 #define LIMBO_BROKER_SERVICE_NAME_MAX 128
 #define BROKER_GUEST_ID               0
+#define BROKER_HELD_SYSTEM            0x80000000u
+#define BROKER_HELD_INDEX_MASK        0xfffffu
 
 #define BROKER_FRAME_MAX    (1 << 20)
 #define BROKER_INLINE_MAX   (64 * 1024)
@@ -61,6 +63,7 @@ enum broker_frame_type {
 	BROKER_TASK_FOR_PID,
 	BROKER_MOVED,
 	BROKER_JOBS_LOADED,
+	BROKER_NAME,
 	BROKER_CONTROL,
 	BROKER_CONTROL_REPLY,
 };
@@ -77,6 +80,17 @@ enum broker_domain {
 	BROKER_DOMAIN_USER,
 	BROKER_DOMAIN_SYSTEM,
 };
+
+struct broker_name {
+	uint32_t flags;
+	uint32_t domain_count;
+	char name[LIMBO_BROKER_SERVICE_NAME_MAX];
+	uint32_t domains[];
+};
+
+#define BROKER_NAME_HELD     0x1u
+#define BROKER_NAME_HIDES    0x2u
+#define BROKER_NAME_UNLOADED 0x4u
 
 struct broker_hello {
 	uint32_t domain;
@@ -118,6 +132,7 @@ struct broker_task_for_pid {
 
 struct broker_lookup_reply {
 	uint32_t found;
+	uint32_t hidden;
 	uint64_t global_id;
 };
 

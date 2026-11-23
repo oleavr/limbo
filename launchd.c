@@ -252,6 +252,16 @@ launchd_command(char **argv, size_t argc, uid_t uid, uint32_t *status)
 	return jobs_control(argv, argc, status);
 }
 
+void
+broker_name(const struct broker_name *record)
+{
+	send_frame(BROKER_NAME, record,
+			sizeof(*record)
+					+ record->domain_count
+							* sizeof(uint32_t),
+			NULL, 0);
+}
+
 static bool
 send_frame(uint32_t type, const void *payload, size_t length, const int *fds,
 		size_t fd_count)

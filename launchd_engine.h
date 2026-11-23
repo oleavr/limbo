@@ -42,3 +42,6 @@ char *jobs_control(char **argv, size_t argc, uint32_t *status);
 bool jobs_done(void);
 void jobs_shut_down(void);
 void jobs_broker_gone(void);
+
+struct broker_name;
+void broker_name(const struct broker_name *record);
