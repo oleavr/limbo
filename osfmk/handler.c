@@ -240,6 +240,9 @@ kern_return_t
 sys__kernelrpc_mach_vm_allocate_trap(mach_port_name_t target,
 		mach_vm_offset_t *addr, mach_vm_size_t size, int flags)
 {
+	if (ipc_port_is_remote(target)) {
+		return MACH_SEND_INVALID_DEST;
+	}
 	return _kernelrpc_mach_vm_allocate(target, addr, size, flags);
 }
 
@@ -247,6 +250,9 @@ kern_return_t
 sys__kernelrpc_mach_vm_deallocate_trap(mach_port_name_t target,
 		mach_vm_address_t address, mach_vm_size_t size)
 {
+	if (ipc_port_is_remote(target)) {
+		return MACH_SEND_INVALID_DEST;
+	}
 	return _kernelrpc_mach_vm_deallocate(target, address, size);
 }
 
@@ -255,6 +261,9 @@ sys__kernelrpc_mach_vm_protect_trap(mach_port_name_t target,
 		mach_vm_address_t address, mach_vm_size_t size,
 		boolean_t set_maximum, vm_prot_t new_protection)
 {
+	if (ipc_port_is_remote(target)) {
+		return MACH_SEND_INVALID_DEST;
+	}
 	return _kernelrpc_mach_vm_protect(
 			target, address, size, set_maximum, new_protection);
 }
@@ -264,6 +273,9 @@ sys__kernelrpc_mach_vm_map_trap(mach_port_name_t target,
 		mach_vm_offset_t *address, mach_vm_size_t size,
 		mach_vm_offset_t mask, int flags, vm_prot_t cur_protection)
 {
+	if (ipc_port_is_remote(target)) {
+		return MACH_SEND_INVALID_DEST;
+	}
 	return _kernelrpc_mach_vm_map(target, address, size, mask, flags,
 			MACH_PORT_NULL, 0, FALSE, cur_protection, VM_PROT_ALL,
 			VM_INHERIT_DEFAULT);
@@ -273,6 +285,9 @@ kern_return_t
 sys__kernelrpc_mach_vm_purgable_control_trap(mach_port_name_t target,
 		mach_vm_offset_t address, vm_purgable_t control, int *state)
 {
+	if (ipc_port_is_remote(target)) {
+		return MACH_SEND_INVALID_DEST;
+	}
 	return _kernelrpc_mach_vm_purgable_control(
 			target, address, control, state);
 }
@@ -281,6 +296,9 @@ kern_return_t
 sys__kernelrpc_mach_port_allocate_trap(mach_port_name_t target,
 		mach_port_right_t right, mach_port_name_t *name)
 {
+	if (ipc_port_is_remote(target)) {
+		return MACH_SEND_INVALID_DEST;
+	}
 	return ipc_port_allocate(right, name);
 }
 
@@ -288,6 +306,9 @@ kern_return_t
 sys__kernelrpc_mach_port_deallocate_trap(
 		mach_port_name_t target, mach_port_name_t name)
 {
+	if (ipc_port_is_remote(target)) {
+		return MACH_SEND_INVALID_DEST;
+	}
 	return ipc_port_deallocate(name);
 }
 
@@ -296,6 +317,9 @@ sys__kernelrpc_mach_port_mod_refs_trap(mach_port_name_t target,
 		mach_port_name_t name, mach_port_right_t right,
 		mach_port_delta_t delta)
 {
+	if (ipc_port_is_remote(target)) {
+		return MACH_SEND_INVALID_DEST;
+	}
 	return ipc_port_mod_refs(name, right, delta);
 }
 
@@ -303,6 +327,9 @@ kern_return_t
 sys__kernelrpc_mach_port_move_member_trap(mach_port_name_t target,
 		mach_port_name_t member, mach_port_name_t after)
 {
+	if (ipc_port_is_remote(target)) {
+		return MACH_SEND_INVALID_DEST;
+	}
 	return ipc_port_move_member(member, after);
 }
 
@@ -311,6 +338,9 @@ sys__kernelrpc_mach_port_insert_right_trap(mach_port_name_t target,
 		mach_port_name_t name, mach_port_name_t poly,
 		mach_msg_type_name_t polyPoly)
 {
+	if (ipc_port_is_remote(target)) {
+		return MACH_SEND_INVALID_DEST;
+	}
 	return ipc_port_insert_right(name, poly, polyPoly);
 }
 
@@ -320,6 +350,9 @@ sys__kernelrpc_mach_port_get_attributes_trap(mach_port_name_t target,
 		mach_port_info_t port_info_out,
 		mach_msg_type_number_t *port_info_outCnt)
 {
+	if (ipc_port_is_remote(target)) {
+		return MACH_SEND_INVALID_DEST;
+	}
 	return mach_port_get_attributes(
 			target, name, flavor, port_info_out, port_info_outCnt);
 }
@@ -328,6 +361,9 @@ kern_return_t
 sys__kernelrpc_mach_port_insert_member_trap(mach_port_name_t target,
 		mach_port_name_t name, mach_port_name_t pset)
 {
+	if (ipc_port_is_remote(target)) {
+		return MACH_SEND_INVALID_DEST;
+	}
 	return ipc_port_insert_member(name, pset);
 }
 
@@ -335,6 +371,9 @@ kern_return_t
 sys__kernelrpc_mach_port_extract_member_trap(mach_port_name_t target,
 		mach_port_name_t name, mach_port_name_t pset)
 {
+	if (ipc_port_is_remote(target)) {
+		return MACH_SEND_INVALID_DEST;
+	}
 	return ipc_port_extract_member(name, pset);
 }
 
@@ -343,6 +382,9 @@ sys__kernelrpc_mach_port_construct_trap(mach_port_name_t target,
 		mach_port_options_t *options, uint64_t context,
 		mach_port_name_t *name)
 {
+	if (ipc_port_is_remote(target)) {
+		return MACH_SEND_INVALID_DEST;
+	}
 	return ipc_port_construct(options, context, name);
 }
 
@@ -351,6 +393,9 @@ sys__kernelrpc_mach_port_destruct_trap(mach_port_name_t target,
 		mach_port_name_t name, mach_port_delta_t srdelta,
 		uint64_t guard)
 {
+	if (ipc_port_is_remote(target)) {
+		return MACH_SEND_INVALID_DEST;
+	}
 	return ipc_port_destruct(name, srdelta, guard);
 }
 
@@ -358,6 +403,9 @@ kern_return_t
 sys__kernelrpc_mach_port_guard_trap(mach_port_name_t target,
 		mach_port_name_t name, uint64_t guard, boolean_t strict)
 {
+	if (ipc_port_is_remote(target)) {
+		return MACH_SEND_INVALID_DEST;
+	}
 	return ipc_port_set_context(name, guard);
 }
 
@@ -365,6 +413,9 @@ kern_return_t
 sys__kernelrpc_mach_port_unguard_trap(
 		mach_port_name_t target, mach_port_name_t name, uint64_t guard)
 {
+	if (ipc_port_is_remote(target)) {
+		return MACH_SEND_INVALID_DEST;
+	}
 	return ipc_port_set_context(name, 0);
 }
 
