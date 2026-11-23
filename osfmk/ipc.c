@@ -346,7 +346,8 @@ static mach_port_name_t kobject_send_right(ipc_kobject_type_t type);
 static struct ipc_port *kobject_port(ipc_kobject_type_t type);
 static mach_msg_return_t send(mach_msg_header_t *msg, mach_msg_size_t size,
 		ipc_side_t sender, pid_t sender_pid);
-static void serve_kernel(struct ipc_port *dest, struct ipc_kmsg *kmsg);
+static void serve_kernel(
+		struct ipc_port *dest, struct ipc_kmsg *kmsg, bool remote);
 static struct ipc_sender sender_identity(pid_t pid);
 static bool has_valid_descriptors(const mach_msg_header_t *header);
 static mach_msg_return_t copyin(mach_msg_header_t *header, ipc_side_t sender,
@@ -761,21 +762,27 @@ send(mach_msg_header_t *msg, mach_msg_size_t size, ipc_side_t sender,
 		return MACH_MSG_SUCCESS;
 	}
 
-	serve_kernel(dest, kmsg);
+	serve_kernel(dest, kmsg, false);
 	return MACH_MSG_SUCCESS;
 }
 
 static void
-serve_kernel(struct ipc_port *dest, struct ipc_kmsg *kmsg)
+serve_kernel(struct ipc_port *dest, struct ipc_kmsg *kmsg, bool remote)
 {
 	write_trailer(kmsg->header, dest, &kmsg->sender);
 	bool serve_xpc = dest->kotype == IPC_KOBJECT_BOOTSTRAP
 			&& xpc_bootstrap_is_message(kmsg->header->msgh_id);
 	void *service = dest->kotype == IPC_KOBJECT_XPC_SERVICE ? dest->kobject
 								: NULL;
+	const struct ipc_kobject_ops *ops = kobject_ops(dest->kotype);
+	void *kobject = dest->kobject;
 	pthread_mutex_unlock(&lock);
 
-	if (service != NULL) {
+	if (ops != NULL && ops->serve != NULL) {
+		if (!ops->serve(kobject, kmsg->header, remote)) {
+			serve_kobject(kmsg->header);
+		}
+	} else if (service != NULL) {
 		xpc_service_serve(service, kmsg->header);
 	} else if (!serve_xpc || !xpc_bootstrap_serve(kmsg->header)) {
 		serve_kobject(kmsg->header);
@@ -1855,7 +1862,7 @@ deliver(uint64_t dest_global_id, const struct broker_sender *sender,
 		mach_msg_type_name_t type;
 		transfer_right(kmsg->header->msgh_remote_port, reply_type,
 				IPC_USER, IPC_KERNEL, &type);
-		serve_kernel(dest, kmsg);
+		serve_kernel(dest, kmsg, true);
 		flush_notices();
 		return;
 	}
