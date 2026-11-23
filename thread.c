@@ -58,6 +58,7 @@ int arch_prctl(int, unsigned long);
 static __thread struct thread *current;
 static struct thread *all_threads;
 static pthread_mutex_t all_threads_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t task_suspend_count;
 
 static void *thread_main(void *arg);
 static void thread_destroy(struct thread *thread);
@@ -632,4 +633,103 @@ thread_terminate_thread(struct thread *thread)
 		syscall(SYS_tgkill, getpid(), thread->tid,
 				thread_suspend_signal());
 	}
+}
+
+void
+thread_prepare_suspended_start(const struct thread_state *state)
+{
+	struct thread *thread = thread_current();
+	ucontext_t *context = calloc(1, sizeof(*context));
+#ifdef __x86_64__
+	(void)state;
+#else
+	for (size_t i = 0; i < 8; i++) {
+		context->uc_mcontext.regs[i] = state->x[i];
+	}
+	context->uc_mcontext.sp = state->sp;
+	context->uc_mcontext.pc = state->pc;
+#endif
+	pthread_mutex_lock(&thread->suspend_lock);
+	thread->guest = true;
+	thread->suspend_count++;
+	thread->stopped_context = context;
+	pthread_mutex_unlock(&thread->suspend_lock);
+	pthread_mutex_lock(&all_threads_lock);
+	task_suspend_count++;
+	pthread_mutex_unlock(&all_threads_lock);
+}
+
+void
+thread_wait_suspended_start(struct thread_state *state)
+{
+	struct thread *thread = thread_current();
+	pthread_mutex_lock(&thread->suspend_lock);
+	while (thread->suspend_count != 0 && !thread->terminate_requested) {
+		pthread_cond_wait(&thread->resumed, &thread->suspend_lock);
+	}
+	ucontext_t *context = thread->stopped_context;
+	thread->stopped_context = NULL;
+	exit_if_terminated(thread);
+	pthread_mutex_unlock(&thread->suspend_lock);
+#ifdef __x86_64__
+	(void)state;
+#else
+	state->full = true;
+	for (size_t i = 0; i < 31; i++) {
+		state->regs[i] = context->uc_mcontext.regs[i];
+	}
+	state->sp = context->uc_mcontext.sp;
+	state->pc = context->uc_mcontext.pc;
+#endif
+	free(context);
+}
+
+uint32_t
+thread_task_suspend_count(void)
+{
+	pthread_mutex_lock(&all_threads_lock);
+	uint32_t count = task_suspend_count;
+	pthread_mutex_unlock(&all_threads_lock);
+	return count;
+}
+
+kern_return_t
+thread_task_suspend(void)
+{
+	struct thread *self = current;
+	pthread_mutex_lock(&all_threads_lock);
+	task_suspend_count++;
+	struct thread *threads[256];
+	size_t count = 0;
+	for (struct thread *thread = all_threads; thread != NULL && count < 256;
+			thread = thread->all_next) {
+		if (thread->guest && !thread->terminating && thread != self) {
+			threads[count++] = thread;
+		}
+	}
+	pthread_mutex_unlock(&all_threads_lock);
+	for (size_t i = 0; i < count; i++) {
+		thread_suspend_other(threads[i]);
+	}
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+thread_task_resume(void)
+{
+	struct thread *self = current;
+	pthread_mutex_lock(&all_threads_lock);
+	if (task_suspend_count == 0) {
+		pthread_mutex_unlock(&all_threads_lock);
+		return KERN_FAILURE;
+	}
+	task_suspend_count--;
+	for (struct thread *thread = all_threads; thread != NULL;
+			thread = thread->all_next) {
+		if (thread->guest && thread != self) {
+			thread_resume_thread(thread);
+		}
+	}
+	pthread_mutex_unlock(&all_threads_lock);
+	return KERN_SUCCESS;
 }
