@@ -59,6 +59,8 @@
 #define OTHER_PERSONA_TYPE 6
 #define STOP_TIMEOUT_MS    LIMBO_LAUNCHD_STOP_MS
 
+#define LOGS_VARIABLE "LIMBO_JOB_LOGS"
+
 enum job_state {
 	JOB_UNLOADED,
 	JOB_IDLE,
@@ -100,6 +102,7 @@ struct job {
 	size_t service_count;
 	char *executable;
 	char **argv;
+	char *log;
 	char **variables;
 	size_t variable_count;
 
@@ -113,6 +116,7 @@ struct job {
 	bool demanded;
 	bool has_status;
 	int status;
+	char *reason;
 	unsigned runs;
 };
 
@@ -129,6 +133,9 @@ static void load_start(struct job *job);
 static void next_boot_task(void);
 static bool starts_at_load(const struct job *job);
 static void job_exited(struct job *job, int status);
+static bool crashed(int status);
+static char *exit_reason(const char *log);
+static int open_log(struct job *job);
 static bool kept_alive(const struct job *job, int status);
 static void schedule(struct job *job);
 static void start(struct job *job);
@@ -139,6 +146,8 @@ static bool parse_keepalive(const char *text, struct keepalive *keepalive);
 static char *find_executable(const char *program);
 static const char *program_name(const char *path);
 static char *program_argv0(const char *executable, const char *program);
+static char *log_path(
+		const char *prefix, const char *program, char **arguments);
 static bool job_matches(const struct job *job, const char *word);
 
 static void describe(FILE *out, const struct job *job, bool details);
@@ -161,7 +170,7 @@ static gid_t user_groups[16];
 static size_t user_group_count;
 static char user_name[64] = "root";
 static char user_home[PATH_MAX];
-
+static char log_directory[PATH_MAX] = "/tmp";
 static char sysroot[PATH_MAX];
 static char limbo[PATH_MAX];
 
@@ -196,6 +205,17 @@ jobs_load(const char *path)
 	}
 	user_uid = st.st_uid;
 	user_gid = st.st_gid;
+	FILE *passwd = fopen("/etc/passwd", "re");
+	for (struct passwd *pw; passwd != NULL && (pw = fgetpwent(passwd));) {
+		if (pw->pw_uid == user_uid) {
+			snprintf(log_directory, sizeof(log_directory), "%s",
+					pw->pw_dir);
+			break;
+		}
+	}
+	if (passwd != NULL) {
+		fclose(passwd);
+	}
 	char sysroot_passwd[PATH_MAX];
 	snprintf(sysroot_passwd, sizeof(sysroot_passwd),
 			"%s/private/etc/passwd", sysroot);
@@ -220,6 +240,10 @@ jobs_load(const char *path)
 				(unsigned)user_uid, sysroot_passwd);
 	} else {
 		load_user_groups();
+	}
+	const char *logs = getenv(LOGS_VARIABLE);
+	if (logs != NULL) {
+		snprintf(log_directory, sizeof(log_directory), "%s", logs);
 	}
 	char self[PATH_MAX];
 	ssize_t length = readlink("/proc/self/exe", self, sizeof(self) - 1);
@@ -651,7 +675,14 @@ job_exited(struct job *job, int status)
 	job->pid = 0;
 	bool stopped = job->stopping;
 	job->stopping = false;
-	say("%s exited with %d", job->name, shell_status(status));
+	free(job->reason);
+	job->reason = crashed(status) ? exit_reason(job->log) : NULL;
+	if (job->reason != NULL) {
+		say("%s exited with %d: %s", job->name, shell_status(status),
+				job->reason);
+	} else {
+		say("%s exited with %d", job->name, shell_status(status));
+	}
 	if (group > 0 && shutting_down) {
 		kill(-group, SIGKILL);
 	}
@@ -681,6 +712,70 @@ job_exited(struct job *job, int status)
 	} else {
 		set_state(job, JOB_IDLE);
 	}
+}
+
+static bool
+crashed(int status)
+{
+	if (!WIFSIGNALED(status)) {
+		return false;
+	}
+	switch (WTERMSIG(status)) {
+	case SIGABRT:
+	case SIGSEGV:
+	case SIGBUS:
+	case SIGILL:
+	case SIGTRAP:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static char *
+exit_reason(const char *log)
+{
+	static const char *const prefixes[] = {
+			"not implemented: ",
+			"limbo: fatal signal ",
+			"limbo: missing system call ",
+	};
+	enum { TAIL_SIZE = 1 << 20 };
+	int fd = open(log, O_RDONLY | O_CLOEXEC);
+	if (fd == -1) {
+		return NULL;
+	}
+	char *tail = malloc(TAIL_SIZE);
+	off_t size = lseek(fd, 0, SEEK_END);
+	ssize_t length = -1;
+	if (tail != NULL && size != -1) {
+		length = pread(fd, tail, TAIL_SIZE,
+				size > TAIL_SIZE ? size - TAIL_SIZE : 0);
+	}
+	close(fd);
+
+	const char *found = NULL;
+	size_t found_length = 0;
+	const char *end = tail + (length > 0 ? length : 0);
+	for (const char *line = tail; line < end;) {
+		const char *next = memchr(line, '\n', end - line);
+		size_t line_length = (next != NULL ? next : end) - line;
+		for (size_t i = 0; i != sizeof(prefixes) / sizeof(*prefixes);
+				i++) {
+			size_t prefix_length = strlen(prefixes[i]);
+			if (line_length >= prefix_length
+					&& memcmp(line, prefixes[i],
+							   prefix_length)
+							== 0) {
+				found = line;
+				found_length = line_length;
+			}
+		}
+		line += line_length + 1;
+	}
+	char *reason = found != NULL ? strndup(found, found_length) : NULL;
+	free(tail);
+	return reason;
 }
 
 static bool
@@ -746,6 +841,7 @@ start(struct job *job)
 		set_state(job, JOB_STOPPED);
 		return;
 	}
+	int log = open_log(job);
 	uid_t uid = job->account != NULL ? job->account_uid : user_uid;
 	gid_t gid = job->account != NULL ? job->account_gid : user_gid;
 	gid_t own_groups[ACCOUNT_GROUPS_MAX];
@@ -773,7 +869,7 @@ start(struct job *job)
 		int null = open("/dev/null", O_RDWR);
 		dup2(null, STDIN_FILENO);
 		dup2(null, STDOUT_FILENO);
-		dup2(null, STDERR_FILENO);
+		dup2(log != -1 ? log : null, STDERR_FILENO);
 		bool own = job->account != NULL;
 		if (!job->root && geteuid() == 0
 				&& ((own ? setgroups(own_group_count,
@@ -795,6 +891,9 @@ start(struct job *job)
 	}
 	if (limbo_fd != -1) {
 		close(limbo_fd);
+	}
+	if (log != -1) {
+		close(log);
 	}
 	for (size_t i = 0; env[i] != NULL; i++) {
 		free(env[i]);
@@ -1000,6 +1099,7 @@ parse_job(char *line)
 	for (size_t i = 1; i != argc; i++) {
 		job->argv[i] = strdup(arguments[i]);
 	}
+	job->log = log_path("", program_name(job->argv[0]), arguments + 1);
 	return job;
 }
 
@@ -1088,6 +1188,51 @@ program_argv0(const char *executable, const char *program)
 	return strdup(program_name(program));
 }
 
+static char *
+log_path(const char *prefix, const char *program, char **arguments)
+{
+	char name[300];
+	size_t length = (size_t)snprintf(name, 32, "%s", prefix);
+	for (const char *c = program; *c != '\0' && length < 200; c++) {
+		name[length++] = (isalnum((unsigned char)*c) || *c == '.'
+						 || *c == '_' || *c == '-')
+				? *c
+				: '_';
+	}
+	size_t taken = 0;
+	for (size_t i = 0; arguments[i] != NULL && taken < 16; i++) {
+		if (i != 0) {
+			name[length++] = '_';
+			taken++;
+		}
+		for (const char *c = arguments[i]; *c != '\0' && taken < 16;
+				c++, taken++) {
+			name[length++] = isalnum((unsigned char)*c) ? *c : '_';
+		}
+	}
+	if (arguments[0] != NULL) {
+		name[length++] = '_';
+	}
+	name[length] = '\0';
+	char *path;
+	asprintf(&path, "%s/%s.log", log_directory, name);
+	return path;
+}
+
+static int
+open_log(struct job *job)
+{
+	char old[PATH_MAX];
+	snprintf(old, sizeof(old), "%s.old", job->log);
+	rename(job->log, old);
+	int log = open(job->log, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
+			0644);
+	if (log != -1 && geteuid() == 0) {
+		(void)!fchown(log, user_uid, user_gid);
+	}
+	return log;
+}
+
 static bool
 job_matches(const struct job *job, const char *word)
 {
@@ -1119,14 +1264,19 @@ describe(FILE *out, const struct job *job, bool details)
 		snprintf(status, sizeof(status), "%d",
 				shell_status(job->status));
 	}
-	fprintf(out, "%s\t%s\t%s%s\t%s\n", pid, status, states[job->state],
-			job->stopping ? ",stopping" : "", job->name);
+	fprintf(out, "%s\t%s\t%s%s\t%s%s%s\n", pid, status, states[job->state],
+			job->stopping ? ",stopping" : "", job->name,
+			job->reason != NULL ? "\t" : "",
+			job->reason != NULL ? job->reason : "");
 	if (!details) {
 		return;
 	}
 	const struct keepalive *k = &job->keepalive;
-	fprintf(out, "\tprogram: %s\n\tas: %s\n\tloads: %s\n\truns: %u\n",
+	fprintf(out,
+			"\tprogram: %s\n\tlog: %s\n\tas: %s\n\tloads: %s\n"
+			"\truns: %u\n",
 			job->executable != NULL ? job->executable : "-",
+			job->log,
 			job->root ? "root"
 					: job->account != NULL ? job->account
 							       : user_name,

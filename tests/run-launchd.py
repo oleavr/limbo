@@ -174,7 +174,7 @@ def broker_and_launchd(broker, tool, outdir):
     table.write_text(job_table(sysroot, [
         ("com.limbo.test.launchd.sleep", "runatload", "-")]))
     path = outdir / "launchd-broker.sock"
-    env = dict(os.environ, LIMBO_BROKER=str(path))
+    env = dict(os.environ, LIMBO_JOB_LOGS=str(outdir), LIMBO_BROKER=str(path))
 
     def start(*table_argument):
         if path.exists():
@@ -372,6 +372,7 @@ class StandInBroker:
         control = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         control.bind(str(self.control_path))
         control.listen()
+        env = dict(os.environ, LIMBO_JOB_LOGS=str(outdir))
         command = ["limbo-launchd", str(theirs.fileno()),
                    str(control.fileno() if not between else -1), str(table)]
         if between:
@@ -380,9 +381,9 @@ class StandInBroker:
                  "import subprocess, sys; sys.exit(subprocess.call("
                  "sys.argv[2:], executable=sys.argv[1], "
                  "pass_fds=[int(sys.argv[3])]))", limbo, *command],
-                pass_fds=[theirs.fileno()])
+                env=env, pass_fds=[theirs.fileno()])
         else:
-            self.process = subprocess.Popen(command, executable=limbo,
+            self.process = subprocess.Popen(command, executable=limbo, env=env,
                                             pass_fds=[theirs.fileno(),
                                                       control.fileno()])
         theirs.close()
