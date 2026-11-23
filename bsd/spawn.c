@@ -174,6 +174,7 @@ static int spawn_exec(const char *path, const struct darwin_spawnattr *attrp,
 		enum responsibility_told told, char **argv, char **envp);
 static const struct darwin_persona_info *spawn_persona(
 		const struct darwin_spawn_args *args);
+static char **suspended_env(char **env);
 
 int
 sys_posix_spawn(void *pid, const char *path, void *adesc, char **argv,
@@ -226,9 +227,17 @@ sys_posix_spawn(void *pid, const char *path, void *adesc, char **argv,
 	const char *host = exec_path(
 			path, argv, buffer, &script_argv, &executable);
 	char **env = exec_environment(envp, executable, told);
+	char **suspended
+			= (attrp != NULL
+					  && (attrp->psa_flags
+							  & _POSIX_SPAWN_START_SUSPENDED))
+			? suspended_env(env)
+			: NULL;
 	pid_t child;
 	int result = posix_spawn(&child, host, &actions, &attr,
-			(script_argv != NULL) ? script_argv : argv, env);
+			(script_argv != NULL) ? script_argv : argv,
+			suspended != NULL ? suspended : env);
+	free(suspended);
 	if (env != envp) {
 		free(env);
 	}
@@ -260,6 +269,25 @@ spawn_persona(const struct darwin_spawn_args *args)
 		return NULL;
 	}
 	return args->persona_info;
+}
+
+static char **
+suspended_env(char **env)
+{
+	size_t count = 0;
+	while (env != NULL && env[count] != NULL) {
+		count++;
+	}
+	char **result = malloc((count + 2) * sizeof(*result));
+	size_t kept = 0;
+	for (size_t i = 0; i < count; i++) {
+		if (strncmp(env[i], "LIMBO_START_SUSPENDED=", 22) != 0) {
+			result[kept++] = env[i];
+		}
+	}
+	result[kept++] = (char *)"LIMBO_START_SUSPENDED=task";
+	result[kept] = NULL;
+	return result;
 }
 
 static int
@@ -590,10 +618,6 @@ script_path(const char *path, const char *host, char **argv, char *buffer,
 static void
 convert_attr(const struct darwin_spawnattr *src, posix_spawnattr_t *dst)
 {
-	if (src->psa_flags & _POSIX_SPAWN_START_SUSPENDED) {
-		unimplemented();
-	}
-
 	short flags = 0;
 	if (src->psa_flags & _POSIX_SPAWN_RESETIDS) {
 		flags |= POSIX_SPAWN_RESETIDS;

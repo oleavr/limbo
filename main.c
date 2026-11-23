@@ -32,6 +32,7 @@
 #endif
 
 #include <fcntl.h>
+#include <mach-o/loader.h>
 #include <mach/mach.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,7 +49,9 @@
 #include "bsd/responsibility.h"
 #include "commpage.h"
 #include "linker.h"
+#include "osfmk/broker_client.h"
 #include "osfmk/mach_vm.h"
+#include "osfmk/task.h"
 #include "shared_cache.h"
 #include "syscall.h"
 #include "sysroot.h"
@@ -66,6 +69,7 @@ static uintptr_t build_stack(uint8_t *exe_base, const char *path, int argc,
 		char *argv[], char *envp[]);
 static char *copy_string(char **next, const char *s);
 static int restart_without_aslr(char *argv[], char *envp[]);
+static void dyld_note_all_image_info(const uint8_t *base);
 static void raise_file_limit(void);
 
 int
@@ -183,6 +187,11 @@ run(int argc, char *argv[], char *envp[])
 		named = strdup(named);
 		unsetenv("LIMBO_EXEC_PATH");
 	}
+	const char *suspended = getenv("LIMBO_START_SUSPENDED");
+	bool start_suspended = suspended != NULL;
+	bool task_suspended
+			= suspended != NULL && strcmp(suspended, "task") == 0;
+	unsetenv("LIMBO_START_SUSPENDED");
 	prctl(PR_SET_NAME, basename(argv[1]));
 	prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
 
@@ -229,6 +238,7 @@ run(int argc, char *argv[], char *envp[])
 					"interpreter\n");
 			return 1;
 		}
+		dyld_note_all_image_info(dyld_base);
 	} else if (entry == 0) {
 		fprintf(stderr, "limbo: binary has no entry point\n");
 		return 1;
@@ -263,9 +273,58 @@ run(int argc, char *argv[], char *envp[])
 #endif
 	trace_start(sysroot_guest_path(named != NULL ? named : argv[1]),
 			argv + 2);
+	if (task_suspended) {
+		thread_prepare_suspended_start(&state);
+		broker_client_ensure();
+		thread_wait_suspended_start(&state);
+	} else if (start_suspended) {
+		broker_client_ensure();
+		raise(SIGSTOP);
+	}
 	thread_enter(&state);
 error:
 	exit(1);
+}
+
+static void
+dyld_note_all_image_info(const uint8_t *base)
+{
+	const struct mach_header_64 *header = (const void *)base;
+	if (header->magic != MH_MAGIC_64) {
+		return;
+	}
+	const uint8_t *command = (const uint8_t *)(header + 1);
+	uint64_t slide = 0;
+	bool slid = false;
+	for (uint32_t i = 0; i < header->ncmds; i++) {
+		const struct load_command *load = (const void *)command;
+		if (load->cmd == LC_SEGMENT_64) {
+			const struct segment_command_64 *segment
+					= (const void *)load;
+			if (!slid && segment->fileoff == 0
+					&& segment->filesize != 0) {
+				slide = (uint64_t)base - segment->vmaddr;
+				slid = true;
+			}
+			const struct section_64 *sections
+					= (const void *)(segment + 1);
+			for (uint32_t s = 0; s < segment->nsects; s++) {
+				if (slid
+						&& strncmp(sections[s].sectname,
+								   "__all_"
+								   "image_info",
+								   16)
+								== 0) {
+					task_set_dyld_all_image_info(
+							sections[s].addr
+									+ slide,
+							sections[s].size);
+					return;
+				}
+			}
+		}
+		command += load->cmdsize;
+	}
 }
 
 static uintptr_t

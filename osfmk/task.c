@@ -346,6 +346,9 @@ memory_and_time_info(pid_t pid, task_flavor_t flavor, task_info_t out,
 		time_value(ended_user, &info.basic.user_time);
 		time_value(ended_system, &info.basic.system_time);
 		info.basic.policy = POLICY_TIMESHARE;
+		info.basic.suspend_count = pid == getpid()
+				? (integer_t)thread_task_suspend_count()
+				: 0;
 		size = MACH_TASK_BASIC_INFO_COUNT;
 		break;
 	case TASK_BASIC_INFO_64_ARM:
@@ -354,6 +357,9 @@ memory_and_time_info(pid_t pid, task_flavor_t flavor, task_info_t out,
 		time_value(ended_user, &info.basic_64.user_time);
 		time_value(ended_system, &info.basic_64.system_time);
 		info.basic_64.policy = POLICY_TIMESHARE;
+		info.basic_64.suspend_count = pid == getpid()
+				? (integer_t)thread_task_suspend_count()
+				: 0;
 		size = sizeof(info.basic_64) / sizeof(natural_t);
 		break;
 	case TASK_VM_INFO:
@@ -487,13 +493,13 @@ task_set_info(task_t target_task, task_flavor_t flavor,
 kern_return_t
 task_suspend(task_read_t target_task)
 {
-	unimplemented();
+	return thread_task_suspend();
 }
 
 kern_return_t
 task_resume(task_read_t target_task)
 {
-	unimplemented();
+	return thread_task_resume();
 }
 
 kern_return_t
