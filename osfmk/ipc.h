@@ -97,7 +97,10 @@ mach_msg_return_t ipc_kernel_send(mach_msg_header_t *msg);
 
 mach_msg_return_t ipc_launchd_send(mach_msg_header_t *msg);
 
-void ipc_remote_deliver(uint64_t dest_global_id, const void *blob,
+struct broker_sender;
+
+void ipc_remote_deliver(uint64_t dest_global_id,
+		const struct broker_sender *sender, const void *blob,
 		uint32_t length, const int *fds, size_t fd_count);
 void ipc_remote_lost(
 		uint64_t dest_global_id, const void *blob, uint32_t length);
