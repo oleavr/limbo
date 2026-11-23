@@ -86,6 +86,7 @@
 #include "bsd/gid.h"
 #include "bsd/hostuuid.h"
 #include "bsd/mac.h"
+#include "bsd/persona.h"
 #include "bsd/process.h"
 #include "codesign.h"
 #include "commpage.h"
@@ -237,6 +238,7 @@ sys_fork(void)
 		credentials_fork_child();
 		signals_fork_child();
 		aio_fork_child();
+		persona_inherit(getpid(), parent);
 	}
 	syscall_set_rdx(pid == 0);
 	return (pid == 0) ? parent : pid;
