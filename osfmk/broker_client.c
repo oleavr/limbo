@@ -306,7 +306,9 @@ connect_to_broker(const char *path)
 
 	struct broker_welcome welcome = {0};
 	expect_reply(BROKER_WELCOME, &welcome, sizeof(welcome));
-	if (send_parts(BROKER_HELLO, NULL, 0, NULL, 0) == 0) {
+	struct broker_hello hello = {.domain = broker_client_domain()};
+	struct iovec part = {.iov_base = &hello, .iov_len = sizeof(hello)};
+	if (send_parts(BROKER_HELLO, &part, 1, NULL, 0) == 0) {
 		await_reply();
 	} else {
 		stop_expecting();
@@ -527,4 +529,10 @@ send_result(int error)
 	default:
 		return MACH_SEND_NO_BUFFER;
 	}
+}
+
+uint32_t
+broker_client_domain(void)
+{
+	return geteuid() < 500 ? BROKER_DOMAIN_SYSTEM : BROKER_DOMAIN_USER;
 }

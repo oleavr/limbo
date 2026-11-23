@@ -52,6 +52,7 @@
 struct connection {
 	int fd;
 	uint32_t guest_id;
+	uint32_t domain;
 	pid_t pid;
 	uid_t peer_uid;
 	gid_t peer_gid;
@@ -62,6 +63,7 @@ struct connection {
 };
 
 union broker_request {
+	struct broker_hello hello;
 	struct broker_register reg;
 	struct broker_lookup lookup;
 	struct broker_task_for_pid task_for_pid;
@@ -81,6 +83,7 @@ struct route {
 
 struct service {
 	uint32_t guest_id;
+	uint32_t domain;
 	uint64_t global_id;
 	char name[LIMBO_BROKER_SERVICE_NAME_MAX];
 };
@@ -91,9 +94,10 @@ static bool accept_guest(int listen_fd);
 static size_t fds_ahead(void);
 static void release_queued(struct connection *conn, size_t fd_count);
 static void handle_guest(int fd);
-static void welcome_guest(struct connection *conn);
-static struct broker_registered broker_names_register(
-		uint32_t guest_id, const struct broker_register *reg);
+static void welcome_guest(
+		struct connection *conn, const struct broker_hello *hello);
+static struct broker_registered broker_names_register(uint32_t guest_id,
+		uint32_t domain, const struct broker_register *reg);
 static struct broker_lookup_reply broker_names_look_up(
 		const struct broker_lookup *req);
 static void look_up_service(struct connection *conn,
@@ -117,7 +121,7 @@ static void take_notice(
 		struct connection *conn, const struct broker_wire_frame *frame);
 static struct connection *connection_for_fd(int fd);
 static struct connection *connection_for_guest(uint32_t guest_id);
-static struct service *service_named(const char *name);
+static struct service *service_named(const char *name, uint32_t domain);
 static void broker_names_forget(uint32_t guest_id);
 static void broker_names_forget_port(uint64_t global_id);
 static void add_connection(int fd);
@@ -268,7 +272,7 @@ handle_guest(int fd)
 
 	switch (type) {
 	case BROKER_HELLO:
-		welcome_guest(conn);
+		welcome_guest(conn, (const struct broker_hello *)payload);
 		break;
 	case BROKER_REGISTER: {
 		if (length < sizeof(struct broker_register)) {
@@ -276,8 +280,8 @@ handle_guest(int fd)
 		}
 		struct broker_register *reg = (struct broker_register *)payload;
 		reg->name[sizeof(reg->name) - 1] = '\0';
-		struct broker_registered registered
-				= broker_names_register(conn->guest_id, reg);
+		struct broker_registered registered = broker_names_register(
+				conn->guest_id, conn->domain, reg);
 		send_frame(conn, BROKER_REGISTERED, &registered,
 				sizeof(registered));
 		break;
@@ -300,20 +304,22 @@ handle_guest(int fd)
 }
 
 static void
-welcome_guest(struct connection *conn)
+welcome_guest(struct connection *conn, const struct broker_hello *hello)
 {
 	if (conn->guest_id == 0) {
 		conn->guest_id = next_guest_id++;
+		conn->domain = hello->domain;
 	}
 	struct broker_welcome welcome = { .guest_id = conn->guest_id };
 	send_frame(conn, BROKER_WELCOME, &welcome, sizeof(welcome));
 }
 
 static struct broker_registered
-broker_names_register(uint32_t guest_id, const struct broker_register *reg)
+broker_names_register(uint32_t guest_id, uint32_t domain,
+		const struct broker_register *reg)
 {
-	struct service *service = service_named(reg->name);
-	if (service != NULL) {
+	struct service *service = service_named(reg->name, domain);
+	if (service != NULL && service->domain == domain) {
 		return (struct broker_registered){
 				.holder = service->guest_id == guest_id
 						? BROKER_NAME_ASKERS
@@ -325,6 +331,7 @@ broker_names_register(uint32_t guest_id, const struct broker_register *reg)
 	service = &services[service_count++];
 	*service = (struct service){
 			.guest_id = guest_id,
+			.domain = domain,
 			.global_id = reg->global_id,
 	};
 	strncpy(service->name, reg->name, sizeof(service->name) - 1);
@@ -334,7 +341,7 @@ broker_names_register(uint32_t guest_id, const struct broker_register *reg)
 static struct broker_lookup_reply
 broker_names_look_up(const struct broker_lookup *req)
 {
-	struct service *service = service_named(req->name);
+	struct service *service = service_named(req->name, req->domain);
 	return (struct broker_lookup_reply){
 			.found = service != NULL,
 			.global_id = (service != NULL) ? service->global_id : 0,
@@ -602,14 +609,21 @@ connection_for_guest(uint32_t guest_id)
 }
 
 static struct service *
-service_named(const char *name)
+service_named(const char *name, uint32_t domain)
 {
-	for (size_t i = 0; i != service_count; i++) {
-		if (strcmp(services[i].name, name) == 0) {
-			return &services[i];
+	struct service *other = NULL;
+	for (size_t i = service_count; i != 0; i--) {
+		if (strcmp(services[i - 1].name, name) != 0) {
+			continue;
+		}
+		if (services[i - 1].domain == domain) {
+			return &services[i - 1];
+		}
+		if (other == NULL) {
+			other = &services[i - 1];
 		}
 	}
-	return NULL;
+	return other;
 }
 
 static void
