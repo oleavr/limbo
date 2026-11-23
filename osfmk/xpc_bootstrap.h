@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -33,3 +34,15 @@
 
 bool xpc_bootstrap_is_message(mach_msg_id_t id);
 bool xpc_bootstrap_serve(mach_msg_header_t *request);
+
+struct xpc_bootstrap_routines {
+	bool (*is_message)(mach_msg_id_t id);
+	bool (*serve)(mach_msg_header_t *request);
+};
+
+#define XPC_BOOTSTRAP_ROUTINES(name)                                           \
+	__attribute__((used, retain,                                           \
+			section("limbo_xpc_bootstrap_"                         \
+				"routines"))) static const struct              \
+			xpc_bootstrap_routines *const name##_registration      \
+			= &name
