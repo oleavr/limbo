@@ -65,6 +65,15 @@ struct broker_frame {
 	uint32_t length;
 };
 
+enum broker_domain {
+	BROKER_DOMAIN_USER,
+	BROKER_DOMAIN_SYSTEM,
+};
+
+struct broker_hello {
+	uint32_t domain;
+};
+
 struct broker_welcome {
 	uint32_t guest_id;
 };
@@ -86,6 +95,7 @@ struct broker_registered {
 
 struct broker_lookup {
 	char name[LIMBO_BROKER_SERVICE_NAME_MAX];
+	uint32_t domain;
 };
 
 struct broker_task_for_pid {

@@ -2903,7 +2903,7 @@ names_look_up(const char *name, mach_port_name_t *port)
 		return BOOTSTRAP_UNKNOWN_SERVICE;
 	}
 
-	struct broker_lookup request = {0};
+	struct broker_lookup request = {.domain = broker_client_domain()};
 	strncpy(request.name, name, sizeof(request.name) - 1);
 	struct broker_lookup_reply reply = {0};
 	if (!broker_client_call(BROKER_LOOKUP, &request, sizeof(request),
