@@ -86,6 +86,16 @@ limbo_broker = executable('limbo-broker',
   install: true,
 )
 
+limbo_launchctl = executable('limbo-launchctl',
+  sources: [
+    'launchctl.c',
+  ],
+  include_directories: include_dir,
+  link_args: [
+    '-static'
+  ],
+  install: true,
+)
 
 limbo_trace = executable('limbo-trace',
   sources: [

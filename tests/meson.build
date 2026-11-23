@@ -121,7 +121,7 @@ test('names', python,
 )
 
 test('launchd', python,
-  args: [files('run-launchd.py'), limbo, limbo_broker,
+  args: [files('run-launchd.py'), limbo, limbo_broker, limbo_launchctl,
     files('../broker.h'), meson.current_build_dir()],
   suite: 'guest',
   timeout: 240,

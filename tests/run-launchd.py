@@ -147,6 +147,14 @@ def hello(sock, domain, uid):
     return struct.unpack("Ii", answer_of(sock, "WELCOME", "a hello")[:8])
 
 
+def launchctl(tool, env, *words, timeout=60):
+    try:
+        return subprocess.run([tool, *words], env=env, capture_output=True,
+                              text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        check(False, f"limbo-launchctl {' '.join(words)} is answered")
+
+
 def job_table(sysroot, jobs):
     return "".join(f"{name} user - - - {flags} - - 0 {service} bin/sleep 600\n"
                    for name, flags, service in jobs) if sysroot else ""
@@ -157,7 +165,7 @@ def with_sleep():
     return sysroot if sysroot and (Path(sysroot) / "bin/sleep").exists() else None
 
 
-def broker_and_launchd(broker, outdir):
+def broker_and_launchd(broker, tool, outdir):
     sysroot = with_sleep()
     if not sysroot:
         NOT_RUN.append("the real broker and limbo-launchd with jobs: a job "
@@ -183,7 +191,19 @@ def broker_and_launchd(broker, outdir):
                 time.sleep(0.05)
         return process
 
+    def job_pid():
+        for line in launchctl(tool, env, "list").stdout.splitlines():
+            fields = line.split("\t")
+            if (fields[-1] == "com.limbo.test.launchd.sleep"
+                    and fields[2] == "running"):
+                return int(fields[0])
+        return None
+
     with Tree(start(str(table))) as process:
+        listed = launchctl(tool, env, "list")
+        check(listed.returncode == 0
+              and listed.stdout.startswith("PID\tStatus\tState\tName\n"),
+              f"limbo-launchctl list answers: {listed}")
         launchd = [pid for pid in children(process.pid)
                    if Path(f"/proc/{pid}/cmdline").read_bytes()
                    .startswith(b"limbo-launchd\0")]
@@ -197,12 +217,7 @@ def broker_and_launchd(broker, outdir):
             f"/proc/{launchd}/fdinfo/{fd.decode()}").read_text()).group(1)
         check(int(flags, 8) & os.O_CLOEXEC,
               "limbo-launchd's connection is closed in what it starts")
-        job = None
-        for _ in range(200 if sysroot else 0):
-            job = (children(launchd) or [None])[0]
-            if job is not None:
-                break
-            time.sleep(0.05)
+        job = job_pid() if sysroot else None
         if sysroot:
             check(job is not None and running(job), "the job runs")
             check(int(stat_fields(job)[1]) == launchd,
@@ -217,6 +232,10 @@ def broker_and_launchd(broker, outdir):
                     Path(f"/proc/{job}/fd").iterdir()]
             check(connection.startswith("socket:") and connection not in held,
                   f"the job has not limbo-launchd's connection: {held}")
+
+        unknown = launchctl(tool, env, "no-such-command")
+        check(unknown.returncode == 1 and "unknown command" in unknown.stdout,
+              f"an unknown command is refused: {unknown}")
 
         quiet = connect(path)
         guest = connect(path)
@@ -235,6 +254,12 @@ def broker_and_launchd(broker, outdir):
         process.wait()
         check(job is None or gone(job), "the job stopped with the broker")
 
+    with Tree(start()) as process:
+        listed = launchctl(tool, env, "list")
+        check(listed.returncode == 0
+              and listed.stdout == "PID\tStatus\tState\tName\n",
+              f"with no table, limbo-launchctl list answers: {listed}")
+
 
 def look_up(sock, name):
     sock.send(frame("LOOKUP", name_field(name) + struct.pack(
@@ -245,13 +270,38 @@ def look_up(sock, name):
 
 
 STAND_IN = r'''#!/usr/bin/env python3
-import os, time
-if os.environ["LIMBO_TEST_STAND_IN"] == "never":
+import os, re, select, signal, socket, struct, sys, time
+mode = os.environ["LIMBO_TEST_STAND_IN"]
+N = {word.split("=")[0]: int(word.split("=")[1])
+     for word in os.environ["LIMBO_TEST_NUMBERS"].split()}
+sock = socket.socket(fileno=int(sys.argv[1]))
+control = socket.socket(fileno=int(sys.argv[2]))
+def send(kind, payload=b""):
+    sock.send(struct.pack("II", kind, len(payload)) + payload)
+if mode == "never":
     time.sleep(600)
+send(N["JOBS_LOADED"])
+while True:
+    ready = select.select([sock, control], [], [])[0]
+    if control in ready:
+        asker = control.accept()[0]
+        word = asker.recv(1 << 20)[8:].split(b"\0")[0].decode()
+        def answer(text, status=0):
+            reply = struct.pack("I", status) + text.encode()
+            asker.send(struct.pack("II", N["CONTROL_REPLY"], len(reply))
+                       + reply)
+        answer("stand-in\n")
+        asker.close()
+    if sock not in ready:
+        continue
+    data = sock.recv(1 << 20)
+    if len(data) < 8:
+        break
+    kind, length = struct.unpack("II", data[:8])
 '''
 
 
-def broker_and_stand_in(broker, outdir):
+def broker_and_stand_in(broker, tool, outdir):
     folder = outdir / "launchd-stand-in"
     shutil.rmtree(folder, ignore_errors=True)
     folder.mkdir()
@@ -261,16 +311,29 @@ def broker_and_stand_in(broker, outdir):
     table = folder / "jobs.txt"
     table.write_text("")
     path = folder / "broker.sock"
+    numbers = " ".join(f"{name}={FRAMES[name]}" for name in (
+        "JOBS_LOADED", "CONTROL_REPLY"))
+    numbers += f" DEADLINE_MS={int(DEFINES['DEADLINE'] * 1000)}"
 
     def start(mode):
         if path.exists():
             path.unlink()
         env = dict(os.environ, LIMBO_TEST_STAND_IN=mode,
-                   LIMBO_BROKER=str(path))
+                   LIMBO_TEST_NUMBERS=numbers, LIMBO_BROKER=str(path))
         return subprocess.Popen([folder / "limbo-broker", str(path),
                                  "/dev/null", str(table)], env=env,
                                 stderr=subprocess.PIPE, text=True), env, \
             time.monotonic()
+
+    def listening(process):
+        for _ in range(200):
+            if process.poll() is not None:
+                break
+            try:
+                connect(path).close()
+                break
+            except (FileNotFoundError, ConnectionRefusedError):
+                time.sleep(0.05)
 
     def ends_the_system(process, started, why):
         try:
@@ -303,7 +366,14 @@ class StandInBroker:
     def __init__(self, limbo, table, outdir, between=False):
         self.sock, theirs = socket.socketpair(socket.AF_UNIX,
                                               socket.SOCK_SEQPACKET)
-        command = ["limbo-launchd", str(theirs.fileno()), str(table)]
+        self.control_path = outdir / "launchd-stand-in-broker.launchd"
+        if self.control_path.exists():
+            self.control_path.unlink()
+        control = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        control.bind(str(self.control_path))
+        control.listen()
+        command = ["limbo-launchd", str(theirs.fileno()),
+                   str(control.fileno() if not between else -1), str(table)]
         if between:
             self.process = subprocess.Popen(
                 [sys.executable, "-c",
@@ -313,8 +383,10 @@ class StandInBroker:
                 pass_fds=[theirs.fileno()])
         else:
             self.process = subprocess.Popen(command, executable=limbo,
-                                            pass_fds=[theirs.fileno()])
+                                            pass_fds=[theirs.fileno(),
+                                                      control.fileno()])
         theirs.close()
+        control.close()
         self.backlog = []
 
     def until(self, kind, timeout=10.0):
@@ -329,6 +401,21 @@ class StandInBroker:
             if got[0] == FRAMES[kind]:
                 return got[1]
             self.backlog.append(got)
+
+    def ask(self, *words):
+        asker = connect(self.control_path)
+        asker.send(frame("CONTROL", b"".join(word.encode() + b"\0"
+                                             for word in words)))
+        answer = answer_of(asker, "CONTROL_REPLY", f"{words[0]}")
+        asker.close()
+        return struct.unpack("I", answer[:4])[0], answer[4:].decode()
+
+    def job(self, name):
+        for line in self.ask("list")[1].splitlines():
+            fields = line.split("\t")
+            if fields[-1] == name and fields[2] == "running":
+                return int(fields[0])
+        return None
 
     def ends(self, timeout=None):
         try:
@@ -365,7 +452,7 @@ def launchd_and_stand_in(limbo, outdir):
     broker = StandInBroker(limbo, table, outdir)
     with Tree(broker.process) as process:
         broker.until("JOBS_LOADED")
-        job = (children(process.pid) or [None])[0]
+        job = broker.job(first)
         broker.sock.close()
         status = broker.ends()
         check(status != 0,
@@ -374,12 +461,12 @@ def launchd_and_stand_in(limbo, outdir):
 
 
 def main():
-    limbo, broker, header, outdir = sys.argv[1:5]
+    limbo, broker, tool, header, outdir = sys.argv[1:6]
     read_header(header)
     outdir = Path(outdir).resolve()
     ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0)
-    broker_and_launchd(broker, outdir)
-    broker_and_stand_in(broker, outdir)
+    broker_and_launchd(broker, tool, outdir)
+    broker_and_stand_in(broker, tool, outdir)
     launchd_and_stand_in(limbo, outdir)
     if NOT_RUN:
         print("the parts without jobs passed; NOT RUN, for want of a sysroot "
