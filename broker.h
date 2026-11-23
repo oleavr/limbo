@@ -40,6 +40,9 @@
 #define LIMBO_BROKER_SERVICE_NAME_MAX 128
 #define BROKER_GUEST_ID               0
 #define BROKER_HELD_SYSTEM            0x80000000u
+#define BROKER_HELD_ACCOUNT           0x40000000u
+#define BROKER_HELD_UID_SHIFT         20
+#define BROKER_HELD_UID_MASK          0x3ffu
 #define BROKER_HELD_INDEX_MASK        0xfffffu
 
 #define BROKER_FRAME_MAX    (1 << 20)
@@ -88,6 +91,22 @@ enum broker_domain {
 	BROKER_DOMAIN_SYSTEM,
 };
 
+#define BROKER_DOMAIN_ACCOUNT 0x10000u
+
+static inline uint32_t
+broker_domain_account(uint32_t uid)
+{
+	return BROKER_DOMAIN_ACCOUNT | uid;
+}
+
+static inline bool
+broker_domain_is_account(uint32_t domain)
+{
+	return (domain & BROKER_DOMAIN_ACCOUNT) != 0;
+}
+
+#define BROKER_DOMAIN_VARIABLE "LIMBO_BROKER_DOMAIN"
+
 struct broker_name {
 	uint32_t flags;
 	uint32_t domain_count;
@@ -95,9 +114,11 @@ struct broker_name {
 	uint32_t domains[];
 };
 
-#define BROKER_NAME_HELD     0x1u
-#define BROKER_NAME_HIDES    0x2u
-#define BROKER_NAME_UNLOADED 0x4u
+#define BROKER_NAME_HELD         0x1u
+#define BROKER_NAME_HIDES        0x2u
+#define BROKER_NAME_UNLOADED     0x4u
+#define BROKER_NAME_ACCOUNTS     0x10u
+#define BROKER_NAME_ROOT_ACCOUNT 0x20u
 
 #define BROKER_NAME_DEMANDED 0x1u
 
@@ -110,6 +131,7 @@ struct broker_name_awaited {
 
 struct broker_hello {
 	uint32_t domain;
+	uint32_t uid;
 };
 
 struct broker_welcome {
