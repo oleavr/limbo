@@ -35,6 +35,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -189,6 +190,7 @@ static child_t start_peer(const char *name);
 static void end_peer(const child_t *child);
 static bool is_broker_socket(int fd);
 static void look_up_after_dup2_over_low_fds(void);
+static void pid_suspended_guest(void);
 static void queue_moves_with_receive_right(void);
 static void send_right_outlives_mover(void);
 static void receive_right_comes_back(void);
@@ -201,6 +203,8 @@ static void send_empty(mach_port_t dest, mach_msg_id_t id);
 static void signal_to(int fd);
 static void wait_for(int fd);
 int fileport_makeport(int fd, mach_port_t *port);
+int pid_suspend(int pid);
+int pid_resume(int pid);
 int fileport_makefd(mach_port_t port);
 static const char REQUEST_DATA[] = "out of line";
 
@@ -2443,7 +2447,50 @@ main(int argc, char *argv[])
 	send_right_outlives_mover();
 	receive_right_comes_back();
 	send_once_comes_back();
+	pid_suspended_guest();
 	return 0;
+}
+
+static void
+pid_suspended_guest(void)
+{
+	volatile unsigned long *counter = mmap(NULL, 16384,
+			PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
+	CHECK(counter != MAP_FAILED);
+	pid_t pid = fork();
+	CHECK(pid >= 0);
+	if (pid == 0) {
+		for (;;) {
+			(*counter)++;
+		}
+	}
+	while (*counter == 0) {
+		usleep(1000);
+	}
+	mach_port_t task;
+	CHECK(task_for_pid(mach_task_self(), pid, &task) == KERN_SUCCESS);
+
+	CHECK(pid_suspend(pid) == 0);
+	unsigned long held = *counter;
+	usleep(200000);
+	CHECK(*counter == held);
+	int status;
+	CHECK(waitpid(pid, &status, WNOHANG | WUNTRACED) == 0);
+	struct task_basic_info info;
+	mach_msg_type_number_t count = TASK_BASIC_INFO_COUNT;
+	CHECK(task_info(task, TASK_BASIC_INFO, (task_info_t)&info, &count)
+			== KERN_SUCCESS);
+	CHECK(info.suspend_count >= 1);
+
+	CHECK(pid_resume(pid) == 0);
+	usleep(200000);
+	CHECK(*counter != held);
+
+	CHECK(kill(pid, SIGKILL) == 0);
+	waitpid(pid, &status, 0);
+	CHECK(WIFSIGNALED(status));
+	mach_port_deallocate(mach_task_self(), task);
+	munmap((void *)counter, 16384);
 }
 
 static void
