@@ -57,6 +57,12 @@ enum remote_notice_kind {
 	REMOTE_NOTICE_SEND_ONCE,
 	REMOTE_NOTICE_SEND_ONCE_MOVED,
 	REMOTE_NOTICE_WATCH,
+	REMOTE_NOTICE_RETURNED,
+};
+
+struct remote_holders {
+	uint32_t count;
+	uint32_t reserved;
 };
 
 struct remote_notice {

@@ -57,6 +57,7 @@ enum broker_frame_type {
 	BROKER_CANCEL,
 	BROKER_REGISTERED,
 	BROKER_TASK_FOR_PID,
+	BROKER_MOVED,
 };
 
 struct broker_frame {
@@ -112,6 +113,12 @@ struct broker_send {
 
 struct broker_guest_gone {
 	uint32_t guest_id;
+};
+
+struct broker_moved {
+	uint64_t global_id;
+	uint32_t guest_id;
+	uint32_t reserved;
 };
 
 struct broker_wire_frame {

@@ -141,6 +141,7 @@ void ipc_remote_deliver(uint64_t dest_global_id,
 void ipc_remote_lost(
 		uint64_t dest_global_id, const void *blob, uint32_t length);
 void ipc_remote_guest_gone(uint32_t guest_id);
+void ipc_remote_port_moved(uint64_t global_id, uint32_t guest_id);
 void ipc_remote_all_gone(void);
 kern_return_t names_check_in(const char *name, mach_port_name_t *port);
 kern_return_t names_register(const char *name, mach_port_name_t port);
