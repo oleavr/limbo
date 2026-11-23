@@ -361,6 +361,24 @@ credentials_gettid(uid_t *uid, gid_t *gid)
 }
 
 void
+credentials_of_process(uid_t *uid, uid_t *euid, gid_t *gid, gid_t *egid)
+{
+	if (!assumed) {
+		*uid = getuid();
+		*euid = geteuid();
+		*gid = getgid();
+		*egid = getegid();
+		return;
+	}
+	pthread_mutex_lock(&lock);
+	*uid = process_users[0];
+	*euid = process_users[1];
+	*gid = process_group_ids[0];
+	*egid = process_group_ids[1];
+	pthread_mutex_unlock(&lock);
+}
+
+void
 credentials_thread_start(void)
 {
 	if (__atomic_load_n(&assuming, __ATOMIC_ACQUIRE) == 0) {
