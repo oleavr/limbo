@@ -37,6 +37,7 @@
 #include <string.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -47,6 +48,7 @@
 
 #define PORT_COUNT   32
 #define FDS_SEEN     256
+#define SOCKETS_SEEN 1024
 #define OVERSIZED    (2u << 20)
 #define GUARD_TICKS  1000
 #define REAP_TICKS   300
@@ -176,6 +178,8 @@ static const char *peer_name = PEER_NAME;
 static mach_msg_id_t receive_id(mach_port_t port);
 static child_t start_peer(const char *name);
 static void end_peer(const child_t *child);
+static bool is_broker_socket(int fd);
+static void look_up_after_dup2_over_low_fds(void);
 int fileport_makeport(int fd, mach_port_t *port);
 int fileport_makefd(mach_port_t port);
 static const char REQUEST_DATA[] = "out of line";
@@ -2217,16 +2221,12 @@ check_forwarded_send_once(void)
 static void
 lose_connection(void)
 {
-	bool open_before[FDS_SEEN];
-	for (int fd = 0; fd != FDS_SEEN; fd++) {
-		open_before[fd] = fcntl(fd, F_GETFD) != -1;
-	}
 	mach_port_t port = bootstrap_call(LOOK_UP, LOST_NAME);
 	CHECK(port != MACH_PORT_NULL);
 	mach_port_t reply = post_for(port, MARK_ID);
 	int violated = 0;
-	for (int fd = 0; fd != FDS_SEEN; fd++) {
-		if (!open_before[fd] && fcntl(fd, F_GETFD) != -1) {
+	for (int fd = 0; fd != SOCKETS_SEEN; fd++) {
+		if (is_broker_socket(fd)) {
 			violated += write(fd, "", 1) == 1;
 		}
 	}
@@ -2237,6 +2237,15 @@ lose_connection(void)
 			== MACH_MSG_SUCCESS);
 	CHECK(type_of(port) == MACH_PORT_TYPE_DEAD_NAME);
 	CHECK(bootstrap_call(LOOK_UP, LOST_NAME) == MACH_PORT_NULL);
+}
+
+static bool
+is_broker_socket(int fd)
+{
+	int type;
+	socklen_t length = sizeof(type);
+	return getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &length) == 0
+			&& type == SOCK_SEQPACKET;
 }
 
 static volatile sig_atomic_t signalled;
@@ -2346,6 +2355,7 @@ check_transport(void)
 	check_many_fileports(port);
 	check_memory_entry(port);
 	check_descriptors_wait(peer, port);
+	look_up_after_dup2_over_low_fds();
 
 	send_quit(port);
 	int status = reap(peer);
@@ -2353,6 +2363,30 @@ check_transport(void)
 	kill(guardian, SIGKILL);
 	reap(guardian);
 	check_killed_receiver();
+}
+
+static void
+look_up_after_dup2_over_low_fds(void)
+{
+	pid_t pid = fork();
+	CHECK(pid >= 0);
+	if (pid == 0) {
+		alarm(30);
+		CHECK(bootstrap_call(LOOK_UP, PEER_NAME) != MACH_PORT_NULL);
+		int pipe_fds[2];
+		CHECK(pipe(pipe_fds) == 0);
+		for (int fd = 3; fd < 512; fd++) {
+			struct stat st;
+			if (fstat(fd, &st) == 0 && S_ISSOCK(st.st_mode)) {
+				CHECK(dup2(pipe_fds[1], fd) == fd);
+			}
+		}
+		CHECK(bootstrap_call(LOOK_UP, PEER_NAME) != MACH_PORT_NULL);
+		_exit(0);
+	}
+	int status;
+	waitpid(pid, &status, 0);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 }
 
 int

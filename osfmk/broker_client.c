@@ -32,6 +32,7 @@
 #endif
 
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -110,6 +111,20 @@ broker_client_available(void)
 	return broker_fd != -1;
 }
 
+bool
+broker_client_owns_fd(int fd)
+{
+	return fd != -1 && fd == broker_fd;
+}
+
+void
+broker_client_fd_moved(int from, int to)
+{
+	if (from != -1 && broker_fd == from) {
+		broker_fd = to;
+	}
+}
+
 uint32_t
 broker_client_guest_id(void)
 {
@@ -159,6 +174,13 @@ static void
 connect_to_broker(const char *path)
 {
 	broker_fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+	if (broker_fd != -1 && broker_fd < 512) {
+		int high = fcntl(broker_fd, F_DUPFD_CLOEXEC, 512);
+		if (high != -1) {
+			close(broker_fd);
+			broker_fd = high;
+		}
+	}
 	struct sockaddr_un addr = { .sun_family = AF_UNIX };
 	strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
 	if (connect(broker_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
