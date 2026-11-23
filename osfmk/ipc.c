@@ -331,10 +331,8 @@ static void names_fork_child(void);
 static uint32_t register_name(const char *name, uint64_t global_id);
 static uint64_t own_name(const char *name);
 static void add_own_name(const char *name, uint64_t global_id);
-static uint64_t ipc_names_hold(mach_port_name_t port);
 static void ipc_names_release(mach_port_name_t port);
 static bool ipc_names_lives(uint64_t global_id);
-static mach_port_name_t ipc_names_send_right(uint64_t global_id);
 static mach_port_name_t import_memory_entry(int fd, const uint8_t *record);
 static struct ipc_entry *adopt_object(ipc_kobject_type_t kotype, void *kobject);
 static void count_rights(const mach_msg_header_t *header, mach_msg_bits_t bits,
@@ -2968,7 +2966,7 @@ add_own_name(const char *name, uint64_t global_id)
 	strncpy(own->name, name, sizeof(own->name) - 1);
 }
 
-static uint64_t
+uint64_t
 ipc_names_hold(mach_port_name_t port)
 {
 	pthread_mutex_lock(&lock);
@@ -3020,7 +3018,7 @@ ipc_names_lives(uint64_t global_id)
 	return lives;
 }
 
-static mach_port_name_t
+mach_port_name_t
 ipc_names_send_right(uint64_t global_id)
 {
 	pthread_mutex_lock(&lock);
