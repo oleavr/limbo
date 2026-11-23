@@ -57,15 +57,37 @@ static void reply_with_port(mach_msg_header_t *request, mach_port_name_t port,
 static void reply_with_error(mach_msg_header_t *request, kern_return_t error);
 static void reply_empty(mach_msg_header_t *request);
 
+extern const struct xpc_bootstrap_routines *const
+		__start_limbo_xpc_bootstrap_routines[] __attribute__((weak));
+extern const struct xpc_bootstrap_routines *const
+		__stop_limbo_xpc_bootstrap_routines[] __attribute__((weak));
+
 bool
 xpc_bootstrap_is_message(mach_msg_id_t id)
 {
+	for (const struct xpc_bootstrap_routines *const *routines
+			= __start_limbo_xpc_bootstrap_routines;
+			routines != __stop_limbo_xpc_bootstrap_routines;
+			routines++) {
+		if ((*routines)->is_message != NULL
+				&& (*routines)->is_message(id)) {
+			return true;
+		}
+	}
 	return (id & 0x40000000) != 0;
 }
 
 bool
 xpc_bootstrap_serve(mach_msg_header_t *request)
 {
+	for (const struct xpc_bootstrap_routines *const *routines
+			= __start_limbo_xpc_bootstrap_routines;
+			routines != __stop_limbo_xpc_bootstrap_routines;
+			routines++) {
+		if ((*routines)->serve(request)) {
+			return true;
+		}
+	}
 	struct xpc_object payload;
 	bool parsed = xpc_serial_payload(request, &payload);
 	const char *name = parsed ? xpc_serial_get_string(&payload, "name")
