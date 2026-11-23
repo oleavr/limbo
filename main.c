@@ -45,9 +45,11 @@
 #include <ucontext.h>
 #include <unistd.h>
 
+#include "broker.h"
 #include "bsd/mac.h"
 #include "bsd/responsibility.h"
 #include "commpage.h"
+#include "launchd.h"
 #include "linker.h"
 #include "osfmk/broker_client.h"
 #include "osfmk/mach_vm.h"
@@ -75,6 +77,9 @@ static void raise_file_limit(void);
 int
 main(int argc, char *argv[], char *envp[])
 {
+	if (argc > 0 && strcmp(argv[0], LIMBO_LAUNCHD) == 0) {
+		return launchd_main(argc, argv);
+	}
 	if (!responsibility_named()
 			|| !(personality(0xffffffff) & ADDR_NO_RANDOMIZE)) {
 		return restart_without_aslr(argv, envp);

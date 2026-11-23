@@ -32,7 +32,11 @@
 #endif
 
 #include <errno.h>
+#include <fcntl.h>
+#include <libgen.h>
+#include <limits.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,6 +45,7 @@
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "broker.h"
@@ -96,7 +101,11 @@ struct service {
 };
 
 static void raise_file_limit(void);
+static void start_launchd(void);
+static int launchd_wait(void);
+static int64_t now_ms(void);
 static void run(int listen_fd);
+static void launchd_frames(void);
 static bool accept_guest(int listen_fd);
 static size_t fds_ahead(void);
 static void release_queued(struct connection *conn, size_t fd_count);
@@ -131,6 +140,7 @@ static void release_held(uint64_t global_id);
 static struct route *route_for(uint64_t global_id);
 static uint32_t route_of(uint64_t global_id);
 static void forget_routes(uint32_t guest_id);
+static void tell_guests(uint32_t type, const void *payload, uint32_t length);
 static uint64_t *moved_ids(const struct broker_wire_frame *frame,
 		const struct broker_send *send, uint32_t *count);
 static void drop_frame(struct broker_wire_frame *frame);
@@ -163,6 +173,10 @@ static size_t held_count;
 static uint32_t next_guest_id = 1;
 static size_t descriptor_room;
 static size_t queued_fds;
+static pid_t launchd_pid;
+static int launchd_fd = -1;
+static bool launchd_loaded;
+static int64_t launchd_deadline;
 
 int
 main(int argc, char *argv[])
@@ -187,6 +201,7 @@ main(int argc, char *argv[])
 	listen(listen_fd, 64);
 
 	raise_file_limit();
+	start_launchd();
 	run(listen_fd);
 	return 0;
 }
@@ -257,6 +272,78 @@ raise_file_limit(void)
 }
 
 static void
+start_launchd(void)
+{
+	char self[PATH_MAX], limbo[PATH_MAX];
+	ssize_t length = readlink("/proc/self/exe", self, sizeof(self) - 1);
+	self[length > 0 ? length : 0] = '\0';
+	snprintf(limbo, sizeof(limbo), "%s/limbo", dirname(self));
+	int ends[2];
+	if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, ends) != 0) {
+		perror("limbo-broker: socketpair");
+		exit(1);
+	}
+	pid_t pid = fork();
+	if (pid == 0) {
+		fcntl(ends[1], F_SETFD, 0);
+		char fd[16];
+		snprintf(fd, sizeof(fd), "%d", ends[1]);
+		char *const argv[] = {LIMBO_LAUNCHD, fd, NULL};
+		execv(limbo, argv);
+		fprintf(stderr, "limbo-broker: %s: %s\n", limbo,
+				strerror(errno));
+		_exit(127);
+	}
+	close(ends[1]);
+	if (pid < 0) {
+		perror("limbo-broker: fork");
+		exit(1);
+	}
+	launchd_pid = pid;
+	launchd_fd = ends[0];
+	add_connection(launchd_fd);
+	launchd_deadline = now_ms() + LIMBO_LAUNCHD_DEADLINE_MS;
+	while (!launchd_loaded && launchd_fd != -1) {
+		struct pollfd fd = {.fd = launchd_fd, .events = POLLIN};
+		poll(&fd, 1, launchd_wait());
+		if (fd.revents & (POLLIN | POLLHUP)) {
+			handle_guest(launchd_fd);
+			launchd_deadline = now_ms() + LIMBO_LAUNCHD_DEADLINE_MS;
+		}
+	}
+	if (!launchd_loaded) {
+		fprintf(stderr, "limbo-broker: %s ended as it started\n",
+				LIMBO_LAUNCHD);
+		exit(1);
+	}
+	launchd_deadline = 0;
+}
+
+static int
+launchd_wait(void)
+{
+	if (launchd_deadline == 0) {
+		return -1;
+	}
+	int64_t left = launchd_deadline - now_ms();
+	if (left > 0) {
+		return (int)left;
+	}
+	fprintf(stderr, "limbo-broker: %s did not load in %d s\n",
+			LIMBO_LAUNCHD, LIMBO_LAUNCHD_DEADLINE_MS / 1000);
+	kill(launchd_pid, SIGKILL);
+	exit(1);
+}
+
+static int64_t
+now_ms(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void
 run(int listen_fd)
 {
 	bool listening = true;
@@ -277,11 +364,15 @@ run(int listen_fd)
 
 		poll(fds, polled + 1, listening ? -1 : ACCEPT_RETRY_MS);
 
+		launchd_frames();
 		listening = !(fds[0].revents & POLLIN)
 				|| accept_guest(listen_fd);
 		for (size_t i = 0; i != polled; i++) {
 			if (fds[i + 1].revents & POLLOUT) {
 				send_pending(connection_for_fd(fds[i + 1].fd));
+			}
+			if (fds[i + 1].fd == launchd_fd) {
+				continue;
 			}
 			if (fds[i + 1].revents & (POLLIN | POLLHUP)) {
 				handle_guest(fds[i + 1].fd);
@@ -289,6 +380,21 @@ run(int listen_fd)
 		}
 
 		free(fds);
+	}
+}
+
+static void
+launchd_frames(void)
+{
+	while (launchd_fd != -1) {
+		struct pollfd fd = {.fd = launchd_fd, .events = POLLIN};
+		if (poll(&fd, 1, 0) <= 0
+				|| !(fd.revents
+						& (POLLIN | POLLHUP
+								| POLLERR))) {
+			return;
+		}
+		handle_guest(launchd_fd);
 	}
 }
 
@@ -368,6 +474,11 @@ handle_guest(int fd)
 		look_up_service(conn, lookup);
 		break;
 	}
+	case BROKER_JOBS_LOADED:
+		if (conn->fd == launchd_fd) {
+			launchd_loaded = true;
+		}
+		break;
 	case BROKER_TASK_FOR_PID:
 		task_for_pid(conn, (const struct broker_task_for_pid *)payload);
 		break;
@@ -383,7 +494,10 @@ welcome_guest(struct connection *conn, const struct broker_hello *hello)
 		conn->guest_id = next_guest_id++;
 		conn->domain = hello->domain;
 	}
-	struct broker_welcome welcome = { .guest_id = conn->guest_id };
+	struct broker_welcome welcome = {
+			.guest_id = conn->guest_id,
+			.launchd_pid = launchd_pid,
+	};
 	send_frame(conn, BROKER_WELCOME, &welcome, sizeof(welcome));
 }
 
@@ -665,10 +779,7 @@ settle_moved(uint64_t global_id)
 	}
 	broker_names_forget_port(global_id);
 	struct broker_moved moved = {.global_id = global_id};
-	for (size_t c = 0; c != connection_count; c++) {
-		send_frame(&connections[c], BROKER_MOVED, &moved,
-				sizeof(moved));
-	}
+	tell_guests(BROKER_MOVED, &moved, sizeof(moved));
 	while (held != NULL) {
 		struct held_send *next = held->next;
 		drop_frame(held->frame);
@@ -872,6 +983,9 @@ add_connection(int fd)
 static void
 remove_connection(size_t index)
 {
+	if (connections[index].fd == launchd_fd) {
+		launchd_fd = -1;
+	}
 	while (connections[index].pending != NULL) {
 		struct broker_wire_frame *frame = connections[index].pending;
 		connections[index].pending = frame->next;
@@ -890,9 +1004,8 @@ remove_connection(size_t index)
 	if (gone.guest_id != 0) {
 		forget_routes(gone.guest_id);
 	}
-	for (size_t i = 0; gone.guest_id != 0 && i != connection_count; i++) {
-		send_frame(&connections[i], BROKER_GUEST_GONE, &gone,
-				sizeof(gone));
+	if (gone.guest_id != 0) {
+		tell_guests(BROKER_GUEST_GONE, &gone, sizeof(gone));
 	}
 }
 
@@ -934,16 +1047,24 @@ forget_routes(uint32_t guest_id)
 		} else {
 			i++;
 		}
-		for (size_t c = 0; (lost || outlives) && c != connection_count;
-				c++) {
-			send_frame(&connections[c], BROKER_MOVED, &moved,
-					sizeof(moved));
+		if (lost || outlives) {
+			tell_guests(BROKER_MOVED, &moved, sizeof(moved));
 		}
 		while (held != NULL) {
 			struct held_send *next = held->next;
 			drop_frame(held->frame);
 			free(held);
 			held = next;
+		}
+	}
+}
+
+static void
+tell_guests(uint32_t type, const void *payload, uint32_t length)
+{
+	for (size_t i = 0; i != connection_count; i++) {
+		if (connections[i].guest_id != BROKER_GUEST_ID) {
+			send_frame(&connections[i], type, payload, length);
 		}
 	}
 }

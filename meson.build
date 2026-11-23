@@ -48,6 +48,7 @@ endif
 limbo = executable('limbo',
   sources: [
     'commpage.c',
+    'launchd.c',
     'linker.c',
     'main.c',
     'plist.c',

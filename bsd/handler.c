@@ -907,13 +907,18 @@ sys_kill(int pid, int signum, int posix)
 	if (signum != 0 && linux_signum == 0) {
 		return _EINVAL;
 	}
+	pid_t launchd = pid == 1 ? broker_client_launchd_pid() : 0;
+	if (launchd != 0) {
+		return signum == 0 ? errno_map(kill(launchd, 0)) : _EPERM;
+	}
 	return errno_map(kill(pid, linux_signum));
 }
 
 int
 sys_getppid(void)
 {
-	return getppid();
+	pid_t parent = getppid();
+	return broker_client_is_launchd(parent) ? 1 : parent;
 }
 
 int

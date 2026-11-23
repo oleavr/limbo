@@ -120,6 +120,13 @@ test('names', python,
   timeout: 300,
 )
 
+test('launchd', python,
+  args: [files('run-launchd.py'), limbo, limbo_broker,
+    files('../broker.h'), meson.current_build_dir()],
+  suite: 'guest',
+  timeout: 240,
+)
+
 test('traced', python,
   args: [files('run-trace.py'), runner, limbo, limbo_trace,
     files('guest' / 'traced.c'), meson.current_build_dir()],
