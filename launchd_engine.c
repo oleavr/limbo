@@ -112,6 +112,9 @@ struct job {
 
 	enum job_state state;
 	pid_t pid;
+	bool exit_pending;
+	int exit_status;
+	int64_t exit_at;
 	int64_t started;
 	int64_t start_at;
 	int64_t kill_at;
@@ -138,6 +141,8 @@ static void load_start(struct job *job);
 static void next_boot_task(void);
 static void hold_names(struct job *job);
 static bool starts_at_load(const struct job *job);
+static void process_exited(struct job *job, int status);
+static void take_exit(struct job *job);
 static void job_exited(struct job *job, int status);
 static bool crashed(int status);
 static char *exit_reason(const char *log);
@@ -495,8 +500,20 @@ jobs_poll_handle(const struct pollfd *fds, size_t count)
 		struct job *job = jobs[i];
 		if (job->state == JOB_WAITING && job->start_at <= now) {
 			start(job);
+		} else if (job->state == JOB_RUNNING && job->exit_pending
+				&& job->exit_at <= now) {
+			if (job->stopping) {
+				say("%s stops: its exit is taken", job->name);
+			} else {
+				say("%s: the broker has not said in %d ms that "
+				    "it read what pid %d sent: its exit "
+				    "is taken as things are",
+						job->name, STOP_TIMEOUT_MS,
+						(int)job->pid);
+			}
+			take_exit(job);
 		} else if (job->state == JOB_RUNNING && job->stopping
-				&& job->kill_at <= now) {
+				&& !job->exit_pending && job->kill_at <= now) {
 			say("%s, pid %d, didn't stop: killed", job->name,
 					(int)job->pid);
 			kill(-job->pid, SIGKILL);
@@ -517,8 +534,12 @@ jobs_poll_timeout(void)
 			next = job->start_at;
 		}
 		if (job->state == JOB_RUNNING && job->stopping
-				&& job->kill_at < next) {
+				&& !job->exit_pending && job->kill_at < next) {
 			next = job->kill_at;
+		}
+		if (job->state == JOB_RUNNING && job->exit_pending
+				&& job->exit_at < next) {
+			next = job->exit_at;
 		}
 	}
 	int64_t now = now_ms();
@@ -733,17 +754,58 @@ handle_signals(void)
 	pid_t pid;
 	while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
 		for (size_t i = 0; i != job_count; i++) {
-			if (jobs[i]->state == JOB_RUNNING
-					&& jobs[i]->pid == pid) {
-				job_exited(jobs[i], status);
+			if (jobs[i]->state == JOB_RUNNING && jobs[i]->pid == pid
+					&& !jobs[i]->exit_pending) {
+				process_exited(jobs[i], status);
 			}
 		}
 	}
 }
 
+static bool broker_gone;
+
+static void
+process_exited(struct job *job, int status)
+{
+	if (broker_gone) {
+		job_exited(job, status);
+		return;
+	}
+	job->exit_pending = true;
+	job->exit_status = status;
+	job->exit_at = now_ms() + STOP_TIMEOUT_MS;
+	broker_process_exited(job->pid);
+}
+
+static void
+take_exit(struct job *job)
+{
+	job->exit_pending = false;
+	job_exited(job, job->exit_status);
+}
+
+void
+jobs_process_exited(pid_t pid)
+{
+	for (size_t i = 0; i != job_count; i++) {
+		struct job *job = jobs[i];
+		if (job->state == JOB_RUNNING && job->exit_pending
+				&& job->pid == pid) {
+			take_exit(job);
+		}
+	}
+	tell_changes();
+}
+
 void
 jobs_broker_gone(void)
 {
+	broker_gone = true;
+	for (size_t i = 0; i != job_count; i++) {
+		if (jobs[i]->exit_pending) {
+			take_exit(jobs[i]);
+		}
+	}
 	jobs_shut_down();
 }
 
@@ -1108,6 +1170,10 @@ stop(struct job *job)
 	say("stopping %s, pid %d", job->name, (int)job->pid);
 	job->stopping = true;
 	job->kill_at = now_ms() + STOP_TIMEOUT_MS;
+	if (job->exit_pending) {
+		job->exit_at = 0;
+		return;
+	}
 	kill(-job->pid, SIGTERM);
 	kill(job->pid, SIGTERM);
 }
