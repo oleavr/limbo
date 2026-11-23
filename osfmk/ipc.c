@@ -239,10 +239,12 @@ static void finish_moves(struct moved_port *queued, bool sent);
 static void return_ports(uint64_t global_id, uint32_t guest_id);
 static void return_port(uint64_t global_id, struct ipc_port *notify);
 static void release_out_of_line(mach_msg_header_t *header);
+static void release_ool_ports(mach_msg_header_t *header);
 static mach_msg_return_t remote_copyin(
 		mach_msg_header_t *header, ipc_side_t sender);
 static uint64_t remote_size(const mach_msg_header_t *header,
-		mach_msg_size_t size, size_t *fd_count);
+		mach_msg_size_t size, size_t *fd_count, uint32_t *id_count);
+static uint64_t object_size(mach_port_name_t name, size_t *fd_count);
 static uint32_t export_body_ports(mach_msg_header_t *header,
 		uint64_t *global_ids, uint8_t **data, uint32_t *data_length,
 		uint32_t dest_guest_id, struct remote_fds *fds,
@@ -792,8 +794,10 @@ remote_send(mach_msg_header_t *header, mach_msg_size_t size, ipc_side_t sender,
 {
 	mach_msg_bits_t bits = header->msgh_bits;
 	size_t fd_count = 0;
+	uint32_t id_count = 0;
 	if (!broker_client_carries(
-			    remote_size(header, size, &fd_count), fd_count)) {
+			    remote_size(header, size, &fd_count, &id_count),
+			    fd_count)) {
 		pthread_mutex_unlock(&lock);
 		return MACH_SEND_TOO_LARGE;
 	}
@@ -810,15 +814,11 @@ remote_send(mach_msg_header_t *header, mach_msg_size_t size, ipc_side_t sender,
 		return mr;
 	}
 
-	mach_msg_body_t *body = (mach_msg_body_t *)(header + 1);
-	uint32_t id_capacity = (bits & MACH_MSGH_BITS_COMPLEX)
-			? body->msgh_descriptor_count
-			: 0;
-	uint64_t *global_ids = malloc(id_capacity * sizeof(*global_ids));
+	uint64_t *global_ids = malloc(id_count * sizeof(*global_ids));
 	uint8_t *data = NULL;
 	uint32_t data_length = 0;
 	struct remote_fds fds = {
-			.fds = malloc(id_capacity * sizeof(*fds.fds)),
+			.fds = malloc(id_count * sizeof(*fds.fds)),
 	};
 	struct moved_port *queued = NULL;
 	uint32_t descriptor_count = export_body_ports(header, global_ids, &data,
@@ -871,6 +871,7 @@ remote_send(mach_msg_header_t *header, mach_msg_size_t size, ipc_side_t sender,
 		queue_send_once_gone(dest_global_id, broker_client_guest_id());
 	}
 	release_unused_entries(header);
+	release_ool_ports(header);
 	finish_moves(queued, mr == MACH_MSG_SUCCESS);
 	pthread_mutex_unlock(&lock);
 	flush_notices();
@@ -988,6 +989,32 @@ release_out_of_line(mach_msg_header_t *header)
 		if (d->type == MACH_MSG_OOL_DESCRIPTOR
 				|| d->type == MACH_MSG_OOL_VOLATILE_DESCRIPTOR) {
 			d->deallocate = true;
+		} else if (d->type == MACH_MSG_OOL_PORTS_DESCRIPTOR) {
+			((mach_msg_ool_ports_descriptor64_t *)cursor)
+					->deallocate = true;
+		}
+		cursor += d->type == MACH_MSG_PORT_DESCRIPTOR
+				? sizeof(mach_msg_port_descriptor_t)
+				: sizeof(*d);
+	}
+}
+
+static void
+release_ool_ports(mach_msg_header_t *header)
+{
+	if (!(header->msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
+		return;
+	}
+
+	mach_msg_body_t *body = (mach_msg_body_t *)(header + 1);
+	uint8_t *cursor = (uint8_t *)(body + 1);
+	for (mach_msg_size_t i = 0; i < body->msgh_descriptor_count; i++) {
+		mach_msg_ool_ports_descriptor64_t *d
+				= (mach_msg_ool_ports_descriptor64_t *)cursor;
+		if (d->type == MACH_MSG_OOL_PORTS_DESCRIPTOR && d->deallocate
+				&& d->address != 0 && d->count != 0) {
+			_kernelrpc_mach_vm_deallocate(0, d->address,
+					d->count * sizeof(mach_port_name_t));
 		}
 		cursor += d->type == MACH_MSG_PORT_DESCRIPTOR
 				? sizeof(mach_msg_port_descriptor_t)
@@ -997,7 +1024,7 @@ release_out_of_line(mach_msg_header_t *header)
 
 static uint64_t
 remote_size(const mach_msg_header_t *header, mach_msg_size_t size,
-		size_t *fd_count)
+		size_t *fd_count, uint32_t *id_count)
 {
 	uint64_t length = sizeof(struct remote_header) + size;
 	if (!(header->msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
@@ -1019,6 +1046,22 @@ remote_size(const mach_msg_header_t *header, mach_msg_size_t size,
 			cursor += sizeof(*d);
 			continue;
 		}
+		if (descriptor->type == MACH_MSG_OOL_PORTS_DESCRIPTOR) {
+			const mach_msg_ool_ports_descriptor64_t *d
+					= (const mach_msg_ool_ports_descriptor64_t
+									*)
+							cursor;
+			const mach_port_name_t *names
+					= (const mach_port_name_t *)d->address;
+			for (mach_msg_size_t j = 0; j < d->count; j++) {
+				length += sizeof(uint64_t)
+						+ object_size(names[j],
+								fd_count);
+			}
+			*id_count += d->count;
+			cursor += sizeof(*d);
+			continue;
+		}
 		mach_port_name_t name
 				= descriptor->type == MACH_MSG_PORT_DESCRIPTOR
 				? ((const mach_msg_port_descriptor_t *)cursor)
@@ -1026,20 +1069,26 @@ remote_size(const mach_msg_header_t *header, mach_msg_size_t size,
 				: ((const mach_msg_guarded_port_descriptor64_t
 								   *)cursor)
 						  ->name;
-		const struct ipc_entry *entry = lookup(name);
-		ipc_kobject_type_t kotype = entry != NULL ? entry->port->kotype
-							  : IPC_KOBJECT_NONE;
-		*fd_count += kotype == IPC_KOBJECT_FILEPORT
-				|| kotype == IPC_KOBJECT_MEMORY_ENTRY;
-		length += sizeof(uint64_t)
-				+ (kotype == IPC_KOBJECT_MEMORY_ENTRY
-								? sizeof(struct remote_memory_entry)
-								: 0);
+		length += sizeof(uint64_t) + object_size(name, fd_count);
+		(*id_count)++;
 		cursor += descriptor->type == MACH_MSG_PORT_DESCRIPTOR
 				? sizeof(mach_msg_port_descriptor_t)
 				: sizeof(mach_msg_guarded_port_descriptor64_t);
 	}
 	return length;
+}
+
+static uint64_t
+object_size(mach_port_name_t name, size_t *fd_count)
+{
+	const struct ipc_entry *entry = lookup(name);
+	ipc_kobject_type_t kotype = entry != NULL ? entry->port->kotype
+						  : IPC_KOBJECT_NONE;
+	*fd_count += kotype == IPC_KOBJECT_FILEPORT
+			|| kotype == IPC_KOBJECT_MEMORY_ENTRY;
+	return kotype == IPC_KOBJECT_MEMORY_ENTRY
+			? sizeof(struct remote_memory_entry)
+			: 0;
 }
 
 static mach_msg_return_t
@@ -1103,6 +1152,18 @@ export_body_ports(mach_msg_header_t *header, uint64_t *global_ids,
 			if (d->deallocate) {
 				_kernelrpc_mach_vm_deallocate(
 						0, d->address, d->size);
+			}
+			cursor += sizeof(*d);
+		} else if (descriptor->type == MACH_MSG_OOL_PORTS_DESCRIPTOR) {
+			mach_msg_ool_ports_descriptor64_t *d
+					= (mach_msg_ool_ports_descriptor64_t *)
+							cursor;
+			const mach_port_name_t *names
+					= (const mach_port_name_t *)d->address;
+			for (mach_msg_size_t j = 0; j < d->count; j++) {
+				global_ids[count++] = export_body_port(names[j],
+						d->disposition, dest_guest_id,
+						fds, data, data_length, queued);
 			}
 			cursor += sizeof(*d);
 		} else {
@@ -1236,6 +1297,19 @@ count_rights(const mach_msg_header_t *header, mach_msg_bits_t bits,
 				|| descriptor->type
 						== MACH_MSG_OOL_VOLATILE_DESCRIPTOR) {
 			cursor += sizeof(mach_msg_ool_descriptor64_t);
+		} else if (descriptor->type == MACH_MSG_OOL_PORTS_DESCRIPTOR) {
+			const mach_msg_ool_ports_descriptor64_t *d
+					= (const mach_msg_ool_ports_descriptor64_t
+									*)
+							cursor;
+			const mach_port_name_t *names
+					= (const mach_port_name_t *)d->address;
+			for (mach_msg_size_t j = 0; j < d->count; j++) {
+				count_right(names[j], d->disposition,
+						global_ids[count++],
+						dest_guest_id, sent);
+			}
+			cursor += sizeof(*d);
 		} else {
 			const mach_msg_guarded_port_descriptor64_t *d
 					= (const mach_msg_guarded_port_descriptor64_t
@@ -1770,6 +1844,21 @@ remote_body_fits(const mach_msg_header_t *message, mach_msg_size_t size,
 				return false;
 			}
 			room -= d->size;
+		} else if (descriptor->type == MACH_MSG_OOL_PORTS_DESCRIPTOR) {
+			const mach_msg_ool_ports_descriptor64_t *d
+					= (const mach_msg_ool_ports_descriptor64_t
+									*)
+							cursor;
+			for (mach_msg_size_t j = 0; j < d->count; j++) {
+				if (count == id_count
+						|| !remote_port_fits(
+								global_ids[count++],
+								d->disposition,
+								&fd_count,
+								&room, lost)) {
+					return false;
+				}
+			}
 		} else {
 			return false;
 		}
@@ -1837,6 +1926,28 @@ import_body_ports(mach_msg_header_t *header, const uint64_t *global_ids,
 					= (mach_msg_ool_descriptor64_t *)cursor;
 			d->address = (uint64_t)copy_ool(data, d->size);
 			data += d->size;
+			cursor += sizeof(*d);
+		} else if (descriptor->type == MACH_MSG_OOL_PORTS_DESCRIPTOR) {
+			mach_msg_ool_ports_descriptor64_t *d
+					= (mach_msg_ool_ports_descriptor64_t *)
+							cursor;
+			mach_msg_type_name_t type
+					= received_type(d->disposition);
+			mach_vm_address_t address = 0;
+			if (d->count != 0) {
+				_kernelrpc_mach_vm_allocate(0, &address,
+						d->count * sizeof(mach_port_name_t),
+						VM_FLAGS_ANYWHERE);
+			}
+			mach_port_name_t *names = (mach_port_name_t *)address;
+			for (mach_msg_size_t j = 0; j < d->count; j++) {
+				names[j] = import_body_port(global_ids[count++],
+						type, &fds, &data,
+						sender_guest_id);
+			}
+			d->address = address;
+			d->disposition = type;
+			d->deallocate = false;
 			cursor += sizeof(*d);
 		} else {
 			mach_msg_guarded_port_descriptor64_t *d
