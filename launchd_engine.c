@@ -143,6 +143,8 @@ static bool crashed(int status);
 static char *exit_reason(const char *log);
 static int open_log(struct job *job);
 static bool kept_alive(const struct job *job, int status);
+static bool awaited(const struct job *job);
+static void demand(struct job *job, const char *why);
 static void schedule(struct job *job);
 static void start(struct job *job);
 static char **make_environment(const struct job *job);
@@ -156,7 +158,13 @@ static char *log_path(
 		const char *prefix, const char *program, char **arguments);
 static bool job_matches(const struct job *job, const char *word);
 static uint32_t job_domain_of(const struct job *job);
-
+static uint32_t *name_awaited(const char *name);
+struct awaited_name {
+	char *name;
+	uint32_t waiters;
+};
+static struct awaited_name *awaited_names;
+static size_t awaited_count;
 static void describe(FILE *out, const struct job *job, bool details);
 static int shell_status(int status);
 static int64_t now_ms(void);
@@ -441,6 +449,8 @@ load_start(struct job *job)
 	if (starts_at_load(job)) {
 		job->demanded = true;
 		start(job);
+	} else if (awaited(job)) {
+		demand(job, "a guest that waited for it");
 	}
 }
 
@@ -519,6 +529,34 @@ jobs_poll_timeout(void)
 	return wait > INT32_MAX ? INT32_MAX : (int)wait;
 }
 
+static bool
+jobs_demand(const char *name, uint32_t domain)
+{
+	struct job *other = NULL;
+	bool own = false;
+	for (size_t i = 0; i != job_count; i++) {
+		struct job *job = jobs[i];
+		for (size_t j = 0; j != job->service_count; j++) {
+			if (strcmp(job->services[j], name) != 0
+					|| job->state == JOB_STOPPED
+					|| job->state == JOB_UNLOADED) {
+				continue;
+			}
+			uint32_t job_domain = job_domain_of(job);
+			if (job_domain == domain) {
+				demand(job, name);
+				own = true;
+			} else if (other == NULL) {
+				other = job;
+			}
+		}
+	}
+	if (!own && other != NULL) {
+		demand(other, name);
+	}
+	return own;
+}
+
 static char *control(char **argv, size_t argc, uint32_t *status);
 
 char *
@@ -538,6 +576,17 @@ control(char **argv, size_t argc, uint32_t *status)
 	*status = 0;
 
 	const char *command = argc > 0 ? argv[0] : "list";
+	if (strcmp(command, "waiting") == 0) {
+		for (size_t i = 0; i != awaited_count; i++) {
+			if (awaited_names[i].waiters != 0) {
+				fprintf(out, "%u\t%s\n",
+						awaited_names[i].waiters,
+						awaited_names[i].name);
+			}
+		}
+		fclose(out);
+		return text;
+	}
 	if (strcmp(command, "list") == 0) {
 		fprintf(out, "PID\tStatus\tState\tName\n");
 		for (size_t i = 0; i != job_count; i++) {
@@ -738,7 +787,7 @@ job_exited(struct job *job, int status)
 		start(job);
 	} else if (job->state == JOB_STOPPED || stopped) {
 		set_state(job, JOB_STOPPED);
-	} else if (kept_alive(job, status)) {
+	} else if (kept_alive(job, status) || awaited(job)) {
 		set_state(job, JOB_IDLE);
 		schedule(job);
 	} else {
@@ -835,6 +884,29 @@ kept_alive(const struct job *job, int status)
 		}
 	}
 	return false;
+}
+
+static bool
+awaited(const struct job *job)
+{
+	for (size_t i = 0; i != job->service_count; i++) {
+		const uint32_t *waiters = name_awaited(job->services[i]);
+		if (waiters != NULL && *waiters != 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void
+demand(struct job *job, const char *why)
+{
+	if (job->state != JOB_IDLE || shutting_down) {
+		return;
+	}
+	say("%s demanded by %s", job->name, why);
+	job->demanded = true;
+	schedule(job);
 }
 
 static void
@@ -1396,6 +1468,45 @@ say(const char *format, ...)
 	vfprintf(stderr, format, args);
 	va_end(args);
 	fputc('\n', stderr);
+}
+
+static uint32_t *
+name_awaited(const char *name)
+{
+	for (size_t i = 0; i != awaited_count; i++) {
+		if (strcmp(awaited_names[i].name, name) == 0) {
+			return &awaited_names[i].waiters;
+		}
+	}
+	return NULL;
+}
+
+void
+jobs_name_awaited(const char *name, uint32_t domain, uint32_t flags,
+		uint32_t waiters)
+{
+	uint32_t *known = name_awaited(name);
+	if (known != NULL) {
+		*known = waiters;
+	} else if (waiters != 0) {
+		struct awaited_name *grown = reallocarray(awaited_names,
+				awaited_count + 1, sizeof(*awaited_names));
+		char *copy = strdup(name);
+		if (grown != NULL) {
+			awaited_names = grown;
+		}
+		if (grown != NULL && copy != NULL) {
+			awaited_names[awaited_count++]
+					= (struct awaited_name){copy, waiters};
+		} else {
+			free(copy);
+		}
+	}
+	if ((flags & BROKER_NAME_DEMANDED) && !jobs_demand(name, domain)
+			&& waiters != 0) {
+		broker_no_job(name, domain);
+	}
+	tell_changes();
 }
 
 static struct broker_name **told_names;

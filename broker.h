@@ -64,6 +64,8 @@ enum broker_frame_type {
 	BROKER_MOVED,
 	BROKER_JOBS_LOADED,
 	BROKER_NAME,
+	BROKER_NAME_AWAITED,
+	BROKER_NO_JOB,
 	BROKER_CONTROL,
 	BROKER_CONTROL_REPLY,
 };
@@ -91,6 +93,15 @@ struct broker_name {
 #define BROKER_NAME_HELD     0x1u
 #define BROKER_NAME_HIDES    0x2u
 #define BROKER_NAME_UNLOADED 0x4u
+
+#define BROKER_NAME_DEMANDED 0x1u
+
+struct broker_name_awaited {
+	uint32_t domain;
+	uint32_t flags;
+	uint32_t waiters;
+	char name[LIMBO_BROKER_SERVICE_NAME_MAX];
+};
 
 struct broker_hello {
 	uint32_t domain;

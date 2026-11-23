@@ -38,6 +38,8 @@ size_t jobs_poll_count(void);
 void jobs_poll_fill(struct pollfd *fds);
 void jobs_poll_handle(const struct pollfd *fds, size_t count);
 int jobs_poll_timeout(void);
+void jobs_name_awaited(const char *name, uint32_t domain, uint32_t flags,
+		uint32_t waiters);
 char *jobs_control(char **argv, size_t argc, uint32_t *status);
 bool jobs_done(void);
 void jobs_shut_down(void);
@@ -45,3 +47,4 @@ void jobs_broker_gone(void);
 
 struct broker_name;
 void broker_name(const struct broker_name *record);
+void broker_no_job(const char *name, uint32_t domain);

@@ -236,6 +236,9 @@ def broker_and_launchd(broker, tool, outdir):
             check(connection.startswith("socket:") and connection not in held,
                   f"the job has not limbo-launchd's connection: {held}")
 
+        waiting = launchctl(tool, env, "waiting")
+        check(waiting.returncode == 0 and waiting.stdout == "",
+              f"limbo-launchctl waiting answers: {waiting}")
         unknown = launchctl(tool, env, "no-such-command")
         check(unknown.returncode == 1 and "unknown command" in unknown.stdout,
               f"an unknown command is refused: {unknown}")
@@ -253,15 +256,27 @@ def broker_and_launchd(broker, tool, outdir):
               f"{answer and answer[0]}")
         quiet.close()
 
+        twice = connect(path)
+        hello(twice, DOMAIN_USER, os.getuid())
+        twice.send(frame("HELLO", struct.pack("II", DOMAIN_USER, os.getuid())))
+        twice.send(frame("LOOKUP", name_field("com.limbo.test.launchd.none")
+                         + struct.pack("III", DOMAIN_USER, 0, 0)))
+        answer_of(twice, "LOOKUP_REPLY", "a hello said twice",
+                  unwanted=("WELCOME",))
+        twice.close()
+
         process.kill()
         process.wait()
         check(job is None or gone(job), "the job stopped with the broker")
 
     with Tree(start()) as process:
+        waiting = launchctl(tool, env, "waiting")
+        check(waiting.returncode == 0 and waiting.stdout == "",
+              f"with no table, limbo-launchctl waiting answers: {waiting}")
         listed = launchctl(tool, env, "list")
         check(listed.returncode == 0
               and listed.stdout == "PID\tStatus\tState\tName\n",
-              f"with no table, limbo-launchctl list answers: {listed}")
+              f"and list, with no jobs: {listed}")
 
 
 def look_up(sock, name):
@@ -298,6 +313,7 @@ send(N["JOBS_LOADED"])
 if mode == "lost":
     lost_payload(N["NAME"] | N["OOL"])
     record("com.limbo.test.lost", 0x1)
+waiters = {}
 while True:
     ready = select.select([sock, control], [], [])[0]
     if control in ready:
@@ -307,7 +323,11 @@ while True:
             reply = struct.pack("I", status) + text.encode()
             asker.send(struct.pack("II", N["CONTROL_REPLY"], len(reply))
                        + reply)
-        answer("stand-in\n")
+        if word == "waiting":
+            answer("".join(f"{n}\t{name}\n"
+                           for name, n in waiters.items() if n))
+        else:
+            answer("stand-in\n")
         asker.close()
     if sock not in ready:
         continue
@@ -315,6 +335,11 @@ while True:
     if len(data) < 8:
         break
     kind, length = struct.unpack("II", data[:8])
+    body = data[8:8 + length]
+    if kind == N["NAME_AWAITED"]:
+        domain, flags, count = struct.unpack("III", body[:12])
+        name = body[12:12 + 128].split(b"\0")[0].decode()
+        waiters[name] = count
 '''
 
 
@@ -329,7 +354,7 @@ def broker_and_stand_in(broker, tool, outdir):
     table.write_text("")
     path = folder / "broker.sock"
     numbers = " ".join(f"{name}={FRAMES[name]}" for name in (
-        "NAME", "JOBS_LOADED", "CONTROL_REPLY"))
+        "NAME", "JOBS_LOADED", "NAME_AWAITED", "CONTROL_REPLY"))
     numbers += (f" OOL={FRAME_OOL}"
                 f" DEADLINE_MS={int(DEFINES['DEADLINE'] * 1000)}")
 

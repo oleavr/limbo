@@ -157,6 +157,17 @@ handle_broker(void)
 			continue;
 		}
 		switch (type) {
+		case BROKER_NAME_AWAITED: {
+			struct broker_name_awaited awaited = {0};
+			memcpy(&awaited, payload,
+					header.length < sizeof(awaited)
+							? header.length
+							: sizeof(awaited));
+			awaited.name[sizeof(awaited.name) - 1] = '\0';
+			jobs_name_awaited(awaited.name, awaited.domain,
+					awaited.flags, awaited.waiters);
+			break;
+		}
 		default:
 			break;
 		}
@@ -260,6 +271,14 @@ broker_name(const struct broker_name *record)
 					+ record->domain_count
 							* sizeof(uint32_t),
 			NULL, 0);
+}
+
+void
+broker_no_job(const char *name, uint32_t domain)
+{
+	struct broker_name_awaited which = {.domain = domain};
+	strncpy(which.name, name, sizeof(which.name) - 1);
+	send_frame(BROKER_NO_JOB, &which, sizeof(which), NULL, 0);
 }
 
 static bool
