@@ -168,6 +168,15 @@ handle_broker(void)
 					awaited.flags, awaited.waiters);
 			break;
 		}
+		case BROKER_PROCESS_EXITED: {
+			struct broker_process_exited exited = {0};
+			memcpy(&exited, payload,
+					header.length < sizeof(exited)
+							? header.length
+							: sizeof(exited));
+			jobs_process_exited(exited.pid);
+			break;
+		}
 		default:
 			break;
 		}
@@ -279,6 +288,13 @@ broker_no_job(const char *name, uint32_t domain)
 	struct broker_name_awaited which = {.domain = domain};
 	strncpy(which.name, name, sizeof(which.name) - 1);
 	send_frame(BROKER_NO_JOB, &which, sizeof(which), NULL, 0);
+}
+
+void
+broker_process_exited(pid_t pid)
+{
+	struct broker_process_exited exited = {.pid = pid};
+	send_frame(BROKER_PROCESS_EXITED, &exited, sizeof(exited), NULL, 0);
 }
 
 static bool

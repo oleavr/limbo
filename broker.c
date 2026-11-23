@@ -35,12 +35,14 @@
 #include <fcntl.h>
 #include <libgen.h>
 #include <limits.h>
+#include <linux/sockios.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -161,6 +163,8 @@ static struct route *route_for(uint64_t global_id);
 static uint32_t route_of(uint64_t global_id);
 static void forget_routes(uint32_t guest_id);
 static void tell_guests(uint32_t type, const void *payload, uint32_t length);
+static void process_exited(pid_t pid);
+static void answer_exited(void);
 static void send_to(
 		int fd, uint32_t type, const void *payload, uint32_t length);
 static uint64_t *moved_ids(const struct broker_wire_frame *frame,
@@ -199,6 +203,8 @@ static pid_t launchd_pid;
 static int launchd_fd = -1;
 static bool launchd_loaded;
 static int64_t launchd_deadline;
+static pid_t *exited;
+static size_t exited_count;
 
 int
 main(int argc, char *argv[])
@@ -473,6 +479,7 @@ run(int listen_fd)
 				handle_guest(fds[i + 1].fd);
 			}
 		}
+		answer_exited();
 
 		free(fds);
 	}
@@ -589,6 +596,15 @@ handle_guest(int fd)
 				&& length >= sizeof(struct
 						   broker_name_awaited)) {
 			no_job((const struct broker_name_awaited *)payload);
+		}
+		break;
+	case BROKER_PROCESS_EXITED:
+		if (conn->fd == launchd_fd
+				&& length >= sizeof(struct
+						   broker_process_exited)) {
+			process_exited(((const struct broker_process_exited *)
+							payload)
+							->pid);
 		}
 		break;
 	case BROKER_TASK_FOR_PID:
@@ -1337,6 +1353,57 @@ tell_guests(uint32_t type, const void *payload, uint32_t length)
 			send_frame(&connections[i], type, payload, length);
 		}
 	}
+}
+
+static void
+process_exited(pid_t pid)
+{
+	pid_t *grown = reallocarray(exited, exited_count + 1, sizeof(*exited));
+	if (grown != NULL) {
+		exited = grown;
+		exited[exited_count++] = pid;
+	}
+}
+
+static void
+answer_exited(void)
+{
+	for (size_t e = 0; e != exited_count; e++) {
+		for (size_t i = 0; i < connection_count;) {
+			if (connections[i].pid != exited[e]
+					|| connections[i].fd == launchd_fd) {
+				i++;
+				continue;
+			}
+			int queued = 0;
+			if (ioctl(connections[i].fd, SIOCINQ, &queued) != 0) {
+				queued = 0;
+			}
+			size_t reads = (size_t)queued / sizeof(struct broker_frame)
+					+ 1;
+			int fd = connections[i].fd;
+			while (reads-- != 0) {
+				struct pollfd ready
+						= {.fd = fd, .events = POLLIN};
+				if (poll(&ready, 1, 0) != 1) {
+					break;
+				}
+				handle_guest(fd);
+				if (connection_for_fd(fd) == NULL) {
+					break;
+				}
+			}
+			if (i < connection_count && connections[i].fd == fd) {
+				i++;
+			}
+		}
+		struct broker_process_exited answer = {.pid = exited[e]};
+		if (launchd_fd != -1) {
+			send_to(launchd_fd, BROKER_PROCESS_EXITED, &answer,
+					sizeof(answer));
+		}
+	}
+	exited_count = 0;
 }
 
 static void

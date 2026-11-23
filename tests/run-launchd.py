@@ -426,7 +426,8 @@ def broker_and_stand_in(broker, tool, outdir):
 
 class StandInBroker:
 
-    def __init__(self, limbo, table, outdir, between=False, small=False):
+    def __init__(self, limbo, table, outdir, between=False, small=False,
+                 log=None):
         self.sock, theirs = socket.socketpair(socket.AF_UNIX,
                                               socket.SOCK_SEQPACKET)
         if small:
@@ -442,6 +443,8 @@ class StandInBroker:
         env = dict(os.environ, LIMBO_JOB_LOGS=str(outdir))
         command = ["limbo-launchd", str(theirs.fileno()),
                    str(control.fileno() if not between else -1), str(table)]
+        self.log = log
+        stderr = open(log, "w") if log else None
         if between:
             self.process = subprocess.Popen(
                 [sys.executable, "-c",
@@ -452,7 +455,10 @@ class StandInBroker:
         else:
             self.process = subprocess.Popen(command, executable=limbo, env=env,
                                             pass_fds=[theirs.fileno(),
-                                                      control.fileno()])
+                                                      control.fileno()],
+                                            stderr=stderr)
+        if stderr:
+            stderr.close()
         theirs.close()
         control.close()
         self.names = {}
@@ -479,6 +485,9 @@ class StandInBroker:
                 return got[1]
             self.backlog.append(got)
 
+    def tell(self, kind, payload):
+        self.sock.send(frame(kind, payload))
+
     def ask(self, *words):
         asker = connect(self.control_path)
         asker.send(frame("CONTROL", b"".join(word.encode() + b"\0"
@@ -500,6 +509,9 @@ class StandInBroker:
         except subprocess.TimeoutExpired:
             check(False, "limbo-launchd goes")
 
+    def said(self):
+        return Path(self.log).read_text() if self.log else ""
+
 
 SENDS = {"aarch64": (206, 211), "x86_64": (44, 46)}.get(platform.machine(), ())
 
@@ -512,6 +524,74 @@ def waits_to_send(pid):
     fields = stat_fields(pid)
     return (bool(words) and words[0].isdigit() and int(words[0]) in SENDS
             and fields is not None and fields[0] == "S")
+
+
+def exits(limbo, table, outdir, name):
+    log = outdir / "launchd-exits.log"
+    broker = StandInBroker(limbo, table, outdir, log=log)
+
+    def awaited(waiters, flags=0):
+        broker.tell("NAME_AWAITED", struct.pack(
+            "III", DOMAIN_USER, flags, waiters) + name_field(name))
+
+    def state():
+        for line in broker.ask("list")[1].splitlines():
+            fields = line.split("\t")
+            if fields[-1] == name:
+                return fields[2], fields[0]
+
+    def runs():
+        return re.search(r"runs: (\d+)",
+                         broker.ask("print", name)[1]).group(1)
+
+    def goes(pid):
+        os.kill(pid, signal.SIGKILL)
+        said = broker.until("PROCESS_EXITED")
+        check(struct.unpack("i", said[:4])[0] == pid,
+              f"limbo-launchd tells the broker that pid {pid} exited")
+
+    def read(pid):
+        broker.tell("PROCESS_EXITED", struct.pack("i", pid))
+
+    with Tree(broker.process):
+        broker.until("JOBS_LOADED")
+        job = broker.job(name)
+        awaited(1)
+        goes(job)
+        check(state() == ("running", str(job)),
+              f"its exit is not taken before the broker has read what it "
+              f"sent: {state()}")
+        awaited(0)
+        read(job)
+        check(state()[0] == "idle",
+              f"a job no one waits for is not started again: {state()}")
+        check(runs() == "1", "it ran once")
+        awaited(1, AWAITED_DEMANDED)
+        second = broker.job(name)
+        check(second not in (None, job), "a job a guest sends to starts")
+        goes(second)
+        check(state() == ("running", str(second)), "its exit waits again")
+        read(second)
+        third = broker.job(name)
+        check(third not in (None, job, second),
+              f"a job a guest still waits for is started again: {state()}")
+        check(runs() == "3", "it ran three times")
+        awaited(0)
+        goes(third)
+        went = time.monotonic()
+        while (state()[0] == "running"
+               and time.monotonic() < went + 2 * DEFINES["STOP"] + 5):
+            time.sleep(0.1)
+        waited = time.monotonic() - went
+        check(state()[0] == "idle"
+              and "the broker has not said" in broker.said(),
+              f"an exit the broker says nothing of is taken: {state()}, "
+              f"{waited:.1f} s")
+        check(waited > DEFINES["STOP"] - 0.5, f"in its time: {waited:.1f} s")
+        awaited(1, AWAITED_DEMANDED)
+        fourth = broker.job(name)
+        check(fourth not in (None, job, second, third), "it starts again")
+        goes(fourth)
 
 
 def launchd_and_stand_in(limbo, outdir):
@@ -534,7 +614,8 @@ def launchd_and_stand_in(limbo, outdir):
     sysroot = with_sleep()
     if not sysroot:
         NOT_RUN.append("limbo-launchd with jobs and a stand-in broker: told "
-                       "before it forks; jobs stopped as the broker "
+                       "before it forks; a job's exit "
+                       "and the broker's word; jobs stopped as the broker "
                        "goes")
         return
     first = "com.limbo.test.launchd.first"
@@ -562,6 +643,8 @@ def launchd_and_stand_in(limbo, outdir):
         broker.theirs.close()
         broker.until("JOBS_LOADED")
         check(broker.job(first) in children(process.pid), "and then started it")
+
+    exits(limbo, table, outdir, first)
 
     broker = StandInBroker(limbo, table, outdir)
     with Tree(broker.process) as process:

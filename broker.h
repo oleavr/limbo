@@ -66,12 +66,17 @@ enum broker_frame_type {
 	BROKER_NAME,
 	BROKER_NAME_AWAITED,
 	BROKER_NO_JOB,
+	BROKER_PROCESS_EXITED,
 	BROKER_CONTROL,
 	BROKER_CONTROL_REPLY,
 };
 
 #define LIMBO_LAUNCHD_STOP_MS     3000
 #define LIMBO_LAUNCHD_DEADLINE_MS (4 * LIMBO_LAUNCHD_STOP_MS)
+
+struct broker_process_exited {
+	int32_t pid;
+};
 
 struct broker_frame {
 	uint32_t type;
