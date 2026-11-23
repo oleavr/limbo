@@ -93,12 +93,16 @@ struct job {
 	char *account_home;
 	enum job_session session;
 	bool run_at_load;
+	bool unheld;
+	bool names_held;
+	bool untold;
 	bool required;
 	bool system_session;
 	int persona_type;
 	struct keepalive keepalive;
 	unsigned throttle;
 	char **services;
+	bool *services_hidden;
 	size_t service_count;
 	char *executable;
 	char **argv;
@@ -127,10 +131,12 @@ static size_t account_groups(const char *name, gid_t gid, gid_t *groups);
 static void load_user_groups(void);
 static void add_user_group(gid_t gid);
 static void set_state(struct job *job, enum job_state state);
+static void tell_changes(void);
 static void load_session(enum job_session session);
 static bool load_into(struct job *job);
 static void load_start(struct job *job);
 static void next_boot_task(void);
+static void hold_names(struct job *job);
 static bool starts_at_load(const struct job *job);
 static void job_exited(struct job *job, int status);
 static bool crashed(int status);
@@ -149,6 +155,7 @@ static char *program_argv0(const char *executable, const char *program);
 static char *log_path(
 		const char *prefix, const char *program, char **arguments);
 static bool job_matches(const struct job *job, const char *word);
+static uint32_t job_domain_of(const struct job *job);
 
 static void describe(FILE *out, const struct job *job, bool details);
 static int shell_status(int status);
@@ -266,6 +273,7 @@ jobs_load(const char *path)
 		if (job == NULL) {
 			continue;
 		}
+		job->untold = true;
 		jobs = reallocarray(jobs, job_count + 1, sizeof(*jobs));
 		jobs[job_count++] = job;
 	}
@@ -273,6 +281,7 @@ jobs_load(const char *path)
 	fclose(file);
 
 	next_boot_task();
+	tell_changes();
 }
 
 static void
@@ -293,7 +302,19 @@ next_boot_task(void)
 		}
 	}
 	booted = true;
+	for (size_t i = 0; i != job_count; i++) {
+		hold_names(jobs[i]);
+	}
 	load_session(SESSION_BOOT);
+}
+
+static void
+hold_names(struct job *job)
+{
+	if (!job->unheld && !job->names_held) {
+		job->names_held = true;
+		job->untold = true;
+	}
 }
 
 static size_t
@@ -360,7 +381,15 @@ add_user_group(gid_t gid)
 static void
 set_state(struct job *job, enum job_state state)
 {
+	bool loaded = job->state != JOB_UNLOADED;
+	bool may_run = loaded && job->state != JOB_STOPPED;
 	job->state = state;
+	if (loaded != (state != JOB_UNLOADED)
+			|| may_run
+					!= (state != JOB_UNLOADED
+							&& state != JOB_STOPPED)) {
+		job->untold = true;
+	}
 }
 
 static void
@@ -465,6 +494,7 @@ jobs_poll_handle(const struct pollfd *fds, size_t count)
 			job->kill_at = INT64_MAX;
 		}
 	}
+	tell_changes();
 }
 
 int
@@ -495,6 +525,7 @@ char *
 jobs_control(char **argv, size_t argc, uint32_t *status)
 {
 	char *text = control(argv, argc, status);
+	tell_changes();
 	return text;
 }
 
@@ -640,6 +671,7 @@ jobs_shut_down(void)
 			stop(jobs[i]);
 		}
 	}
+	tell_changes();
 }
 
 static void
@@ -824,6 +856,7 @@ start(struct job *job)
 	if (job->state == JOB_RUNNING || shutting_down) {
 		return;
 	}
+	tell_changes();
 	if (job->root && geteuid() != 0) {
 		say("%s runs as root, and the broker doesn't", job->name);
 		set_state(job, JOB_STOPPED);
@@ -1059,6 +1092,7 @@ parse_job(char *line)
 	job->label = optional(fields[3]);
 
 	job->run_at_load = strstr(fields[5], "runatload") != NULL;
+	job->unheld = strstr(fields[5], "unheld") != NULL;
 	job->required = strstr(fields[5], "required") != NULL;
 	job->system_session = strstr(fields[5], "systemsession") != NULL;
 	const char *persona = strstr(fields[5], "persona=");
@@ -1075,8 +1109,17 @@ parse_job(char *line)
 	if (strcmp(fields[9], "-") != 0) {
 		for (char *name = strtok_r(fields[9], ";", &save); name != NULL;
 				name = strtok_r(NULL, ";", &save)) {
+			size_t length = strlen(name);
+			bool hidden = length > 1 && name[length - 1] == '!';
+			if (hidden) {
+				name[length - 1] = '\0';
+			}
 			job->services = reallocarray(job->services,
 					job->service_count + 1, sizeof(char *));
+			job->services_hidden = reallocarray(
+					job->services_hidden,
+					job->service_count + 1, sizeof(bool));
+			job->services_hidden[job->service_count] = hidden;
 			job->services[job->service_count++] = strdup(name);
 		}
 	}
@@ -1242,6 +1285,13 @@ job_matches(const struct job *job, const char *word)
 			|| strcasecmp(program_name(job->argv[0]), word) == 0;
 }
 
+static uint32_t
+job_domain_of(const struct job *job)
+{
+	return (job->root || job->account != NULL) ? BROKER_DOMAIN_SYSTEM
+						   : BROKER_DOMAIN_USER;
+}
+
 static void
 describe(FILE *out, const struct job *job, bool details)
 {
@@ -1346,4 +1396,136 @@ say(const char *format, ...)
 	vfprintf(stderr, format, args);
 	va_end(args);
 	fputc('\n', stderr);
+}
+
+static struct broker_name **told_names;
+static size_t told_count;
+
+static size_t
+told_at(const char *name)
+{
+	size_t low = 0, high = told_count;
+	while (low != high) {
+		size_t middle = low + (high - low) / 2;
+		if (strcmp(told_names[middle]->name, name) < 0) {
+			low = middle + 1;
+		} else {
+			high = middle;
+		}
+	}
+	return low;
+}
+
+static size_t
+record_size(const struct broker_name *record)
+{
+	return sizeof(*record) + record->domain_count * sizeof(uint32_t);
+}
+
+static void
+tell_record(struct broker_name *record)
+{
+	size_t at = told_at(record->name);
+	bool known = at != told_count
+			&& strcmp(told_names[at]->name, record->name) == 0;
+	if (known ? record_size(told_names[at]) == record_size(record)
+							&& memcmp(told_names[at],
+									   record,
+									   record_size(record))
+									== 0
+		  : record->flags == 0 && record->domain_count == 0) {
+		free(record);
+		return;
+	}
+	if (known) {
+		free(told_names[at]);
+	} else {
+		told_names = reallocarray(told_names, told_count + 1,
+				sizeof(*told_names));
+		memmove(&told_names[at + 1], &told_names[at],
+				(told_count++ - at) * sizeof(*told_names));
+	}
+	told_names[at] = record;
+	broker_name(record);
+}
+
+static void
+tell_name(const char *name)
+{
+	static uint32_t *domains;
+	static size_t domain_room;
+	if (domain_room < job_count) {
+		uint32_t *grown = reallocarray(
+				domains, job_count, sizeof(*domains));
+		if (grown == NULL) {
+			return;
+		}
+		domains = grown;
+		domain_room = job_count;
+	}
+	uint32_t domain_count = 0, flags = 0;
+	bool held = false, hides = false;
+	bool found = false, loaded = false;
+	for (size_t i = 0; i != job_count; i++) {
+		const struct job *job = jobs[i];
+		for (size_t j = 0; j != job->service_count; j++) {
+			if (strcmp(job->services[j], name) != 0) {
+				continue;
+			}
+			found = true;
+			if (job->names_held && !held) {
+				held = true;
+				hides = job->services_hidden[j];
+			}
+			if (job->state == JOB_UNLOADED) {
+				continue;
+			}
+			loaded = true;
+			if (job->state == JOB_STOPPED) {
+				continue;
+			}
+			uint32_t domain = job_domain_of(job);
+			bool listed = false;
+			for (uint32_t d = 0; d != domain_count; d++) {
+				listed = listed || domains[d] == domain;
+			}
+			if (!listed) {
+				domains[domain_count++] = domain;
+			}
+		}
+	}
+	if (held) {
+		flags |= BROKER_NAME_HELD | (hides ? BROKER_NAME_HIDES : 0);
+	}
+	if (found && !loaded) {
+		flags |= BROKER_NAME_UNLOADED;
+	}
+	struct broker_name *record = calloc(
+			1, sizeof(*record) + domain_count * sizeof(uint32_t));
+	if (record == NULL) {
+		return;
+	}
+	strncpy(record->name, name, sizeof(record->name) - 1);
+	record->flags = flags;
+	record->domain_count = domain_count;
+	if (domain_count != 0) {
+		memcpy(record->domains, domains,
+				domain_count * sizeof(uint32_t));
+	}
+	tell_record(record);
+}
+
+static void
+tell_changes(void)
+{
+	for (size_t i = 0; i != job_count; i++) {
+		struct job *job = jobs[i];
+		if (!job->untold) {
+			continue;
+		}
+		job->untold = false;
+		for (size_t j = 0; j != job->service_count; j++) {
+			tell_name(job->services[j]);
+		}
+	}
 }

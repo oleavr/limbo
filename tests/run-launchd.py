@@ -2,6 +2,7 @@
 
 import ctypes
 import os
+import platform
 import re
 import shutil
 import signal
@@ -13,8 +14,10 @@ import time
 from pathlib import Path
 
 NAME_MAX = 128
+NAME_HELD, NAME_UNLOADED = 0x1, 0x4
 AWAITED_DEMANDED = 0x1
 DOMAIN_USER = 0
+FRAME_OOL = 0x80000000
 
 FRAMES = {}
 DEFINES = {}
@@ -278,9 +281,23 @@ sock = socket.socket(fileno=int(sys.argv[1]))
 control = socket.socket(fileno=int(sys.argv[2]))
 def send(kind, payload=b""):
     sock.send(struct.pack("II", kind, len(payload)) + payload)
+def lost_payload(kind):
+    memory = os.memfd_create("payload")
+    os.write(memory, bytes(100000))
+    socket.send_fds(sock, [struct.pack("II", kind, 100000)], [memory])
+    os.close(memory)
+def record(name, flags):
+    send(N["NAME"], struct.pack("II", flags, 0) + name.encode().ljust(128, b"\0"))
 if mode == "never":
     time.sleep(600)
+if mode == "slow":
+    for i in range(3):
+        record(f"com.limbo.test.slow{i}", 0x1)
+        time.sleep(N["DEADLINE_MS"] * 0.4 / 1000)
 send(N["JOBS_LOADED"])
+if mode == "lost":
+    lost_payload(N["NAME"] | N["OOL"])
+    record("com.limbo.test.lost", 0x1)
 while True:
     ready = select.select([sock, control], [], [])[0]
     if control in ready:
@@ -312,8 +329,9 @@ def broker_and_stand_in(broker, tool, outdir):
     table.write_text("")
     path = folder / "broker.sock"
     numbers = " ".join(f"{name}={FRAMES[name]}" for name in (
-        "JOBS_LOADED", "CONTROL_REPLY"))
-    numbers += f" DEADLINE_MS={int(DEFINES['DEADLINE'] * 1000)}"
+        "NAME", "JOBS_LOADED", "CONTROL_REPLY"))
+    numbers += (f" OOL={FRAME_OOL}"
+                f" DEADLINE_MS={int(DEFINES['DEADLINE'] * 1000)}")
 
     def start(mode):
         if path.exists():
@@ -360,12 +378,36 @@ def broker_and_stand_in(broker, tool, outdir):
         check(stand_in is not None and not running(stand_in),
               "and limbo-launchd went with it")
 
+    process, env, started = start("slow")
+    with Tree(process):
+        listening(process)
+        answer = launchctl(tool, env, "list")
+        check(answer.returncode == 0 and answer.stdout == "stand-in\n",
+              f"a limbo-launchd that loads slowly is waited for: {answer}, "
+              f"{time.monotonic() - started:.1f} s")
+        check(time.monotonic() - started > DEFINES["DEADLINE"],
+              "for longer than the broker waits for one that says nothing")
+
+    process, env, started = start("lost")
+    with Tree(process):
+        listening(process)
+        launchctl(tool, env, "list")
+        asker = connect(path)
+        check(look_up(asker, "com.limbo.test.lost") is not None,
+              "limbo-launchd's connection outlives a lost frame")
+        asker.close()
+        check(process.poll() is None, "and the broker goes on")
+
 
 class StandInBroker:
 
-    def __init__(self, limbo, table, outdir, between=False):
+    def __init__(self, limbo, table, outdir, between=False, small=False):
         self.sock, theirs = socket.socketpair(socket.AF_UNIX,
                                               socket.SOCK_SEQPACKET)
+        if small:
+            self.room = theirs.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
+            theirs.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1)
+            self.theirs = theirs.dup()
         self.control_path = outdir / "launchd-stand-in-broker.launchd"
         if self.control_path.exists():
             self.control_path.unlink()
@@ -388,9 +430,10 @@ class StandInBroker:
                                                       control.fileno()])
         theirs.close()
         control.close()
+        self.names = {}
         self.backlog = []
 
-    def until(self, kind, timeout=10.0):
+    def until(self, kind, loaded=None, timeout=10.0):
         for at, got in enumerate(self.backlog):
             if got[0] == FRAMES[kind]:
                 del self.backlog[at]
@@ -399,6 +442,14 @@ class StandInBroker:
             got = receive(self.sock, timeout)
             if got is None:
                 check(False, f"limbo-launchd sends a {kind} frame")
+            if got[0] == FRAMES["NAME"]:
+                flags, count = struct.unpack("II", got[1][:8])
+                name = got[1][8:8 + NAME_MAX].split(b"\0")[0].decode()
+                self.names[name] = (flags, struct.unpack(
+                    f"{count}I", got[1][8 + NAME_MAX:8 + NAME_MAX + 4 * count]))
+                if name == loaded and count != 0:
+                    return None
+                continue
             if got[0] == FRAMES[kind]:
                 return got[1]
             self.backlog.append(got)
@@ -425,6 +476,19 @@ class StandInBroker:
             check(False, "limbo-launchd goes")
 
 
+SENDS = {"aarch64": (206, 211), "x86_64": (44, 46)}.get(platform.machine(), ())
+
+
+def waits_to_send(pid):
+    try:
+        words = Path(f"/proc/{pid}/syscall").read_text().split()
+    except OSError:
+        return False
+    fields = stat_fields(pid)
+    return (bool(words) and words[0].isdigit() and int(words[0]) in SENDS
+            and fields is not None and fields[0] == "S")
+
+
 def launchd_and_stand_in(limbo, outdir):
     table = outdir / "launchd-alone-jobs.txt"
     table.write_text("")
@@ -444,11 +508,35 @@ def launchd_and_stand_in(limbo, outdir):
 
     sysroot = with_sleep()
     if not sysroot:
-        NOT_RUN.append("limbo-launchd with jobs and a stand-in broker: jobs "
-                       "stopped as the broker goes")
+        NOT_RUN.append("limbo-launchd with jobs and a stand-in broker: told "
+                       "before it forks; jobs stopped as the broker "
+                       "goes")
         return
     first = "com.limbo.test.launchd.first"
-    table.write_text(job_table(sysroot, [(first, "runatload", first)]))
+    table.write_text(job_table(sysroot, [(first, "runatload", first)] + [
+        (f"com.limbo.test.launchd.other{i}", "-",
+         f"com.limbo.test.launchd.other{i}") for i in range(200)]))
+
+    broker = StandInBroker(limbo, table, outdir, small=True)
+    with Tree(broker.process) as process:
+        broker.until("JOBS_LOADED", loaded=first)
+        flags, domains = broker.names.get(first, (0, ()))
+        check(flags & NAME_HELD and not flags & NAME_UNLOADED
+              and DOMAIN_USER in domains,
+              f"it told of the job's name, held and loaded: {flags:#x} {domains}")
+        for _ in range(200):
+            if waits_to_send(process.pid):
+                break
+            time.sleep(0.05)
+        check(waits_to_send(process.pid),
+              "limbo-launchd waits to send what it has to say")
+        check(process.poll() is None and children(process.pid) == [],
+              "limbo-launchd forks no job before it has told of the names")
+        broker.theirs.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF,
+                                 broker.room // 2)
+        broker.theirs.close()
+        broker.until("JOBS_LOADED")
+        check(broker.job(first) in children(process.pid), "and then started it")
 
     broker = StandInBroker(limbo, table, outdir)
     with Tree(broker.process) as process:

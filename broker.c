@@ -70,6 +70,7 @@ struct connection {
 
 union broker_request {
 	struct broker_hello hello;
+	struct broker_name name;
 	struct broker_register reg;
 	struct broker_lookup lookup;
 	struct broker_task_for_pid task_for_pid;
@@ -92,6 +93,10 @@ struct held_name {
 	struct held_send *queued;
 	bool hidden;
 	bool hides;
+	bool held_for_guest;
+	uint32_t launchd;
+	uint32_t *domains;
+	uint32_t domain_count;
 };
 
 struct service {
@@ -115,8 +120,11 @@ static void handle_guest(int fd);
 static void welcome_guest(
 		struct connection *conn, const struct broker_hello *hello);
 static void read_held_names(const char *path);
+static void hold_name(const char *name);
+static void begin_hold(struct held_name *held, bool hides);
 static struct held_name *name_made(const char *name);
 static struct held_name *held_named(const char *name);
+static struct held_name *name_known(const char *name);
 static void register_service(
 		struct connection *conn, const struct broker_register *reg);
 static struct broker_registered broker_names_register(uint32_t guest_id,
@@ -125,16 +133,22 @@ static struct broker_lookup_reply broker_names_look_up(
 		const struct broker_lookup *req);
 static void look_up_service(struct connection *conn,
 		const struct broker_lookup *req);
+static void answer_lookup(struct connection *conn, bool found, bool hidden,
+		uint64_t global_id);
 static void task_for_pid(
 		struct connection *conn, const struct broker_task_for_pid *req);
 static void route_send(
 		struct connection *conn, struct broker_wire_frame *frame);
 static void send_held(struct connection *conn, struct broker_wire_frame *frame,
 		struct broker_send *send);
-static struct held_name *held_of(uint64_t global_id);
-static struct service *held_service(const struct held_name *held);
-static uint64_t held_port(const struct held_name *held);
+static uint64_t held_target(struct held_name *held, uint32_t domain);
+static void name_told(const struct broker_name *record);
+static bool has_job(const struct held_name *held, uint32_t domain);
+static struct held_name *held_of(uint64_t global_id, uint32_t *domain);
+static uint64_t held_port(const struct held_name *held, uint32_t domain);
 static void release_held_sends(struct held_name *held);
+static void pass_on_held(
+		struct broker_wire_frame *frame, struct broker_send *send);
 static void pass_on(struct broker_wire_frame *frame, struct broker_send *send,
 		uint32_t mover_id);
 static void set_route(uint64_t global_id, uint32_t guest_id, uint32_t mover_id);
@@ -253,28 +267,47 @@ read_held_names(const char *path)
 		perror(path);
 		return;
 	}
-	char line[LIMBO_BROKER_SERVICE_NAME_MAX + 1];
+	char line[LIMBO_BROKER_SERVICE_NAME_MAX + 2];
 	while (fgets(line, sizeof(line), file) != NULL) {
 		line[strcspn(line, "\r\n")] = '\0';
-		size_t length = strlen(line);
-		if (length == 0 || line[0] == '#') {
-			continue;
+		if (line[0] != '\0' && line[0] != '#') {
+			hold_name(line);
 		}
-		bool hides = length > 1 && line[length - 1] == '!';
-		if (hides) {
-			line[length - 1] = '\0';
-		}
-		struct held_name *held = name_made(line);
-		held->hides = hides;
-		held->hidden = hides;
 	}
 	fclose(file);
+}
+
+static void
+hold_name(const char *name)
+{
+	char plain[LIMBO_BROKER_SERVICE_NAME_MAX];
+	strncpy(plain, name, sizeof(plain) - 1);
+	plain[sizeof(plain) - 1] = '\0';
+	size_t length = strlen(plain);
+	bool hides = length > 1 && plain[length - 1] == '!';
+	if (hides) {
+		plain[length - 1] = '\0';
+	}
+	struct held_name *held = name_made(plain);
+	if (!held->held_for_guest && !(held->launchd & BROKER_NAME_HELD)) {
+		begin_hold(held, hides);
+	}
+	held->held_for_guest = true;
+}
+
+static void
+begin_hold(struct held_name *held, bool hides)
+{
+	held->hides = hides;
+	held->hidden = hides
+			&& service_named(held->name, BROKER_DOMAIN_USER)
+					== NULL;
 }
 
 static struct held_name *
 name_made(const char *name)
 {
-	struct held_name *held = held_named(name);
+	struct held_name *held = name_known(name);
 	if (held != NULL) {
 		return held;
 	}
@@ -288,6 +321,15 @@ name_made(const char *name)
 
 static struct held_name *
 held_named(const char *name)
+{
+	struct held_name *held = name_known(name);
+	return held != NULL && (held->held_for_guest || (held->launchd & BROKER_NAME_HELD))
+			? held
+			: NULL;
+}
+
+static struct held_name *
+name_known(const char *name)
 {
 	for (size_t i = 0; i != held_count; i++) {
 		if (strcmp(held_names[i].name, name) == 0) {
@@ -521,6 +563,15 @@ handle_guest(int fd)
 		look_up_service(conn, lookup);
 		break;
 	}
+	case BROKER_NAME: {
+		const struct broker_name *record = (const void *)payload;
+		if (conn->fd == launchd_fd && length >= sizeof(*record)
+				&& (length - sizeof(*record)) / sizeof(uint32_t)
+						>= record->domain_count) {
+			name_told(record);
+		}
+		break;
+	}
 	case BROKER_JOBS_LOADED:
 		if (conn->fd == launchd_fd) {
 			launchd_loaded = true;
@@ -553,18 +604,15 @@ register_service(struct connection *conn, const struct broker_register *reg)
 {
 	struct held_name *held = held_named(reg->name);
 	struct broker_register adopted = *reg;
-	if (held != NULL && held_service(held) == NULL) {
-		adopted.global_id = held_port(held);
+	if (held != NULL) {
+		adopted.global_id = held_port(held, conn->domain);
 	}
 	struct broker_registered registered = broker_names_register(
 			conn->guest_id, conn->domain, &adopted);
 	registered.global_id = reg->global_id;
-	registered.held_global_id = adopted.global_id != reg->global_id
-			? adopted.global_id
-			: 0;
+	registered.held_global_id = held != NULL ? adopted.global_id : 0;
 	send_frame(conn, BROKER_REGISTERED, &registered, sizeof(registered));
-	if (registered.holder == BROKER_NAME_FREE
-			&& registered.held_global_id != 0) {
+	if (registered.holder == BROKER_NAME_FREE && held != NULL) {
 		held->hidden = false;
 		set_route(adopted.global_id, conn->guest_id, 0);
 		release_held_sends(held);
@@ -609,11 +657,34 @@ static void
 look_up_service(struct connection *conn, const struct broker_lookup *req)
 {
 	struct held_name *held = held_named(req->name);
-	struct broker_lookup_reply reply = broker_names_look_up(req);
-	if (held != NULL) {
-		reply.found = !held->hidden;
-		reply.global_id = held_port(held);
+	if (held != NULL && held->hidden) {
+		answer_lookup(conn, false, true, 0);
+		return;
 	}
+	uint32_t domain = req->domain;
+	if (held != NULL && !(held->launchd & BROKER_NAME_UNLOADED)) {
+		if (!has_job(held, domain)
+				&& has_job(held, BROKER_DOMAIN_SYSTEM)) {
+			domain = BROKER_DOMAIN_SYSTEM;
+		}
+		answer_lookup(conn, true, false, held_port(held, domain));
+		return;
+	}
+	struct broker_lookup scoped = *req;
+	scoped.domain = domain;
+	struct broker_lookup_reply reply = broker_names_look_up(&scoped);
+	send_frame(conn, BROKER_LOOKUP_REPLY, &reply, sizeof(reply));
+}
+
+static void
+answer_lookup(struct connection *conn, bool found, bool hidden,
+		uint64_t global_id)
+{
+	struct broker_lookup_reply reply = {
+			.found = found,
+			.hidden = hidden,
+			.global_id = global_id,
+	};
 	send_frame(conn, BROKER_LOOKUP_REPLY, &reply, sizeof(reply));
 }
 
@@ -681,12 +752,15 @@ static void
 send_held(struct connection *conn, struct broker_wire_frame *frame,
 		struct broker_send *send)
 {
-	struct held_name *held = held_of(send->dest_global_id);
+	uint32_t domain;
+	struct held_name *held = held_of(send->dest_global_id, &domain);
 	if (held == NULL) {
 		drop_frame(frame);
 		return;
 	}
-	if (held_service(held) != NULL) {
+	uint64_t target = held_target(held, domain);
+	if (target != 0) {
+		send->dest_global_id = target;
 		pass_on(frame, send, conn->guest_id);
 		return;
 	}
@@ -704,49 +778,124 @@ send_held(struct connection *conn, struct broker_wire_frame *frame,
 	free(moved);
 }
 
-static struct held_name *
-held_of(uint64_t global_id)
+static uint64_t
+held_target(struct held_name *held, uint32_t domain)
 {
-	uint32_t index = (uint32_t)global_id - 1;
-	return index < held_count ? &held_names[index] : NULL;
+	const struct service *service = service_named(held->name, domain);
+	if (service != NULL && service->domain == domain) {
+		return service->global_id;
+	}
+	if (service != NULL && !has_job(held, domain)) {
+		return service->global_id;
+	}
+	return 0;
 }
 
-static struct service *
-held_service(const struct held_name *held)
+static void
+name_told(const struct broker_name *record)
 {
-	uint64_t global_id = held_port(held);
-	for (size_t i = 0; i != service_count; i++) {
-		if (services[i].global_id == global_id) {
-			return &services[i];
+	char name[LIMBO_BROKER_SERVICE_NAME_MAX];
+	memcpy(name, record->name, sizeof(name));
+	name[sizeof(name) - 1] = '\0';
+	struct held_name *held = name_made(name);
+	bool was_held = held->held_for_guest
+			|| (held->launchd & BROKER_NAME_HELD);
+	uint32_t *domains = malloc(sizeof(uint32_t)
+			* (record->domain_count != 0 ? record->domain_count
+						     : 1));
+	memcpy(domains, record->domains,
+			sizeof(uint32_t) * record->domain_count);
+	free(held->domains);
+	held->domains = domains;
+	held->domain_count = record->domain_count;
+	held->launchd = record->flags;
+	if (record->flags & BROKER_NAME_HELD) {
+		if (!was_held) {
+			begin_hold(held, record->flags & BROKER_NAME_HIDES);
+		}
+	} else if (was_held && !held->held_for_guest && held->queued != NULL) {
+		while (held->queued != NULL) {
+			struct held_send *queued = held->queued;
+			held->queued = queued->next;
+			drop_frame(queued->frame);
+			free(queued);
 		}
 	}
-	return NULL;
+}
+
+static bool
+has_job(const struct held_name *held, uint32_t domain)
+{
+	for (uint32_t i = 0; i != held->domain_count; i++) {
+		if (held->domains[i] == domain) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static struct held_name *
+held_of(uint64_t global_id, uint32_t *domain)
+{
+	uint32_t local = (uint32_t)global_id;
+	uint32_t index = (local & BROKER_HELD_INDEX_MASK) - 1;
+	if (index >= held_count) {
+		return NULL;
+	}
+	*domain = (local & BROKER_HELD_SYSTEM) ? BROKER_DOMAIN_SYSTEM
+					       : BROKER_DOMAIN_USER;
+	struct held_name *held = &held_names[index];
+	return held->held_for_guest || (held->launchd & BROKER_NAME_HELD)
+			? held
+			: NULL;
 }
 
 static uint64_t
-held_port(const struct held_name *held)
+held_port(const struct held_name *held, uint32_t domain)
 {
-	return broker_global_id(
-			BROKER_GUEST_ID, (uint32_t)(held - held_names) + 1);
+	uint32_t local = (uint32_t)(held - held_names) + 1;
+	if (domain == BROKER_DOMAIN_SYSTEM) {
+		local |= BROKER_HELD_SYSTEM;
+	}
+	return broker_global_id(BROKER_GUEST_ID, local);
 }
 
 static void
 release_held_sends(struct held_name *held)
 {
-	while (held->queued != NULL) {
-		struct held_send *queued = held->queued;
-		held->queued = queued->next;
+	struct held_send **link = &held->queued;
+	while (*link != NULL) {
+		struct held_send *queued = *link;
 		struct broker_send send;
+		uint32_t domain;
 		broker_wire_read(queued->frame, 0, &send, sizeof(send));
-		uint32_t count;
-		uint64_t *moved = moved_ids(queued->frame, &send, &count);
-		pass_on(queued->frame, &send, 0);
-		for (uint32_t i = 0; i != count; i++) {
-			release_held(moved[i]);
+		const struct service *service
+				= held_of(send.dest_global_id, &domain) == held
+				? service_named(held->name, domain)
+				: NULL;
+		if (service == NULL
+				|| (service->domain != domain
+						&& has_job(held, domain))) {
+			link = &queued->next;
+			continue;
 		}
-		free(moved);
+		*link = queued->next;
+		send.dest_global_id = service->global_id;
+		pass_on_held(queued->frame, &send);
 		free(queued);
 	}
+}
+
+static void
+pass_on_held(struct broker_wire_frame *frame, struct broker_send *send)
+{
+	uint32_t count;
+	uint64_t *moved = moved_ids(frame, send, &count);
+	pass_on(frame, send, 0);
+	for (uint32_t i = 0; i != count; i++) {
+		release_held(moved[i]);
+	}
+	free(moved);
 }
 
 static void
