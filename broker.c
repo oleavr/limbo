@@ -124,7 +124,7 @@ static void add_connection(int fd);
 static void remove_connection(size_t index);
 static void send_frame(struct connection *conn, uint32_t type,
 		const void *payload, uint32_t length);
-static void queue_frame(
+static bool queue_frame(
 		struct connection *conn, struct broker_wire_frame *frame);
 static void send_pending(struct connection *conn);
 static bool send_data(int fd, struct broker_wire_frame *frame);
@@ -420,9 +420,13 @@ pass_on(struct broker_wire_frame *frame, struct broker_send *send,
 	memcpy(frame->payload, send, sizeof(*send));
 	frame->type = BROKER_DELIVER | (frame->type & BROKER_FRAME_OOL);
 	uint32_t guest_id = owner->guest_id;
-	queue_frame(owner, frame);
+	bool queued = queue_frame(owner, frame);
 	for (uint32_t i = 0; i != moved_count; i++) {
-		set_route(moved[i], guest_id, mover_id);
+		if (queued) {
+			set_route(moved[i], guest_id, mover_id);
+		} else {
+			settle_moved(moved[i]);
+		}
 	}
 	free(moved);
 }
@@ -729,12 +733,12 @@ send_frame(struct connection *conn, uint32_t type, const void *payload,
 	queue_frame(conn, broker_wire_new(type, &part, 1, NULL, 0));
 }
 
-static void
+static bool
 queue_frame(struct connection *conn, struct broker_wire_frame *frame)
 {
 	if (conn->pending == NULL && send_data(conn->fd, frame)) {
 		broker_wire_free(frame);
-		return;
+		return true;
 	}
 	size_t share = descriptor_room / 2 < CONNECTION_FDS
 			? descriptor_room / 2
@@ -745,7 +749,7 @@ queue_frame(struct connection *conn, struct broker_wire_frame *frame)
 							<= descriptor_room);
 	if (!room && frame->fds_sent == 0) {
 		broker_wire_free(frame);
-		return;
+		return false;
 	}
 	conn->queued_fds += frame->fd_count;
 	queued_fds += frame->fd_count;
@@ -756,6 +760,7 @@ queue_frame(struct connection *conn, struct broker_wire_frame *frame)
 		conn->last_pending->next = frame;
 	}
 	conn->last_pending = frame;
+	return true;
 }
 
 static void
