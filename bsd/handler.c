@@ -404,6 +404,9 @@ open_flags(int flags)
 int
 sys_sys_close(int fd)
 {
+	if (broker_client_owns_fd(fd)) {
+		return 0;
+	}
 	kevent_close(fd);
 	net_close(fd);
 	route_close(fd);
@@ -1419,6 +1422,13 @@ sys_sys_getdtablesize(void)
 int
 sys_sys_dup2(uint32_t from, uint32_t to)
 {
+	if (broker_client_owns_fd((int)to)) {
+		int moved = fcntl((int)to, F_DUPFD_CLOEXEC, 512);
+		if (moved == -1) {
+			return _EMFILE;
+		}
+		broker_client_fd_moved((int)to, moved);
+	}
 	if (from != to && fcntl((int)from, F_GETFD) != -1) {
 		kevent_close((int)to);
 	}
