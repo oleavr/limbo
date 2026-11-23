@@ -58,6 +58,11 @@ struct connection {
 	struct broker_wire_ahead ahead;
 };
 
+union broker_request {
+	struct broker_register reg;
+	struct broker_lookup lookup;
+};
+
 struct service {
 	uint32_t guest_id;
 	uint64_t global_id;
@@ -207,44 +212,50 @@ handle_guest(int fd)
 		}
 		return;
 	}
-	if (frame->lost) {
+	uint32_t type = frame->type & ~BROKER_FRAME_OOL;
+	if (type == BROKER_SEND && !frame->lost) {
+		route_send(frame);
+		return;
+	}
+
+	uint32_t length = frame->length;
+	char *payload = calloc(1,
+			length > sizeof(union broker_request)
+					? length
+					: sizeof(union broker_request));
+	if (frame->lost || !broker_wire_read(frame, 0, payload, length)) {
+		free(payload);
 		broker_wire_free(frame);
 		return;
 	}
 
-	union {
-		struct broker_register reg;
-		struct broker_lookup lookup;
-	} request;
-	switch (frame->type & ~BROKER_FRAME_OOL) {
+	switch (type) {
 	case BROKER_HELLO:
 		welcome_guest(conn);
 		break;
-	case BROKER_REGISTER:
-		if (frame->inline_length >= sizeof(request.reg)
-				&& broker_wire_read(frame, 0, &request.reg,
-						sizeof(request.reg))) {
-			request.reg.name[sizeof(request.reg.name) - 1] = '\0';
-			struct broker_registered registered
-					= broker_names_register(conn->guest_id,
-							&request.reg);
-			send_frame(conn, BROKER_REGISTERED, &registered,
-					sizeof(registered));
+	case BROKER_REGISTER: {
+		if (length < sizeof(struct broker_register)) {
+			break;
 		}
+		struct broker_register *reg = (struct broker_register *)payload;
+		reg->name[sizeof(reg->name) - 1] = '\0';
+		struct broker_registered registered
+				= broker_names_register(conn->guest_id, reg);
+		send_frame(conn, BROKER_REGISTERED, &registered,
+				sizeof(registered));
 		break;
-	case BROKER_LOOKUP:
-		if (frame->inline_length >= sizeof(request.lookup)
-				&& broker_wire_read(frame, 0, &request.lookup,
-						sizeof(request.lookup))) {
-			request.lookup.name[sizeof(request.lookup.name) - 1]
-					= '\0';
-			look_up_service(conn, &request.lookup);
-		}
-		break;
-	case BROKER_SEND:
-		route_send(frame);
-		return;
 	}
+	case BROKER_LOOKUP: {
+		if (length < sizeof(struct broker_lookup)) {
+			break;
+		}
+		struct broker_lookup *lookup = (struct broker_lookup *)payload;
+		lookup->name[sizeof(lookup->name) - 1] = '\0';
+		look_up_service(conn, lookup);
+		break;
+	}
+	}
+	free(payload);
 	broker_wire_free(frame);
 }
 
