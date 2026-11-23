@@ -497,7 +497,11 @@ sys_task_for_pid(mach_port_name_t target_tport, int pid, mach_port_name_t *t)
 		*t = ipc_task_self();
 		return KERN_SUCCESS;
 	}
-	unimplemented();
+	if (pid <= 0) {
+		return KERN_FAILURE;
+	}
+	*t = ipc_task_for_pid(pid);
+	return *t != MACH_PORT_NULL ? KERN_SUCCESS : KERN_FAILURE;
 }
 
 kern_return_t
@@ -526,16 +530,12 @@ sys_task_name_for_pid(
 kern_return_t
 sys_pid_for_task(mach_port_name_t t, int *x)
 {
-	void *named = ipc_kobject_lookup(t, IPC_KOBJECT_TASK_NAME);
-	if (named != NULL) {
-		*x = (int)(intptr_t)named;
-		return KERN_SUCCESS;
-	}
-	if (t != ipc_kobject_name(IPC_KOBJECT_TASK)) {
+	int32_t pid;
+	if (!ipc_task_pid(t, &pid)) {
 		*x = -1;
 		return KERN_FAILURE;
 	}
-	*x = getpid();
+	*x = pid;
 	return KERN_SUCCESS;
 }
 

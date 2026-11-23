@@ -36,6 +36,7 @@
 #include <mach/mig.h>
 #include <mach/notify.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -50,6 +51,7 @@
 #include "bsd/credentials.h"
 #include "bsd/gid.h"
 #include "bsd/kevent.h"
+#include "bsd/process.h"
 #include "bsd/signals.h"
 #include "eventlink.h"
 #include "ipc.h"
@@ -233,6 +235,13 @@ static uint32_t entry_count;
 static struct ipc_port *kobjects[IPC_KOBJECT_VOUCHER + 1];
 static uint32_t export_counter;
 static uint32_t transfer_counter;
+struct guest_pid {
+	uint32_t guest_id;
+	int32_t pid;
+};
+static struct guest_pid *guest_pids;
+static size_t guest_pid_count;
+static size_t guest_pid_capacity;
 static uint32_t *gone_guests;
 static size_t gone_guest_count;
 static pthread_mutex_t own_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -338,6 +347,9 @@ static void deliver(uint64_t dest_global_id, const struct broker_sender *sender,
 		size_t fd_count, bool lost);
 static void send_remote_notice(const struct pending_notice *notice);
 static uint64_t export_local_port(mach_port_name_t name);
+static uint64_t task_port_global_id(void);
+static void remember_guest_pid(uint32_t guest_id, int32_t pid);
+static void forget_guest_pid(uint32_t guest_id);
 static struct ipc_port *port_for_global_id(uint64_t global_id);
 static mach_port_name_t import_remote_send(uint64_t global_id,
 		mach_msg_type_name_t type, uint32_t sender_guest_id);
@@ -503,6 +515,77 @@ mach_port_name_t
 ipc_task_self(void)
 {
 	return kobject_send_right(IPC_KOBJECT_TASK);
+}
+
+mach_port_name_t
+ipc_task_for_pid(int32_t pid)
+{
+	uint64_t global_id = broker_client_task_for_pid(pid);
+	struct process process;
+	struct timespec now;
+	bool young = process_lookup(pid, &process) == 0
+			&& clock_gettime(CLOCK_BOOTTIME, &now) == 0
+			&& (uint64_t)now.tv_sec * 1000000000
+							+ (uint64_t)now.tv_nsec
+							- process_ticks_to_nanoseconds(
+									process.start_ticks)
+					< 1000000000;
+	for (int tries = 0; global_id == 0 && young && tries < 100
+			&& (kill(pid, 0) == 0 || errno == EPERM);
+			tries++) {
+		usleep(20000);
+		global_id = broker_client_task_for_pid(pid);
+	}
+	if (global_id == 0) {
+		return MACH_PORT_NULL;
+	}
+	pthread_mutex_lock(&lock);
+	mach_port_name_t name = import_remote_send(
+			global_id, MACH_MSG_TYPE_PORT_SEND, BROKER_GUEST_ID);
+	remember_guest_pid(broker_guest_of(global_id), pid);
+	pthread_mutex_unlock(&lock);
+	return name;
+}
+
+bool
+ipc_task_pid(mach_port_name_t name, int32_t *pid)
+{
+	pthread_mutex_lock(&lock);
+	struct ipc_entry *entry = lookup(name);
+	bool found = false;
+	if (entry == NULL) {
+	} else if (entry->port->kotype == IPC_KOBJECT_TASK) {
+		*pid = getpid();
+		found = true;
+	} else if (entry->port->kotype == IPC_KOBJECT_TASK_NAME) {
+		*pid = (int32_t)(intptr_t)entry->port->kobject;
+		found = true;
+	} else if (entry->port->remote) {
+		uint32_t guest_id = broker_guest_of(entry->port->global_id);
+		for (size_t i = 0; i != guest_pid_count; i++) {
+			if (guest_id != BROKER_GUEST_ID
+					&& guest_pids[i].guest_id == guest_id) {
+				*pid = guest_pids[i].pid;
+				found = true;
+			}
+		}
+	}
+	pthread_mutex_unlock(&lock);
+	return found;
+}
+
+bool
+ipc_port_is_remote(mach_port_name_t name)
+{
+	if (!MACH_PORT_VALID(name)) {
+		return false;
+	}
+	pthread_mutex_lock(&lock);
+	struct ipc_entry *entry = lookup(name);
+	bool remote = entry != NULL && entry->port != NULL
+			&& entry->port->remote;
+	pthread_mutex_unlock(&lock);
+	return remote;
 }
 
 mach_port_name_t
@@ -1722,6 +1805,9 @@ export_local_port(mach_port_name_t name)
 	}
 
 	struct ipc_port *port = lookup(name)->port;
+	if (port == kobjects[IPC_KOBJECT_TASK] && task_port_global_id() != 0) {
+		port->global_id = task_port_global_id();
+	}
 	if (port->global_id == 0) {
 		port->global_id = broker_global_id(
 				broker_client_guest_id(), ++export_counter);
@@ -1729,9 +1815,58 @@ export_local_port(mach_port_name_t name)
 	return port->global_id;
 }
 
+static uint64_t
+task_port_global_id(void)
+{
+	uint32_t guest = broker_client_guest_id();
+	return guest != 0 ? broker_global_id(guest, BROKER_TASK_PORT_LOCAL) : 0;
+}
+
+static void
+remember_guest_pid(uint32_t guest_id, int32_t pid)
+{
+	if (guest_id == BROKER_GUEST_ID || pid <= 1) {
+		return;
+	}
+	for (size_t i = 0; i != guest_pid_count; i++) {
+		if (guest_pids[i].guest_id == guest_id) {
+			guest_pids[i].pid = pid;
+			return;
+		}
+	}
+	if (guest_pid_count == guest_pid_capacity) {
+		size_t capacity = guest_pid_capacity ? guest_pid_capacity * 2
+						     : 64;
+		struct guest_pid *grown = realloc(
+				guest_pids, capacity * sizeof(*grown));
+		if (grown == NULL) {
+			return;
+		}
+		guest_pids = grown;
+		guest_pid_capacity = capacity;
+	}
+	guest_pids[guest_pid_count++] = (struct guest_pid){guest_id, pid};
+}
+
+static void
+forget_guest_pid(uint32_t guest_id)
+{
+	for (size_t i = 0; i != guest_pid_count; i++) {
+		if (guest_pids[i].guest_id == guest_id) {
+			guest_pids[i] = guest_pids[--guest_pid_count];
+			return;
+		}
+	}
+}
+
 static struct ipc_port *
 port_for_global_id(uint64_t global_id)
 {
+	if (global_id != 0 && global_id == task_port_global_id()) {
+		struct ipc_port *task = kobject_port(IPC_KOBJECT_TASK);
+		task->global_id = global_id;
+		return task;
+	}
 	for (uint32_t i = 1; i < entry_count; i++) {
 		struct ipc_port *port = entries[i].port;
 		if (port != NULL && !port->remote
@@ -1830,6 +1965,7 @@ deliver(uint64_t dest_global_id, const struct broker_sender *sender,
 	struct ipc_port *dest = port_for_global_id(dest_global_id);
 	struct ipc_kmsg *kmsg = malloc(sizeof(*kmsg) + rh->message_size
 			+ sizeof(mach_msg_max_trailer_t));
+	remember_guest_pid(rh->sender_guest_id, rh->sender.pid);
 	kmsg->sender = rh->sender;
 	if (sender != NULL && sender->pid > 0) {
 		kmsg->sender.pid = sender->pid;
@@ -2270,6 +2406,7 @@ ipc_remote_guest_gone(uint32_t guest_id)
 {
 	pthread_mutex_lock(&lock);
 	remember_gone(guest_id);
+	forget_guest_pid(guest_id);
 	send_onces_gone(guest_id);
 	return_ports(0, guest_id);
 	for (uint32_t i = 1; i < entry_count; i++) {
