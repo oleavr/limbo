@@ -125,6 +125,8 @@
 #define KAUTH_GID_NONE (~(gid_t)0 - 100)
 
 #define PT_DENY_ATTACH 31
+#define TASK_SUSPEND_ID 3407
+#define TASK_RESUME_ID  3408
 
 #define _ACCESS_READ_MASK ((1 << 9) | (1 << 15) | (1 << 17) | (1 << 19))
 #define _ACCESS_WRITE_MASK                                                     \
@@ -136,6 +138,7 @@ static __thread unsigned long current_syscall;
 
 static sem_t *semaphore(void *handle);
 static uint32_t interface_of(const struct sockaddr_storage *address);
+static kern_return_t pid_task_routine(int pid, mach_msg_id_t id);
 static int host_unix_address(const void *name, socklen_t length,
 		struct sockaddr_un *linux_address, int *directory);
 
@@ -4349,13 +4352,63 @@ sys_audit_session_port(void *asid, user_addr_t portnamep)
 int
 sys_pid_suspend(int pid)
 {
+	if (pid != getpid()
+			&& pid_task_routine(pid, TASK_SUSPEND_ID)
+					== KERN_SUCCESS) {
+		return 0;
+	}
 	return errno_map(kill(pid, SIGSTOP));
 }
 
 int
 sys_pid_resume(int pid)
 {
+	if (pid != getpid()) {
+		pid_task_routine(pid, TASK_RESUME_ID);
+	}
 	return errno_map(kill(pid, SIGCONT));
+}
+
+static kern_return_t
+pid_task_routine(int pid, mach_msg_id_t id)
+{
+	mach_port_name_t task = ipc_task_for_pid(pid);
+	if (task == MACH_PORT_NULL) {
+		return KERN_FAILURE;
+	}
+	mach_port_name_t reply;
+	if (ipc_port_allocate(MACH_PORT_RIGHT_RECEIVE, &reply)
+			!= KERN_SUCCESS) {
+		ipc_port_mod_refs(task, MACH_PORT_RIGHT_SEND, -1);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+	union {
+		struct {
+			mach_msg_header_t header;
+		} request;
+		struct {
+			mach_msg_header_t header;
+			NDR_record_t ndr;
+			kern_return_t ret_code;
+			mach_msg_max_trailer_t trailer;
+		} reply;
+	} message = {.request
+			= {.header = {
+					   .msgh_bits = MACH_MSGH_BITS_SET(
+							   MACH_MSG_TYPE_COPY_SEND,
+							   MACH_MSG_TYPE_MAKE_SEND_ONCE,
+							   0, 0),
+					   .msgh_size = sizeof(message.request),
+					   .msgh_remote_port = task,
+					   .msgh_local_port = reply,
+					   .msgh_id = id,
+			   }}};
+	mach_msg_return_t mr = ipc_mach_msg_kernel(&message.request.header,
+			MACH64_SEND_MSG | MACH64_RCV_MSG,
+			sizeof(message.request), sizeof(message), reply, 0);
+	ipc_port_mod_refs(reply, MACH_PORT_RIGHT_RECEIVE, -1);
+	ipc_port_mod_refs(task, MACH_PORT_RIGHT_SEND, -1);
+	return mr != MACH_MSG_SUCCESS ? mr : message.reply.ret_code;
 }
 
 int
