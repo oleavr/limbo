@@ -47,6 +47,7 @@
 
 #include "broker.h"
 #include "bsd/mac.h"
+#include "bsd/persona.h"
 #include "bsd/responsibility.h"
 #include "commpage.h"
 #include "launchd.h"
@@ -62,8 +63,12 @@
 
 /* Temporary TLS for dyld */
 static char dyld_ls[0x1000];
+extern char **environ;
 
 static int run(int argc, char *argv[], char *envp[]);
+static void apply_job_environment(void);
+static void join_job_persona(void);
+static void apply_environment(const char *name, bool overwrite);
 #ifdef __arm64__
 static void reserve_high_address_space(void);
 #endif
@@ -250,9 +255,11 @@ run(int argc, char *argv[], char *envp[])
 	}
 
 	/* Set up the stack in the way that dyld expects */
+	apply_job_environment();
+	(void)envp;
 	uintptr_t stack_base
 			= build_stack(exe_base, named != NULL ? named : argv[1],
-					argc - 2, argv + 2, envp);
+					argc - 2, argv + 2, environ);
 	if (stack_base == 0) {
 		goto error;
 	}
@@ -289,6 +296,65 @@ run(int argc, char *argv[], char *envp[])
 	thread_enter(&state);
 error:
 	exit(1);
+}
+
+static void
+apply_job_environment(void)
+{
+	join_job_persona();
+	apply_environment("LIMBO_LAUNCHD_ENVIRONMENT", true);
+}
+
+static void
+join_job_persona(void)
+{
+	const char *rule = getenv("LIMBO_LAUNCHD_PERSONA_TYPE");
+	if (rule == NULL) {
+		return;
+	}
+	char *rest;
+	int type = (int)strtol(rule, &rest, 10);
+	uint32_t uid = *rest == ':' ? (uint32_t)strtoul(rest + 1, NULL, 10)
+				    : (uint32_t)-1;
+	uint32_t joined;
+	if (persona_join_type(type, uid, &joined) != 0) {
+		fprintf(stderr,
+				"limbo: no persona of type %d for uid %d: the "
+				"job runs in none\n",
+				type, (int)uid);
+	}
+	unsetenv("LIMBO_LAUNCHD_PERSONA_TYPE");
+}
+
+static void
+apply_environment(const char *name, bool overwrite)
+{
+	const char *variable = getenv(name);
+	if (variable == NULL) {
+		return;
+	}
+	char *pairs = strdup(variable);
+	char *saved;
+	for (char *pair = strtok_r(pairs, ";", &saved); pair != NULL;
+			pair = strtok_r(NULL, ";", &saved)) {
+		char *out = pair;
+		for (const char *in = pair; *in != '\0'; in++) {
+			unsigned int byte;
+			if (*in == '%' && sscanf(in + 1, "%2x", &byte) == 1) {
+				*out++ = (char)byte;
+				in += 2;
+			} else {
+				*out++ = *in;
+			}
+		}
+		*out = '\0';
+		char *equals = strchr(pair, '=');
+		if (equals != NULL && equals != pair) {
+			*equals = '\0';
+			setenv(pair, equals + 1, overwrite);
+		}
+	}
+	free(pairs);
 }
 
 static void

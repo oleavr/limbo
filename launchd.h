@@ -27,4 +27,9 @@
 
 #pragma once
 
+#include <stddef.h>
+#include <sys/types.h>
+
+#include "broker.h"
+
 int launchd_main(int argc, char *argv[]);

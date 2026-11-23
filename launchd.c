@@ -28,6 +28,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -41,13 +42,15 @@
 
 #include "broker.h"
 #include "launchd.h"
+#include "launchd_engine.h"
 #include "osfmk/broker_client.h"
 
-static bool handle_broker(void);
-static void send_frame(uint32_t type, const void *payload, size_t length);
-
+static void handle_broker(void);
+static bool send_frame(uint32_t type, const void *payload, size_t length,
+		const int *fds, size_t fd_count);
 static int broker_fd = -1;
 static struct broker_wire_ahead broker_ahead;
+static bool broker_gone;
 
 int
 launchd_main(int argc, char *argv[])
@@ -71,48 +74,93 @@ launchd_main(int argc, char *argv[])
 	}
 	prctl(PR_SET_NAME, LIMBO_LAUNCHD, 0, 0, 0);
 
-	send_frame(BROKER_JOBS_LOADED, NULL, 0);
+	jobs_init(maker.pid);
+	if (argc > 2) {
+		jobs_load(argv[2]);
+	}
+	send_frame(BROKER_JOBS_LOADED, NULL, 0, NULL, 0);
+
+	for (;;) {
+		size_t job_fds = jobs_poll_count();
+		struct pollfd *fds = calloc(1 + job_fds, sizeof(*fds));
+		fds[0] = (struct pollfd){.fd = broker_fd, .events = POLLIN};
+		jobs_poll_fill(fds + 1);
+
+		poll(fds, 1 + job_fds, jobs_poll_timeout());
+
+		if (fds[0].revents & (POLLIN | POLLHUP | POLLERR)) {
+			handle_broker();
+		}
+		jobs_poll_handle(fds + 1, job_fds);
+
+		free(fds);
+		if (jobs_done()) {
+			break;
+		}
+	}
+	return broker_gone ? 1 : 0;
+}
+
+static void
+handle_broker(void)
+{
+	static char payload[BROKER_FRAME_MAX + 1];
+	static int fds[BROKER_FDS_MAX];
 	for (;;) {
 		struct pollfd ready = {.fd = broker_fd, .events = POLLIN};
-		poll(&ready, 1, -1);
-		if (!handle_broker()) {
-			return 1;
+		if (broker_fd == -1 || poll(&ready, 1, 0) != 1) {
+			return;
+		}
+		struct broker_frame header;
+		size_t fd_count;
+		bool lost;
+		int n = broker_client_receive_frame(broker_fd, &broker_ahead,
+				&header, payload, fds, &fd_count, &lost);
+		if (n == 0) {
+			continue;
+		}
+		if (n < 0) {
+			fprintf(stderr, "%s: the broker has gone\n",
+					LIMBO_LAUNCHD);
+			close(broker_fd);
+			broker_fd = -1;
+			broker_wire_forget(&broker_ahead);
+			broker_gone = true;
+			jobs_broker_gone();
+			return;
+		}
+		for (size_t i = 0; i != fd_count; i++) {
+			close(fds[i]);
+		}
+		uint32_t type = header.type;
+		if (lost) {
+			continue;
+		}
+		switch (type) {
+		default:
+			break;
 		}
 	}
 }
 
 static bool
-handle_broker(void)
+send_frame(uint32_t type, const void *payload, size_t length, const int *fds,
+		size_t fd_count)
 {
-	static char payload[BROKER_FRAME_MAX];
-	static int fds[BROKER_FDS_MAX];
-	struct broker_frame header;
-	size_t fd_count = 0;
-	bool lost;
-	int received = broker_client_receive_frame(broker_fd, &broker_ahead,
-			&header, payload, fds, &fd_count, &lost);
-	if (received < 0) {
-		fprintf(stderr, "%s: the broker has gone\n", LIMBO_LAUNCHD);
-		return false;
+	if (broker_fd == -1) {
+		return true;
 	}
-	for (size_t i = 0; i != fd_count; i++) {
-		close(fds[i]);
-	}
-	return true;
-}
-
-static void
-send_frame(uint32_t type, const void *payload, size_t length)
-{
 	while (!broker_client_send_frame(broker_fd, MSG_NOSIGNAL, type, payload,
-			(uint32_t)length, NULL, 0)) {
+			(uint32_t)length, fds, fd_count)) {
 		if (errno == EINTR) {
 			continue;
 		}
-		if (errno != EPIPE && errno != ECONNRESET) {
-			fprintf(stderr, "%s: a frame (%#x) not sent: %s\n",
-					LIMBO_LAUNCHD, type, strerror(errno));
+		if (errno == EPIPE || errno == ECONNRESET) {
+			return true;
 		}
-		return;
+		fprintf(stderr, "%s: a frame (%#x) not sent: %s\n",
+				LIMBO_LAUNCHD, type, strerror(errno));
+		return false;
 	}
+	return true;
 }
