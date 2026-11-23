@@ -46,6 +46,7 @@ int credentials_setgroups(uint32_t count, const uint32_t *groups);
 
 int credentials_settid(uid_t uid, gid_t gid);
 bool credentials_gettid(uid_t *uid, gid_t *gid);
+void credentials_of_process(uid_t *uid, uid_t *euid, gid_t *gid, gid_t *egid);
 void credentials_thread_start(void);
 void credentials_fork_child(void);
 

@@ -47,6 +47,7 @@
 #include "bootstrap/bootstrap_defs.h"
 #include "broker.h"
 #include "broker_client.h"
+#include "bsd/credentials.h"
 #include "bsd/gid.h"
 #include "bsd/kevent.h"
 #include "bsd/signals.h"
@@ -65,7 +66,7 @@ typedef enum {
 
 struct ipc_kmsg {
 	struct ipc_kmsg *next;
-	pid_t sender_pid;
+	struct ipc_sender sender;
 	mach_msg_header_t header[];
 };
 
@@ -233,8 +234,8 @@ static void ipc_fork_prepare(void);
 static void ipc_fork_parent(void);
 static void ipc_fork_child(void);
 static mach_msg_return_t remote_send(mach_msg_header_t *header,
-		mach_msg_size_t size, ipc_side_t sender, pid_t sender_pid,
-		uint64_t dest_global_id);
+		mach_msg_size_t size, ipc_side_t sender,
+		const struct ipc_sender *identity, uint64_t dest_global_id);
 static void finish_moves(struct moved_port *queued, bool sent);
 static void return_ports(uint64_t global_id, uint32_t guest_id);
 static void return_port(uint64_t global_id, struct ipc_port *notify);
@@ -325,6 +326,7 @@ static mach_port_name_t kobject_send_right(ipc_kobject_type_t type);
 static struct ipc_port *kobject_port(ipc_kobject_type_t type);
 static mach_msg_return_t send(mach_msg_header_t *msg, mach_msg_size_t size,
 		ipc_side_t sender, pid_t sender_pid);
+static struct ipc_sender sender_identity(pid_t pid);
 static bool has_valid_descriptors(const mach_msg_header_t *header);
 static mach_msg_return_t copyin(mach_msg_header_t *header, ipc_side_t sender,
 		struct ipc_port **dest);
@@ -359,7 +361,7 @@ static int wait_for_arrival(const struct ipc_port *port,
 static void wake_waiters_for(const struct ipc_port *port);
 static void wake_all_waiters(void);
 static void write_trailer(mach_msg_header_t *msg, struct ipc_port *port,
-		pid_t sender_pid);
+		const struct ipc_sender *sender);
 static void flush_notices(void);
 static void notify_port_deleted(struct ipc_port *notify, mach_port_name_t name);
 static void notify_send_possible(
@@ -703,7 +705,7 @@ send(mach_msg_header_t *msg, mach_msg_size_t size, ipc_side_t sender,
 {
 	struct ipc_kmsg *kmsg = malloc(
 			sizeof(*kmsg) + size + sizeof(mach_msg_max_trailer_t));
-	kmsg->sender_pid = sender_pid;
+	kmsg->sender = sender_identity(sender_pid);
 	memcpy(kmsg->header, msg, size);
 	kmsg->header->msgh_size = size;
 	if (!has_valid_descriptors(kmsg->header)) {
@@ -715,7 +717,7 @@ send(mach_msg_header_t *msg, mach_msg_size_t size, ipc_side_t sender,
 	struct ipc_entry *remote_entry = lookup(kmsg->header->msgh_remote_port);
 	if (remote_entry != NULL && remote_entry->port->remote) {
 		mach_msg_return_t rr = remote_send(kmsg->header, size, sender,
-				sender_pid, remote_entry->port->global_id);
+				&kmsg->sender, remote_entry->port->global_id);
 		free(kmsg);
 		return rr;
 	}
@@ -738,7 +740,7 @@ send(mach_msg_header_t *msg, mach_msg_size_t size, ipc_side_t sender,
 		return MACH_MSG_SUCCESS;
 	}
 
-	write_trailer(kmsg->header, dest, kmsg->sender_pid);
+	write_trailer(kmsg->header, dest, &kmsg->sender);
 	bool serve_xpc = dest->kotype == IPC_KOBJECT_BOOTSTRAP
 			&& xpc_bootstrap_is_message(kmsg->header->msgh_id);
 	void *service = dest->kotype == IPC_KOBJECT_XPC_SERVICE ? dest->kobject
@@ -757,6 +759,24 @@ send(mach_msg_header_t *msg, mach_msg_size_t size, ipc_side_t sender,
 
 	free(kmsg);
 	return MACH_MSG_SUCCESS;
+}
+
+static struct ipc_sender
+sender_identity(pid_t pid)
+{
+	if (pid == 0) {
+		return (struct ipc_sender){0};
+	}
+	uid_t uid, euid;
+	gid_t gid, egid;
+	credentials_of_process(&uid, &euid, &gid, &egid);
+	return (struct ipc_sender){
+			.pid = pid,
+			.uid = uid,
+			.euid = euid,
+			.gid = gid_from_linux(gid),
+			.egid = gid_from_linux(egid),
+	};
 }
 
 static bool
@@ -790,7 +810,7 @@ has_valid_descriptors(const mach_msg_header_t *header)
 
 static mach_msg_return_t
 remote_send(mach_msg_header_t *header, mach_msg_size_t size, ipc_side_t sender,
-		pid_t sender_pid, uint64_t dest_global_id)
+		const struct ipc_sender *identity, uint64_t dest_global_id)
 {
 	mach_msg_bits_t bits = header->msgh_bits;
 	size_t fd_count = 0;
@@ -834,7 +854,7 @@ remote_send(mach_msg_header_t *header, mach_msg_size_t size, ipc_side_t sender,
 					? export_local_port(
 							  header->msgh_local_port)
 					: 0,
-			.sender_pid = sender_pid,
+			.sender = *identity,
 			.descriptor_count = descriptor_count,
 			.sender_guest_id = broker_client_guest_id(),
 	};
@@ -923,7 +943,7 @@ finish_moves(struct moved_port *queued, bool sent)
 			header->msgh_remote_port = MACH_PORT_NULL;
 			release_out_of_line(header);
 			remote_send(header, header->msgh_size, IPC_USER,
-					kmsg->sender_pid, move->global_id);
+					&kmsg->sender, move->global_id);
 			pthread_mutex_lock(&lock);
 			free(kmsg);
 		}
@@ -1701,7 +1721,7 @@ deliver(uint64_t dest_global_id, const void *blob, uint32_t length,
 	struct ipc_port *dest = port_for_global_id(dest_global_id);
 	struct ipc_kmsg *kmsg = malloc(sizeof(*kmsg) + rh->message_size
 			+ sizeof(mach_msg_max_trailer_t));
-	kmsg->sender_pid = rh->sender_pid;
+	kmsg->sender = rh->sender;
 	memcpy(kmsg->header, message, rh->message_size);
 
 	mach_msg_type_name_t reply_type = received_type(rh->reply_disposition);
@@ -2861,7 +2881,7 @@ receive(mach_msg_header_t *msg, mach_msg_option64_t options,
 	}
 
 	port->messages = kmsg->next;
-	write_trailer(kmsg->header, port, kmsg->sender_pid);
+	write_trailer(kmsg->header, port, &kmsg->sender);
 	pthread_mutex_unlock(&lock);
 
 	mach_msg_return_t mr = MACH_RCV_TOO_LARGE;
@@ -2949,7 +2969,8 @@ wake_all_waiters(void)
 }
 
 static void
-write_trailer(mach_msg_header_t *msg, struct ipc_port *port, pid_t sender_pid)
+write_trailer(mach_msg_header_t *msg, struct ipc_port *port,
+		const struct ipc_sender *sender)
 {
 	mach_msg_max_trailer_t *trailer
 			= (mach_msg_max_trailer_t *)((uint8_t *)msg
@@ -2958,13 +2979,13 @@ write_trailer(mach_msg_header_t *msg, struct ipc_port *port, pid_t sender_pid)
 	trailer->msgh_trailer_type = MACH_MSG_TRAILER_FORMAT_0;
 	trailer->msgh_trailer_size = sizeof(*trailer);
 	trailer->msgh_seqno = port->seqno++;
-	trailer->msgh_sender.val[0] = geteuid();
-	trailer->msgh_sender.val[1] = gid_from_linux(getegid());
-	trailer->msgh_audit.val[1] = geteuid();
-	trailer->msgh_audit.val[2] = gid_from_linux(getegid());
-	trailer->msgh_audit.val[3] = getuid();
-	trailer->msgh_audit.val[4] = gid_from_linux(getgid());
-	trailer->msgh_audit.val[5] = sender_pid;
+	trailer->msgh_sender.val[0] = sender->euid;
+	trailer->msgh_sender.val[1] = sender->egid;
+	trailer->msgh_audit.val[1] = sender->euid;
+	trailer->msgh_audit.val[2] = sender->egid;
+	trailer->msgh_audit.val[3] = sender->uid;
+	trailer->msgh_audit.val[4] = sender->gid;
+	trailer->msgh_audit.val[5] = sender->pid;
 	trailer->msgh_audit.val[7] = 10;
 	trailer->msgh_context = port->context;
 }
@@ -3321,7 +3342,7 @@ deliver_notification(struct ipc_port *port, const mach_msg_header_t *msg)
 
 	struct ipc_kmsg *kmsg = malloc(sizeof(*kmsg) + msg->msgh_size
 			+ sizeof(mach_msg_max_trailer_t));
-	kmsg->sender_pid = 0;
+	kmsg->sender = (struct ipc_sender){0};
 	memcpy(kmsg->header, msg, msg->msgh_size);
 	kmsg->header->msgh_bits = MACH_MSGH_BITS_SET(0,
 			MACH_MSG_TYPE_PORT_SEND_ONCE, 0,

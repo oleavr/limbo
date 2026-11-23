@@ -32,12 +32,20 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+struct ipc_sender {
+	pid_t pid;
+	uid_t uid;
+	uid_t euid;
+	gid_t gid;
+	gid_t egid;
+};
+
 struct remote_header {
 	uint32_t message_size;
 	mach_msg_type_name_t dest_disposition;
 	mach_msg_type_name_t reply_disposition;
 	uint64_t reply_global_id;
-	pid_t sender_pid;
+	struct ipc_sender sender;
 	uint32_t descriptor_count;
 	uint32_t sender_guest_id;
 };
