@@ -33,6 +33,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+struct broker_frame;
+struct broker_wire_ahead;
+
 void broker_client_ensure(void);
 void broker_client_reset(void);
 void broker_client_fork_child(void);
@@ -40,6 +43,12 @@ bool broker_client_available(void);
 bool broker_client_owns_fd(int fd);
 void broker_client_fd_moved(int from, int to);
 uint32_t broker_client_guest_id(void);
+bool broker_client_send_frame(int fd, int flags, uint32_t type,
+		const void *payload, uint32_t length, const int *fds,
+		size_t fd_count);
+int broker_client_receive_frame(int fd, struct broker_wire_ahead *ahead,
+		struct broker_frame *header, void *payload, int *fds,
+		size_t *fd_count, bool *lost);
 bool broker_client_call(uint32_t type, const void *request, uint32_t length,
 		uint32_t reply_type, void *reply, uint32_t reply_length);
 bool broker_client_carries(uint64_t length, size_t fd_count);

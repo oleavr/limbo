@@ -62,6 +62,7 @@ static int send_frame(uint32_t type, const void *payload, uint32_t length);
 static int send_parts(uint32_t type, const struct iovec *parts, int part_count,
 		const int *fds, size_t fd_count);
 static mach_msg_return_t send_result(int error);
+static int duplicate_fds(const int *fds, size_t fd_count, int *copies);
 
 static int broker_fd = -1;
 static uint32_t guest_id;
@@ -151,6 +152,75 @@ broker_client_call(uint32_t type, const void *request, uint32_t length,
 	}
 	pthread_mutex_unlock(&call_lock);
 	return answered;
+}
+
+bool
+broker_client_send_frame(int fd, int flags, uint32_t type, const void *payload,
+		uint32_t length, const int *fds, size_t fd_count)
+{
+	int *copies = malloc(sizeof(int) * (fd_count + 1));
+	int error = duplicate_fds(fds, fd_count, copies);
+	struct broker_wire_frame *frame = NULL;
+	if (error == 0) {
+		struct iovec part = {
+				.iov_base = (void *)payload, .iov_len = length};
+		frame = broker_wire_new(type, &part, 1, copies, fd_count);
+		if (frame == NULL) {
+			error = errno;
+		}
+	}
+	free(copies);
+	if (frame != NULL) {
+		error = broker_wire_send(fd, frame, flags);
+		broker_wire_free(frame);
+	}
+	errno = error;
+	return error == 0;
+}
+
+int
+broker_client_receive_frame(int fd, struct broker_wire_ahead *ahead,
+		struct broker_frame *header, void *payload, int *fds,
+		size_t *fd_count, bool *lost)
+{
+	struct broker_wire_frame *frame;
+	int received = broker_wire_receive(fd, ahead, &frame);
+	*fd_count = 0;
+	*lost = false;
+	if (received != 1) {
+		return received;
+	}
+	header->type = frame->type & ~BROKER_FRAME_OOL;
+	header->length = frame->length;
+	*lost = frame->lost
+			|| !broker_wire_read(frame, 0, payload, frame->length);
+	if (!*lost) {
+		size_t own = frame->fd_count
+				- ((frame->type & BROKER_FRAME_OOL) != 0);
+		memcpy(fds, frame->fds, sizeof(int) * own);
+		*fd_count = own;
+		memmove(frame->fds, frame->fds + own,
+				sizeof(int) * (frame->fd_count - own));
+		frame->fd_count -= own;
+	}
+	broker_wire_free(frame);
+	return 1;
+}
+
+static int
+duplicate_fds(const int *fds, size_t fd_count, int *copies)
+{
+	for (size_t i = 0; i != fd_count; i++) {
+		copies[i] = fcntl(fds[i], F_DUPFD_CLOEXEC, 0);
+		if (copies[i] == -1) {
+			int error = errno;
+			while (i-- != 0) {
+				close(copies[i]);
+			}
+			return error;
+		}
+	}
+	return 0;
 }
 
 bool
