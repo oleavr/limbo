@@ -84,6 +84,8 @@ struct route {
 struct held_name {
 	char name[LIMBO_BROKER_SERVICE_NAME_MAX];
 	struct held_send *queued;
+	bool hidden;
+	bool hides;
 };
 
 struct service {
@@ -135,6 +137,7 @@ static void drop_frame(struct broker_wire_frame *frame);
 static void settle_moved(uint64_t global_id);
 static void take_notice(
 		struct connection *conn, const struct broker_wire_frame *frame);
+static void hide_again(void);
 static struct connection *connection_for_fd(int fd);
 static struct connection *connection_for_guest(uint32_t guest_id);
 static struct service *service_named(const char *name, uint32_t domain);
@@ -199,9 +202,17 @@ read_held_names(const char *path)
 	char line[LIMBO_BROKER_SERVICE_NAME_MAX + 1];
 	while (fgets(line, sizeof(line), file) != NULL) {
 		line[strcspn(line, "\r\n")] = '\0';
-		if (line[0] != '\0' && line[0] != '#') {
-			name_made(line);
+		size_t length = strlen(line);
+		if (length == 0 || line[0] == '#') {
+			continue;
 		}
+		bool hides = length > 1 && line[length - 1] == '!';
+		if (hides) {
+			line[length - 1] = '\0';
+		}
+		struct held_name *held = name_made(line);
+		held->hides = hides;
+		held->hidden = hides;
 	}
 	fclose(file);
 }
@@ -393,6 +404,7 @@ register_service(struct connection *conn, const struct broker_register *reg)
 	send_frame(conn, BROKER_REGISTERED, &registered, sizeof(registered));
 	if (registered.holder == BROKER_NAME_FREE
 			&& registered.held_global_id != 0) {
+		held->hidden = false;
 		set_route(adopted.global_id, conn->guest_id, 0);
 		release_held_sends(held);
 	}
@@ -438,7 +450,7 @@ look_up_service(struct connection *conn, const struct broker_lookup *req)
 	struct held_name *held = held_named(req->name);
 	struct broker_lookup_reply reply = broker_names_look_up(req);
 	if (held != NULL) {
-		reply.found = true;
+		reply.found = !held->hidden;
 		reply.global_id = held_port(held);
 	}
 	send_frame(conn, BROKER_LOOKUP_REPLY, &reply, sizeof(reply));
@@ -736,7 +748,15 @@ take_notice(struct connection *conn, const struct broker_wire_frame *frame)
 			&& broker_wire_read(frame, 0, &blob, sizeof(blob))
 			&& blob.header.message_size == 0
 			&& blob.notice.kind == REMOTE_NOTICE_DEAD) {
+		bool held = false;
+		for (size_t i = 0; i != service_count && !held; i++) {
+			held = services[i].global_id == blob.notice.count
+					&& held_named(services[i].name) != NULL;
+		}
 		broker_names_forget_port(blob.notice.count);
+		if (!held) {
+			hide_again();
+		}
 	} else if (frame->inline_length >= sizeof(blob)
 			&& blob.header.message_size == 0
 			&& blob.notice.kind == REMOTE_NOTICE_RETURNED) {
@@ -749,6 +769,19 @@ take_notice(struct connection *conn, const struct broker_wire_frame *frame)
 			&& route_for(blob.notice.count)->mover_id
 					== conn->guest_id) {
 		release_held(blob.notice.count);
+	}
+}
+
+static void
+hide_again(void)
+{
+	for (size_t i = 0; i != held_count; i++) {
+		if (held_names[i].hides && !held_names[i].hidden
+				&& service_named(held_names[i].name,
+						   BROKER_DOMAIN_USER)
+						== NULL) {
+			held_names[i].hidden = true;
+		}
 	}
 }
 
@@ -853,6 +886,7 @@ remove_connection(size_t index)
 	connections[index] = connections[--connection_count];
 
 	broker_names_forget(gone.guest_id);
+	hide_again();
 	if (gone.guest_id != 0) {
 		forget_routes(gone.guest_id);
 	}

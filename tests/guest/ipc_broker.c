@@ -145,6 +145,8 @@ static const char HELD_SERVICE_NAME[] = "com.limbo.test.ipc.held";
 static const char IDLE_SERVICE_NAME[] = "com.limbo.test.ipc.idle";
 static const char LATE_SERVICE_NAME[] = "com.limbo.test.ipc.late";
 static const char ORPHAN_SERVICE_NAME[] = "com.limbo.test.ipc.orphan";
+static const char HIDDEN_SERVICE_NAME[] = "com.limbo.test.ipc.hidden";
+static const char REHIDDEN_SERVICE_NAME[] = "com.limbo.test.ipc.rehidden";
 static const mach_msg_id_t CHECK_IN = 402;
 static const mach_msg_id_t LOOK_UP = 404;
 static const char RETURNED_SERVICE_NAME[] = "com.limbo.test.ipc.returned";
@@ -204,6 +206,8 @@ static void look_up_while_it_restarts(void);
 static void send_to_idle_name(void);
 static void send_before_check_in(void);
 static void sender_gone_before_check_in(void);
+static void hidden_until_check_in(void);
+static void hidden_again_once_gone(void);
 static void serve_one(mach_port_t service);
 static void call_one(mach_port_t service);
 static long milliseconds_since(const struct timespec *start);
@@ -2464,6 +2468,8 @@ main(int argc, char *argv[])
 	send_to_idle_name();
 	send_before_check_in();
 	sender_gone_before_check_in();
+	hidden_until_check_in();
+	hidden_again_once_gone();
 	return 0;
 }
 
@@ -3090,6 +3096,42 @@ sender_gone_before_check_in(void)
 	close(told[0]);
 	CHECK(waitpid(server, &status, 0) == server && WIFEXITED(status)
 			&& WEXITSTATUS(status) == 0);
+}
+
+static void
+hidden_until_check_in(void)
+{
+	CHECK(bootstrap_call(LOOK_UP, HIDDEN_SERVICE_NAME) == MACH_PORT_NULL);
+	mach_port_t service = bootstrap_call(CHECK_IN, HIDDEN_SERVICE_NAME);
+	CHECK(service != MACH_PORT_NULL);
+	CHECK(bootstrap_call(LOOK_UP, HIDDEN_SERVICE_NAME) != MACH_PORT_NULL);
+}
+
+static void
+hidden_again_once_gone(void)
+{
+	pid_t pid = fork();
+	CHECK(pid >= 0);
+	if (pid == 0) {
+		CHECK(bootstrap_call(CHECK_IN, REHIDDEN_SERVICE_NAME)
+				!= MACH_PORT_NULL);
+		_exit(0);
+	}
+	int status;
+	waitpid(pid, &status, 0);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	mach_port_t found = MACH_PORT_NULL;
+	for (int i = 0; i < 50; i++) {
+		found = bootstrap_call(LOOK_UP, REHIDDEN_SERVICE_NAME);
+		if (found == MACH_PORT_NULL) {
+			break;
+		}
+		usleep(100000);
+	}
+	CHECK(found == MACH_PORT_NULL);
+	CHECK(bootstrap_call(CHECK_IN, REHIDDEN_SERVICE_NAME)
+			!= MACH_PORT_NULL);
+	CHECK(bootstrap_call(LOOK_UP, REHIDDEN_SERVICE_NAME) != MACH_PORT_NULL);
 }
 
 static void
