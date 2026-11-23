@@ -41,6 +41,7 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "../../broker.h"
@@ -140,6 +141,10 @@ static const char SINK_NAME[] = "com.limbo.test.ipc.sink";
 static const char KEEPER_NAME[] = "com.limbo.test.ipc.keeper";
 static const char RETURNER_NAME[] = "com.limbo.test.ipc.returner";
 static const char ANSWERED_NAME[] = "com.limbo.test.ipc.answered";
+static const char HELD_SERVICE_NAME[] = "com.limbo.test.ipc.held";
+static const char IDLE_SERVICE_NAME[] = "com.limbo.test.ipc.idle";
+static const char LATE_SERVICE_NAME[] = "com.limbo.test.ipc.late";
+static const char ORPHAN_SERVICE_NAME[] = "com.limbo.test.ipc.orphan";
 static const mach_msg_id_t CHECK_IN = 402;
 static const mach_msg_id_t LOOK_UP = 404;
 static const char RETURNED_SERVICE_NAME[] = "com.limbo.test.ipc.returned";
@@ -195,6 +200,13 @@ static void queue_moves_with_receive_right(void);
 static void send_right_outlives_mover(void);
 static void receive_right_comes_back(void);
 static void send_once_comes_back(void);
+static void look_up_while_it_restarts(void);
+static void send_to_idle_name(void);
+static void send_before_check_in(void);
+static void sender_gone_before_check_in(void);
+static void serve_one(mach_port_t service);
+static void call_one(mach_port_t service);
+static long milliseconds_since(const struct timespec *start);
 static natural_t queued_on(mach_port_t port);
 static mach_port_t receive_right(mach_port_t port);
 static void send_right(mach_port_t dest, mach_port_t right,
@@ -2448,6 +2460,10 @@ main(int argc, char *argv[])
 	receive_right_comes_back();
 	send_once_comes_back();
 	pid_suspended_guest();
+	look_up_while_it_restarts();
+	send_to_idle_name();
+	send_before_check_in();
+	sender_gone_before_check_in();
 	return 0;
 }
 
@@ -2900,4 +2916,244 @@ wait_for(int fd)
 {
 	char byte;
 	CHECK(read(fd, &byte, 1) == 1);
+}
+
+static void
+look_up_while_it_restarts(void)
+{
+	pid_t pid = fork();
+	CHECK(pid >= 0);
+	if (pid == 0) {
+		sleep(1);
+		mach_port_t service
+				= bootstrap_call(CHECK_IN, HELD_SERVICE_NAME);
+		CHECK(service != MACH_PORT_NULL);
+		serve_one(service);
+		_exit(0);
+	}
+
+	mach_port_t service = bootstrap_call(LOOK_UP, HELD_SERVICE_NAME);
+	if (service == MACH_PORT_NULL) {
+		kill(pid, SIGKILL);
+	}
+	CHECK(service != MACH_PORT_NULL);
+	call_one(service);
+
+	int status;
+	waitpid(pid, &status, 0);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
+static void
+send_to_idle_name(void)
+{
+	mach_port_t service = bootstrap_call(LOOK_UP, IDLE_SERVICE_NAME);
+	CHECK(service != MACH_PORT_NULL);
+	mach_msg_header_t request;
+	memset(&request, 0, sizeof(request));
+	request.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	request.msgh_remote_port = service;
+	request.msgh_size = sizeof(request);
+	request.msgh_id = REQUEST_ID;
+	time_t start = time(NULL);
+	kern_return_t kr = mach_msg(&request, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+			sizeof(request), 0, MACH_PORT_NULL, 300,
+			MACH_PORT_NULL);
+	CHECK(kr == MACH_MSG_SUCCESS || kr == MACH_SEND_TIMED_OUT);
+	CHECK(time(NULL) - start < 5);
+}
+
+static void
+send_before_check_in(void)
+{
+	mach_port_t answer;
+	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &answer);
+
+	pid_t pid = fork();
+	CHECK(pid >= 0);
+	if (pid == 0) {
+		sleep(1);
+		mach_port_t service
+				= bootstrap_call(CHECK_IN, LATE_SERVICE_NAME);
+		CHECK(service != MACH_PORT_NULL);
+		mach_port_t right = receive_right(service);
+		struct {
+			mach_msg_header_t Head;
+			mach_msg_trailer_t trailer;
+			char padding[64];
+		} second;
+		memset(&second, 0, sizeof(second));
+		kern_return_t kr = mach_msg(&second.Head, MACH_RCV_MSG, 0,
+				sizeof(second), service, MACH_MSG_TIMEOUT_NONE,
+				MACH_PORT_NULL);
+		CHECK(kr == MACH_MSG_SUCCESS);
+		CHECK(second.Head.msgh_id == REQUEST_ID + 1);
+		mach_msg_header_t reply;
+		memset(&reply, 0, sizeof(reply));
+		reply.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+		reply.msgh_remote_port = right;
+		reply.msgh_size = sizeof(reply);
+		reply.msgh_id = REPLY_ID;
+		kr = mach_msg(&reply, MACH_SEND_MSG, sizeof(reply), 0,
+				MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+				MACH_PORT_NULL);
+		CHECK(kr == MACH_MSG_SUCCESS);
+		_exit(0);
+	}
+
+	mach_port_t service = bootstrap_call(LOOK_UP, LATE_SERVICE_NAME);
+	CHECK(service != MACH_PORT_NULL);
+	struct timespec start;
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	send_right(service, answer, MACH_MSG_TYPE_MAKE_SEND);
+	mach_msg_header_t request;
+	memset(&request, 0, sizeof(request));
+	request.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	request.msgh_remote_port = service;
+	request.msgh_size = sizeof(request);
+	request.msgh_id = REQUEST_ID + 1;
+	kern_return_t kr = mach_msg(&request, MACH_SEND_MSG, sizeof(request), 0,
+			MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	CHECK(kr == MACH_MSG_SUCCESS);
+	CHECK(milliseconds_since(&start) < 500);
+
+	struct {
+		mach_msg_header_t Head;
+		mach_msg_trailer_t trailer;
+		char padding[64];
+	} reply;
+	memset(&reply, 0, sizeof(reply));
+	kr = mach_msg(&reply.Head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			sizeof(reply), answer, 10000, MACH_PORT_NULL);
+	CHECK(kr == MACH_MSG_SUCCESS);
+	CHECK(reply.Head.msgh_id == REPLY_ID);
+
+	int status;
+	waitpid(pid, &status, 0);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
+static void
+sender_gone_before_check_in(void)
+{
+	int told[2];
+	CHECK(pipe(told) == 0);
+	pid_t server = fork();
+	CHECK(server >= 0);
+	if (server == 0) {
+		close(told[0]);
+		sleep(1);
+		mach_port_t service
+				= bootstrap_call(CHECK_IN, ORPHAN_SERVICE_NAME);
+		CHECK(service != MACH_PORT_NULL);
+		struct {
+			mach_msg_header_t Head;
+			mach_msg_trailer_t trailer;
+			char padding[64];
+		} request;
+		memset(&request, 0, sizeof(request));
+		CHECK(mach_msg(&request.Head, MACH_RCV_MSG | MACH_RCV_TIMEOUT,
+				      0, sizeof(request), service, 10000,
+				      MACH_PORT_NULL)
+				== MACH_MSG_SUCCESS);
+		CHECK(request.Head.msgh_id == REQUEST_ID + 2);
+		char byte = 1;
+		CHECK(write(told[1], &byte, 1) == 1);
+		_exit(0);
+	}
+	close(told[1]);
+	pid_t sender = fork();
+	CHECK(sender >= 0);
+	if (sender == 0) {
+		mach_port_t service
+				= bootstrap_call(LOOK_UP, ORPHAN_SERVICE_NAME);
+		CHECK(service != MACH_PORT_NULL);
+		mach_msg_header_t request;
+		memset(&request, 0, sizeof(request));
+		request.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+		request.msgh_remote_port = service;
+		request.msgh_size = sizeof(request);
+		request.msgh_id = REQUEST_ID + 2;
+		CHECK(mach_msg(&request, MACH_SEND_MSG, sizeof(request), 0,
+				      MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+				      MACH_PORT_NULL)
+				== MACH_MSG_SUCCESS);
+		exit(0);
+	}
+	int status;
+	CHECK(waitpid(sender, &status, 0) == sender && WIFEXITED(status)
+			&& WEXITSTATUS(status) == 0);
+	struct pollfd readable = {.fd = told[0], .events = POLLIN};
+	CHECK(poll(&readable, 1, 15000) == 1);
+	char byte = 0;
+	CHECK(read(told[0], &byte, 1) == 1 && byte == 1);
+	close(told[0]);
+	CHECK(waitpid(server, &status, 0) == server && WIFEXITED(status)
+			&& WEXITSTATUS(status) == 0);
+}
+
+static void
+serve_one(mach_port_t service)
+{
+	struct {
+		mach_msg_header_t Head;
+		mach_msg_trailer_t trailer;
+		char padding[64];
+	} request;
+	memset(&request, 0, sizeof(request));
+	kern_return_t kr = mach_msg(&request.Head, MACH_RCV_MSG, 0,
+			sizeof(request), service, MACH_MSG_TIMEOUT_NONE,
+			MACH_PORT_NULL);
+	CHECK(kr == MACH_MSG_SUCCESS);
+	CHECK(request.Head.msgh_id == REQUEST_ID);
+
+	mach_msg_header_t reply;
+	memset(&reply, 0, sizeof(reply));
+	reply.msgh_bits = MACH_MSGH_BITS(
+			MACH_MSGH_BITS_REMOTE(request.Head.msgh_bits), 0);
+	reply.msgh_remote_port = request.Head.msgh_remote_port;
+	reply.msgh_size = sizeof(reply);
+	reply.msgh_id = REPLY_ID;
+	kr = mach_msg(&reply, MACH_SEND_MSG, sizeof(reply), 0, MACH_PORT_NULL,
+			MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	CHECK(kr == MACH_MSG_SUCCESS);
+}
+
+static void
+call_one(mach_port_t service)
+{
+	mach_port_t reply_port;
+	mach_port_allocate(
+			mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &reply_port);
+	union {
+		struct {
+			mach_msg_header_t Head;
+		} request;
+		struct {
+			mach_msg_header_t Head;
+			mach_msg_trailer_t trailer;
+			char padding[64];
+		} reply;
+	} message;
+	memset(&message, 0, sizeof(message));
+	message.request.Head.msgh_bits = MACH_MSGH_BITS(
+			MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+	message.request.Head.msgh_remote_port = service;
+	message.request.Head.msgh_local_port = reply_port;
+	message.request.Head.msgh_size = sizeof(message.request);
+	message.request.Head.msgh_id = REQUEST_ID;
+	kern_return_t kr = mach_msg(&message.request.Head,
+			MACH_SEND_MSG | MACH_RCV_MSG, sizeof(message.request),
+			sizeof(message), reply_port, 8000, MACH_PORT_NULL);
+	CHECK(kr == MACH_MSG_SUCCESS);
+	CHECK(message.reply.Head.msgh_id == REPLY_ID);
+}
+
+static long
+milliseconds_since(const struct timespec *start)
+{
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return (now.tv_sec - start->tv_sec) * 1000
+			+ (now.tv_nsec - start->tv_nsec) / 1000000;
 }

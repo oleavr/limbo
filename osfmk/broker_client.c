@@ -381,9 +381,18 @@ dispatch_frame(const struct broker_frame *header, const void *payload,
 	switch (header->type) {
 	case BROKER_WELCOME:
 	case BROKER_LOOKUP_REPLY:
-	case BROKER_REGISTERED:
 		take_reply(header, payload);
 		break;
+	case BROKER_REGISTERED: {
+		const struct broker_registered *registered = payload;
+		if (registered->holder == BROKER_NAME_FREE
+				&& registered->held_global_id != 0) {
+			ipc_names_keep(registered->global_id,
+					registered->held_global_id);
+		}
+		take_reply(header, payload);
+		break;
+	}
 	case BROKER_MOVED:
 		ipc_remote_port_moved(((const struct broker_moved *)payload)
 						      ->global_id,

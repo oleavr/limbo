@@ -91,6 +91,9 @@ enum broker_name_holder {
 
 struct broker_registered {
 	uint32_t holder;
+	uint32_t reserved;
+	uint64_t global_id;
+	uint64_t held_global_id;
 };
 
 struct broker_lookup {
