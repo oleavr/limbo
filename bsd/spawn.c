@@ -45,6 +45,7 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
+#include "bsd/persona.h"
 #include "bsd/responsibility.h"
 #include "fs/acl.h"
 #include "handler.h"
@@ -128,6 +129,18 @@ struct darwin_quarantine_spawn {
 	uint32_t reserved[3];
 };
 
+#define POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE 0x1
+
+struct darwin_persona_info {
+	uint32_t pspi_id;
+	uint32_t pspi_flags;
+	uint32_t pspi_uid;
+	uint32_t pspi_gid;
+	uint32_t pspi_ngroups;
+	uint32_t pspi_groups[16];
+	uint32_t pspi_gmuid;
+};
+
 struct darwin_spawn_args {
 	size_t attr_size;
 	const struct darwin_spawnattr *attrp;
@@ -137,6 +150,10 @@ struct darwin_spawn_args {
 	const void *port_actions;
 	size_t mac_extensions_size;
 	const struct darwin_mac_extensions *mac_extensions;
+	size_t coal_info_size;
+	const void *coal_info;
+	size_t persona_info_size;
+	const struct darwin_persona_info *persona_info;
 };
 
 static void convert_attr(
@@ -153,7 +170,10 @@ static int read_quarantine(const struct darwin_spawn_args *args,
 		enum responsibility_told *told);
 static int spawn_exec(const char *path, const struct darwin_spawnattr *attrp,
 		const struct darwin_file_actions *file_actions,
+		const struct darwin_persona_info *persona,
 		enum responsibility_told told, char **argv, char **envp);
+static const struct darwin_persona_info *spawn_persona(
+		const struct darwin_spawn_args *args);
 
 int
 sys_posix_spawn(void *pid, const char *path, void *adesc, char **argv,
@@ -164,13 +184,21 @@ sys_posix_spawn(void *pid, const char *path, void *adesc, char **argv,
 			= (args != NULL) ? args->attrp : NULL;
 	const struct darwin_file_actions *file_actions
 			= (args != NULL) ? args->file_actions : NULL;
+	const struct darwin_persona_info *persona = spawn_persona(args);
+	if (persona != NULL) {
+		int checked = persona_spawn_check(persona->pspi_id);
+		if (checked != 0) {
+			return checked;
+		}
+	}
 	enum responsibility_told told = RESPONSIBILITY_INHERITED;
 	int invalid = args != NULL ? read_quarantine(args, &told) : 0;
 	if (invalid != 0) {
 		return invalid;
 	}
 	if (attrp != NULL && (attrp->psa_flags & _POSIX_SPAWN_SETEXEC)) {
-		return spawn_exec(path, attrp, file_actions, told, argv, envp);
+		return spawn_exec(path, attrp, file_actions, persona, told,
+				argv, envp);
 	}
 
 	posix_spawnattr_t attr;
@@ -213,7 +241,25 @@ sys_posix_spawn(void *pid, const char *path, void *adesc, char **argv,
 	if (pid != NULL) {
 		*(pid_t *)pid = child;
 	}
+	if (persona != NULL) {
+		persona_adopt(child, persona->pspi_id);
+	} else {
+		persona_inherit(child, getpid());
+	}
 	return 0;
+}
+
+static const struct darwin_persona_info *
+spawn_persona(const struct darwin_spawn_args *args)
+{
+	if (args == NULL || args->persona_info == NULL
+			|| args->persona_info_size
+					< sizeof(struct darwin_persona_info)
+			|| !(args->persona_info->pspi_flags
+					& POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE)) {
+		return NULL;
+	}
+	return args->persona_info;
 }
 
 static int
@@ -270,6 +316,7 @@ read_quarantine(const struct darwin_spawn_args *args,
 static int
 spawn_exec(const char *path, const struct darwin_spawnattr *attrp,
 		const struct darwin_file_actions *file_actions,
+		const struct darwin_persona_info *persona,
 		enum responsibility_told told, char **argv, char **envp)
 {
 	if (attrp->psa_flags & _POSIX_SPAWN_START_SUSPENDED) {
@@ -299,6 +346,9 @@ spawn_exec(const char *path, const struct darwin_spawnattr *attrp,
 		sigdelset(&set, SIGSEGV);
 		sigdelset(&set, SIGBUS);
 		sigprocmask(SIG_SETMASK, &set, NULL);
+	}
+	if (persona != NULL) {
+		persona_adopt(getpid(), persona->pspi_id);
 	}
 
 	char buffer[PATH_MAX];

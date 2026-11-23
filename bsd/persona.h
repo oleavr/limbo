@@ -32,3 +32,9 @@
 
 int persona_syscall(uint32_t operation, uint32_t flags, void *info, void *id,
 		size_t *idlen, char *path);
+
+uint32_t persona_of(int32_t pid);
+void persona_inherit(int32_t child, int32_t parent);
+int persona_spawn_check(uint32_t id);
+int persona_adopt(int32_t pid, uint32_t id);
+int persona_join_type(int32_t type, uint32_t uid, uint32_t *joined);

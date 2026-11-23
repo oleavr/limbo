@@ -37,6 +37,7 @@
 #include "bsd/boot_state.h"
 #include "bsd/codesign.h"
 #include "bsd/persona.h"
+#include "bsd/process.h"
 #include "bsd/xnu-errno.h"
 
 #define PERSONA_OP_ALLOC              1
@@ -92,6 +93,30 @@ struct personas {
 static struct personas personas;
 static struct boot_state personas_state
 		= BOOT_STATE_INIT(PERSONAS_PATH, PERSONAS_MAGIC, &personas);
+
+#define MEMBERS_PATH  "/private/var/run/limbo-persona-members"
+#define MEMBERS_MAGIC 0x4d4e5250
+#define MEMBERS_MAX   2048
+
+struct member {
+	int32_t pid;
+	uint32_t persona;
+	uint64_t start_ticks;
+};
+
+struct members {
+	struct boot_state_header header;
+	struct member entries[MEMBERS_MAX];
+};
+
+static struct members members;
+static struct boot_state members_state
+		= BOOT_STATE_INIT(MEMBERS_PATH, MEMBERS_MAGIC, &members);
+
+static int describe_process(int32_t pid, struct kpersona_info *info);
+static int set_persona_of(int32_t pid, uint32_t persona);
+static bool member_current(const struct member *entry);
+static bool persona_exists(uint32_t id);
 
 static bool
 may_manage(void)
@@ -230,18 +255,24 @@ persona_syscall(uint32_t operation, uint32_t flags, void *info, void *id,
 {
 	(void)flags;
 	switch (operation) {
-	case PERSONA_OP_GET:
-		return _ESRCH;
+	case PERSONA_OP_GET: {
+		uint32_t persona = persona_of(getpid());
+		if (persona == PERSONA_ID_NONE) {
+			return _ESRCH;
+		}
+		*(uint32_t *)id = persona;
+		return 0;
+	}
 	case PERSONA_OP_PIDINFO:
 		if (*(int32_t *)id != getpid() && !may_read()) {
 			return _EPERM;
 		}
-		return _ESRCH;
+		return describe_process(*(int32_t *)id, info);
 	case PERSONA_OP_PIDINFO_AUDIT_TOKEN:
 		if (!may_read()) {
 			return _EPERM;
 		}
-		return _ESRCH;
+		return describe_process(((int32_t *)id)[5], info);
 	case PERSONA_OP_ALLOC:
 	case PERSONA_OP_PALLOC:
 	case PERSONA_OP_DEALLOC:
@@ -311,4 +342,158 @@ persona_syscall(uint32_t operation, uint32_t flags, void *info, void *id,
 	}
 	boot_state_end(&personas_state, changed);
 	return result;
+}
+
+uint32_t
+persona_of(int32_t pid)
+{
+	const struct members *table = boot_state_begin(&members_state);
+	if (table == NULL) {
+		return PERSONA_ID_NONE;
+	}
+	uint32_t persona = PERSONA_ID_NONE;
+	for (int i = 0; i != MEMBERS_MAX; i++) {
+		const struct member *entry = &table->entries[i];
+		if (entry->pid == pid && member_current(entry)) {
+			persona = entry->persona;
+			break;
+		}
+	}
+	boot_state_end(&members_state, false);
+	return persona;
+}
+
+void
+persona_inherit(int32_t child, int32_t parent)
+{
+	uint32_t persona = persona_of(parent);
+	if (persona != PERSONA_ID_NONE) {
+		set_persona_of(child, persona);
+	}
+	boot_state_close(&members_state);
+}
+
+int
+persona_spawn_check(uint32_t id)
+{
+	if (!may_manage()) {
+		return _EPERM;
+	}
+	return persona_exists(id) ? 0 : _ESRCH;
+}
+
+int
+persona_adopt(int32_t pid, uint32_t id)
+{
+	return set_persona_of(pid, id);
+}
+
+int
+persona_join_type(int32_t type, uint32_t uid, uint32_t *joined)
+{
+	struct personas *table = boot_state_begin(&personas_state);
+	if (table == NULL) {
+		return _ESRCH;
+	}
+	uint32_t chosen = PERSONA_ID_NONE;
+	for (int i = 0; i != PERSONAS_MAX; i++) {
+		const struct persona *persona = &table->entries[i];
+		if (persona->used && persona->type == type
+				&& persona->uid == uid) {
+			chosen = persona->id;
+			break;
+		}
+	}
+	boot_state_end(&personas_state, false);
+	if (chosen == PERSONA_ID_NONE) {
+		return _ESRCH;
+	}
+	*joined = chosen;
+	return set_persona_of(getpid(), chosen);
+}
+
+static int
+describe_process(int32_t pid, struct kpersona_info *info)
+{
+	uint32_t id = persona_of(pid);
+	if (id == PERSONA_ID_NONE) {
+		return _ESRCH;
+	}
+	struct personas *table = boot_state_begin(&personas_state);
+	if (table == NULL) {
+		return _ESRCH;
+	}
+	const struct persona *persona = persona_by_id(table, id);
+	int result = _ESRCH;
+	if (persona != NULL
+			&& (info->persona_info_version == PERSONA_INFO_V1
+					|| info->persona_info_version
+							== PERSONA_INFO_V2)) {
+		describe(persona, info);
+		result = 0;
+	} else if (persona != NULL) {
+		result = _EINVAL;
+	}
+	boot_state_end(&personas_state, false);
+	return result;
+}
+
+static int
+set_persona_of(int32_t pid, uint32_t persona)
+{
+	struct process self;
+	if (process_lookup(pid, &self) != 0) {
+		return _ESRCH;
+	}
+	struct members *table = boot_state_begin(&members_state);
+	if (table == NULL) {
+		return _EPERM;
+	}
+	struct member *slot = NULL;
+	for (int i = 0; i != MEMBERS_MAX && slot == NULL; i++) {
+		if (table->entries[i].pid == self.pid) {
+			slot = &table->entries[i];
+		}
+	}
+	for (int i = 0; i != MEMBERS_MAX && slot == NULL; i++) {
+		if (!member_current(&table->entries[i])) {
+			slot = &table->entries[i];
+		}
+	}
+	int result = 0;
+	if (persona == PERSONA_ID_NONE) {
+		if (slot != NULL && slot->pid == self.pid) {
+			*slot = (struct member){0};
+		}
+	} else if (slot == NULL) {
+		result = _ENOSPC;
+	} else {
+		*slot = (struct member){
+				.pid = self.pid,
+				.persona = persona,
+				.start_ticks = self.start_ticks,
+		};
+	}
+	boot_state_end(&members_state, result == 0);
+	return result;
+}
+
+static bool
+member_current(const struct member *entry)
+{
+	struct process process;
+	return entry->pid != 0 && process_lookup(entry->pid, &process) == 0
+			&& process.start_ticks == entry->start_ticks;
+}
+
+static bool
+persona_exists(uint32_t id)
+{
+	struct personas *table = boot_state_begin(&personas_state);
+	if (table == NULL) {
+		return false;
+	}
+	bool found = persona_by_id(table, id) != NULL;
+	boot_state_end(&personas_state, false);
+	return found;
 }
