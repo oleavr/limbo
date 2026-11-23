@@ -91,6 +91,7 @@ struct ipc_port {
 	mach_port_context_t context;
 	uint64_t global_id;
 	bool remote;
+	bool held;
 	uint32_t *sender_guests;
 	uint64_t *sender_grants;
 	uint32_t sender_guest_count;
@@ -127,6 +128,7 @@ struct pending_notice {
 	mach_port_mscount_t mscount;
 	uint64_t global_id;
 	struct remote_notice notice;
+	struct ipc_kmsg *kmsg;
 };
 
 struct remote_send_once {
@@ -241,6 +243,7 @@ static struct ipc_port *kobjects[IPC_KOBJECT_VOUCHER + 1];
 static uint32_t export_counter;
 static struct moved_away *moved_aways;
 static struct moved_away *outliving_ports;
+static struct moved_away *returned_ports;
 struct guest_pid {
 	uint32_t guest_id;
 	int32_t pid;
@@ -264,6 +267,7 @@ static mach_msg_return_t remote_send(mach_msg_header_t *header,
 		mach_msg_size_t size, ipc_side_t sender,
 		const struct ipc_sender *identity, uint64_t dest_global_id);
 static void finish_moves(struct moved_port *queued, bool sent);
+static void send_queued(struct ipc_kmsg *kmsg, uint64_t global_id);
 static void return_ports(uint64_t global_id, uint32_t guest_id);
 static void return_port(uint64_t global_id, struct ipc_port *notify);
 static bool port_is_gone(uint64_t global_id);
@@ -412,6 +416,7 @@ static void wake_all_waiters(void);
 static void write_trailer(mach_msg_header_t *msg, struct ipc_port *port,
 		const struct ipc_sender *sender);
 static void flush_notices(void);
+static void send_returned(struct ipc_kmsg *kmsg, uint64_t global_id);
 static void notify_port_deleted(struct ipc_port *notify, mach_port_name_t name);
 static void notify_send_possible(
 		struct ipc_port *notify, mach_port_name_t name);
@@ -437,6 +442,7 @@ static kern_return_t request_dead_name(mach_port_name_t name, mach_msg_id_t id,
 		mach_port_mscount_t sync, mach_port_name_t notify,
 		struct ipc_port **replaced);
 static void destroy_receive_right(struct ipc_entry *entry);
+static void return_held(struct ipc_port *port, struct ipc_kmsg *queued);
 static void queue_dead_name_notification(struct ipc_entry *entry);
 static void destroy_rights(mach_msg_header_t *header);
 static void destroy_right(mach_port_name_t name, mach_msg_type_name_t type);
@@ -1091,24 +1097,12 @@ finish_moves(struct moved_port *queued, bool sent)
 		while (move->messages != NULL) {
 			struct ipc_kmsg *kmsg = move->messages;
 			move->messages = kmsg->next;
-			mach_msg_header_t *header = kmsg->header;
 			if (!sent) {
-				destroy_rights(header);
+				destroy_rights(kmsg->header);
 				free(kmsg);
 				continue;
 			}
-			mach_msg_bits_t bits = header->msgh_bits;
-			header->msgh_bits = MACH_MSGH_BITS_SET(
-					MACH_MSGH_BITS_LOCAL(bits),
-					MACH_MSGH_BITS_REMOTE(bits), 0,
-					bits & MACH_MSGH_BITS_COMPLEX);
-			header->msgh_local_port = header->msgh_remote_port;
-			header->msgh_remote_port = MACH_PORT_NULL;
-			release_out_of_line(header);
-			remote_send(header, header->msgh_size, IPC_USER,
-					&kmsg->sender, move->global_id);
-			pthread_mutex_lock(&lock);
-			free(kmsg);
+			send_queued(kmsg, move->global_id);
 		}
 		if (sent) {
 			queue_notice((struct pending_notice){
@@ -1122,6 +1116,23 @@ finish_moves(struct moved_port *queued, bool sent)
 		}
 		free(move);
 	}
+}
+
+static void
+send_queued(struct ipc_kmsg *kmsg, uint64_t global_id)
+{
+	mach_msg_header_t *header = kmsg->header;
+	mach_msg_bits_t bits = header->msgh_bits;
+	header->msgh_bits = MACH_MSGH_BITS_SET(MACH_MSGH_BITS_LOCAL(bits),
+			MACH_MSGH_BITS_REMOTE(bits), 0,
+			bits & MACH_MSGH_BITS_COMPLEX);
+	header->msgh_local_port = header->msgh_remote_port;
+	header->msgh_remote_port = MACH_PORT_NULL;
+	release_out_of_line(header);
+	remote_send(header, header->msgh_size, IPC_USER, &kmsg->sender,
+			global_id);
+	pthread_mutex_lock(&lock);
+	free(kmsg);
 }
 
 static void
@@ -2124,10 +2135,11 @@ deliver(uint64_t dest_global_id, const struct broker_sender *sender,
 		return;
 	}
 	pthread_mutex_lock(&lock);
-	bool moved = !lost && port_for_global_id(dest_global_id) == NULL
-			&& moved_away(moved_aways, dest_global_id);
+	bool gone = !lost && port_for_global_id(dest_global_id) == NULL;
+	bool moved = gone && moved_away(moved_aways, dest_global_id);
+	bool returned = gone && moved_away(returned_ports, dest_global_id);
 	pthread_mutex_unlock(&lock);
-	if (moved
+	if ((moved || returned)
 			&& forward_frame(dest_global_id, blob, length, fds,
 					fd_count)) {
 		return;
@@ -3051,6 +3063,7 @@ ipc_names_keep(uint64_t global_id, uint64_t held_global_id)
 	struct ipc_port *port = port_for_global_id(global_id);
 	if (port != NULL) {
 		port->global_id = held_global_id;
+		port->held = true;
 	}
 	pthread_mutex_unlock(&lock);
 }
@@ -3876,11 +3889,17 @@ flush_notices(void)
 	pthread_mutex_unlock(&lock);
 	for (struct pending_notice *notice = notices; notice != NULL;
 			notice = notice->next) {
-		if (notice->id == 0) {
+		if (notice->id == 0 && notice->kmsg == NULL) {
 			send_remote_notice(notice);
 		}
 	}
 	pthread_mutex_unlock(&notice_order);
+	for (struct pending_notice *notice = notices; notice != NULL;
+			notice = notice->next) {
+		if (notice->kmsg != NULL) {
+			send_returned(notice->kmsg, notice->global_id);
+		}
+	}
 
 	while (notices != NULL) {
 		struct pending_notice *notice = notices;
@@ -3907,6 +3926,14 @@ flush_notices(void)
 		}
 		free(notice);
 	}
+}
+
+static void
+send_returned(struct ipc_kmsg *kmsg, uint64_t global_id)
+{
+	pthread_mutex_lock(&lock);
+	send_queued(kmsg, global_id);
+	pthread_mutex_unlock(&lock);
 }
 
 static void
@@ -4566,6 +4593,10 @@ destroy_receive_right(struct ipc_entry *entry)
 	port_leave_all_sets(port);
 	destroy_requests(port);
 	tell_holders_dead(port);
+	if (port->held) {
+		return_held(port, queued);
+		queued = NULL;
+	}
 
 	entry->type &= ~MACH_PORT_TYPE_RECEIVE;
 	if (entry->type & (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE)) {
@@ -4582,6 +4613,27 @@ destroy_receive_right(struct ipc_entry *entry)
 		queued = kmsg->next;
 		destroy_rights(kmsg->header);
 		free(kmsg);
+	}
+}
+
+static void
+return_held(struct ipc_port *port, struct ipc_kmsg *queued)
+{
+	if (!moved_away(returned_ports, port->global_id)) {
+		struct moved_away *returned = malloc(sizeof(*returned));
+		*returned = (struct moved_away){
+				.next = returned_ports,
+				.global_id = port->global_id,
+		};
+		returned_ports = returned;
+	}
+	while (queued != NULL) {
+		struct ipc_kmsg *kmsg = queued;
+		queued = kmsg->next;
+		queue_notice((struct pending_notice){
+				.global_id = port->global_id,
+				.kmsg = kmsg,
+		});
 	}
 }
 

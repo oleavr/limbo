@@ -48,7 +48,8 @@ def start_broker(broker, socket_path):
     held_names.write_text("com.limbo.test.ipc.held\ncom.limbo.test.ipc.idle\n"
                           "com.limbo.test.ipc.late\ncom.limbo.test.ipc.orphan\n"
                           "com.limbo.test.ipc.hidden!\n"
-                          "com.limbo.test.ipc.rehidden!\n")
+                          "com.limbo.test.ipc.rehidden!\n"
+                          "com.limbo.test.ipc.returned\n")
     process = subprocess.Popen([broker, str(socket_path), str(held_names)])
     wait_for_broker(socket_path)
     os.environ["LIMBO_BROKER"] = str(socket_path)
