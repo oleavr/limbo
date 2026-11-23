@@ -35,15 +35,16 @@
 #include <sys/uio.h>
 
 #define LIMBO_BROKER_SOCKET_ENV "LIMBO_BROKER"
-#define LIMBO_LAUNCHD_CONTROL_SUFFIX  ".launchd"
+#define LIMBO_LAUNCHD_CONTROL_SUFFIX   ".launchd"
+#define LIMBO_LAUNCHD_SESSION_TYPE_ENV "LIMBO_LAUNCHD_SESSION_TYPE"
 #define LIMBO_LAUNCHD                 "limbo-launchd"
 #define LIMBO_BROKER_SERVICE_NAME_MAX 128
 #define BROKER_GUEST_ID               0
-#define BROKER_HELD_SYSTEM            0x80000000u
-#define BROKER_HELD_ACCOUNT           0x40000000u
-#define BROKER_HELD_UID_SHIFT         20
-#define BROKER_HELD_UID_MASK          0x3ffu
-#define BROKER_HELD_INDEX_MASK        0xfffffu
+#define BROKER_HELD_SYSTEM             0x80000000u
+#define BROKER_HELD_ACCOUNT            0x40000000u
+#define BROKER_HELD_UID_SHIFT          20
+#define BROKER_HELD_UID_MASK           0x3ffu
+#define BROKER_HELD_INDEX_MASK         0xfffffu
 
 #define BROKER_FRAME_MAX    (1 << 20)
 #define BROKER_INLINE_MAX   (64 * 1024)
