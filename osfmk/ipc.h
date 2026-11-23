@@ -89,6 +89,7 @@ struct ipc_kobject_ops {
 	bool (*describe)(void *kobject, struct ipc_export *out);
 	void *(*adopt)(const void *record, const int *fds, size_t fd_count);
 	void (*destroy)(void *kobject);
+	bool (*serve)(void *kobject, mach_msg_header_t *request, bool remote);
 };
 
 #define IPC_KOBJECT_OPS(name)                                                  \
