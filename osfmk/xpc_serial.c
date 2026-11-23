@@ -35,6 +35,10 @@
 static bool count_ports(struct xpc_object *cursor, uint32_t type,
 		uint32_t depth, uint32_t *count);
 static bool skip_object(struct xpc_object *cursor, uint32_t type);
+static bool get_container(const struct xpc_object *dictionary, const char *key,
+		uint32_t container_type, struct xpc_object *container);
+static bool open_container(const struct xpc_object *container, uint32_t type,
+		struct xpc_object *cursor, uint32_t *count);
 static bool read_u32(struct xpc_object *cursor, uint32_t *value);
 static bool read_key(struct xpc_object *cursor, const char **key);
 static bool skip_bytes(struct xpc_object *cursor, uint64_t length);
@@ -69,6 +73,19 @@ xpc_serial_payload(const mach_msg_header_t *message, struct xpc_object *payload)
 					: sizeof(mach_msg_ool_descriptor64_t);
 			if (end - cursor < (ptrdiff_t)size) {
 				return false;
+			}
+			const mach_msg_ool_descriptor64_t *ool
+					= (const mach_msg_ool_descriptor64_t *)
+							cursor;
+			if (ool->type == MACH_MSG_OOL_DESCRIPTOR
+					&& ool->size >= 2 * sizeof(uint32_t)
+					&& *(const uint32_t *)ool->address
+							== XPC_SERIAL_MAGIC) {
+				payload->data = (const uint8_t *)ool->address
+						+ 2 * sizeof(uint32_t);
+				payload->end = (const uint8_t *)ool->address
+						+ ool->size;
+				return true;
 			}
 			cursor += size;
 		}
@@ -328,7 +345,7 @@ xpc_encoder_init(struct xpc_encoder *encoder, void *buffer, uint32_t capacity)
 void
 xpc_encoder_begin_dictionary(struct xpc_encoder *encoder, const char *key)
 {
-	if (encoder->depth != 0) {
+	if (key != NULL || encoder->depth != 0) {
 		append_key(encoder, key);
 	}
 	begin_container(encoder, XPC_SERIAL_DICTIONARY);
@@ -418,6 +435,16 @@ xpc_serial_reply(const mach_msg_header_t *request,
 		const struct xpc_encoder *encoder,
 		mach_msg_return_t (*send)(mach_msg_header_t *message))
 {
+	return xpc_serial_send(request->msgh_remote_port,
+			MACH_MSGH_BITS_REMOTE(request->msgh_bits), encoder,
+			send);
+}
+
+mach_msg_return_t
+xpc_serial_send(mach_port_name_t port, mach_msg_type_name_t disposition,
+		const struct xpc_encoder *encoder,
+		mach_msg_return_t (*send)(mach_msg_header_t *message))
+{
 	size_t descriptors = encoder->port_count == 0 ? 0
 						      : sizeof(mach_msg_body_t)
 					+ encoder->port_count
@@ -426,12 +453,9 @@ xpc_serial_reply(const mach_msg_header_t *request,
 	uint8_t *storage = malloc(size);
 	mach_msg_header_t *reply = (mach_msg_header_t *)storage;
 	*reply = (mach_msg_header_t){
-			.msgh_bits
-			= MACH_MSGH_BITS(MACH_MSGH_BITS_REMOTE(
-							 request->msgh_bits),
-					0),
+			.msgh_bits = MACH_MSGH_BITS(disposition, 0),
 			.msgh_size = size,
-			.msgh_remote_port = request->msgh_remote_port,
+			.msgh_remote_port = port,
 			.msgh_id = XPC_REPLY_ID,
 	};
 	uint8_t *cursor = (uint8_t *)(reply + 1);
@@ -477,7 +501,9 @@ static void
 append_key(struct xpc_encoder *encoder, const char *key)
 {
 	encoder->counts[encoder->depth - 1]++;
-	append_bytes(encoder, key, strlen(key) + 1);
+	if (key != NULL) {
+		append_bytes(encoder, key, strlen(key) + 1);
+	}
 }
 
 static void
@@ -497,4 +523,258 @@ append_bytes(struct xpc_encoder *encoder, const void *bytes, uint32_t length)
 	memcpy(encoder->buffer + encoder->offset, bytes, length);
 	memset(encoder->buffer + encoder->offset + length, 0, padded - length);
 	encoder->offset += padded;
+}
+
+bool
+xpc_serial_get_bool(const struct xpc_object *dictionary, const char *key,
+		bool *value)
+{
+	uint32_t type;
+	struct xpc_object object;
+	uint32_t word;
+	if (!xpc_serial_find(dictionary, key, &type, &object)
+			|| type != XPC_SERIAL_BOOL
+			|| !read_u32(&object, &word)) {
+		return false;
+	}
+	*value = word != 0;
+	return true;
+}
+
+bool
+xpc_serial_get_uuid(const struct xpc_object *dictionary, const char *key,
+		uint8_t value[16])
+{
+	uint32_t type;
+	struct xpc_object object;
+	if (!xpc_serial_find(dictionary, key, &type, &object)
+			|| type != XPC_SERIAL_UUID
+			|| object.end - object.data < 16) {
+		return false;
+	}
+	memcpy(value, object.data, 16);
+	return true;
+}
+
+bool
+xpc_serial_get_dictionary(const struct xpc_object *dictionary, const char *key,
+		struct xpc_object *value)
+{
+	return get_container(dictionary, key, XPC_SERIAL_DICTIONARY, value);
+}
+
+bool
+xpc_serial_get_array(const struct xpc_object *dictionary, const char *key,
+		struct xpc_object *value)
+{
+	return get_container(dictionary, key, XPC_SERIAL_ARRAY, value);
+}
+
+static bool
+get_container(const struct xpc_object *dictionary, const char *key,
+		uint32_t container_type, struct xpc_object *container)
+{
+	uint32_t type;
+	struct xpc_object value;
+	if (!xpc_serial_find(dictionary, key, &type, &value)
+			|| type != container_type) {
+		return false;
+	}
+	*container = (struct xpc_object){
+			.data = value.data - sizeof(uint32_t),
+			.end = value.end,
+	};
+	return true;
+}
+
+void
+xpc_serial_array_apply_strings(const struct xpc_object *array,
+		bool (*apply)(void *context, const char *string), void *context)
+{
+	struct xpc_object cursor;
+	uint32_t count;
+	if (!open_container(array, XPC_SERIAL_ARRAY, &cursor, &count)) {
+		return;
+	}
+	for (uint32_t i = 0; i < count; i++) {
+		uint32_t type;
+		if (!read_u32(&cursor, &type)) {
+			return;
+		}
+		struct xpc_object string = cursor;
+		uint32_t length;
+		if (type == XPC_SERIAL_STRING && read_u32(&string, &length)
+				&& length != 0
+				&& length <= (uint64_t)(string.end
+						   - string.data)
+				&& string.data[length - 1] == '\0'
+				&& !apply(context, (const char *)string.data)) {
+			return;
+		}
+		if (!skip_object(&cursor, type)) {
+			return;
+		}
+	}
+}
+
+bool
+xpc_serial_array_get_int(
+		const struct xpc_object *array, uint32_t index, uint64_t *value)
+{
+	struct xpc_object cursor;
+	uint32_t count;
+	if (!open_container(array, XPC_SERIAL_ARRAY, &cursor, &count)) {
+		return false;
+	}
+	for (uint32_t i = 0; i < count; i++) {
+		uint32_t type;
+		if (!read_u32(&cursor, &type)) {
+			return false;
+		}
+		if (i == index) {
+			if ((type != XPC_SERIAL_INT64
+					    && type != XPC_SERIAL_UINT64)
+					|| cursor.end - cursor.data
+							< (ptrdiff_t)sizeof(
+									*value)) {
+				return false;
+			}
+			memcpy(value, cursor.data, sizeof(*value));
+			return true;
+		}
+		if (!skip_object(&cursor, type)) {
+			return false;
+		}
+	}
+	return false;
+}
+
+void
+xpc_serial_dictionary_apply_strings(const struct xpc_object *dictionary,
+		void (*apply)(void *context, const char *key,
+				const char *string),
+		void *context)
+{
+	struct xpc_object cursor;
+	uint32_t count;
+	if (!open_container(dictionary, XPC_SERIAL_DICTIONARY, &cursor,
+			    &count)) {
+		return;
+	}
+	for (uint32_t i = 0; i < count; i++) {
+		const char *key;
+		uint32_t type;
+		if (!read_key(&cursor, &key) || !read_u32(&cursor, &type)) {
+			return;
+		}
+		struct xpc_object string = cursor;
+		uint32_t length;
+		if (type == XPC_SERIAL_STRING && read_u32(&string, &length)
+				&& length != 0
+				&& length <= (uint64_t)(string.end
+						   - string.data)
+				&& string.data[length - 1] == '\0') {
+			apply(context, key, (const char *)string.data);
+		}
+		if (!skip_object(&cursor, type)) {
+			return;
+		}
+	}
+}
+
+static bool
+open_container(const struct xpc_object *container, uint32_t type,
+		struct xpc_object *cursor, uint32_t *count)
+{
+	*cursor = *container;
+	uint32_t found;
+	uint32_t size;
+	if (!read_u32(cursor, &found) || found != type
+			|| !read_u32(cursor, &size)
+			|| size > (uint64_t)(cursor->end - cursor->data)) {
+		return false;
+	}
+	cursor->end = cursor->data + size;
+	return read_u32(cursor, count);
+}
+
+size_t
+xpc_serial_object_size(const struct xpc_object *object)
+{
+	struct xpc_object cursor = *object;
+	uint32_t type;
+	if (!read_u32(&cursor, &type) || !skip_object(&cursor, type)) {
+		return 0;
+	}
+	return (size_t)(cursor.data - object->data);
+}
+
+void
+xpc_encoder_begin_element_dictionary(struct xpc_encoder *encoder)
+{
+	append_key(encoder, NULL);
+	begin_container(encoder, XPC_SERIAL_DICTIONARY);
+}
+
+void
+xpc_encoder_double(struct xpc_encoder *encoder, const char *key, double value)
+{
+	append_key(encoder, key);
+	append_u32(encoder, XPC_SERIAL_DOUBLE);
+	append_bytes(encoder, &value, sizeof(value));
+}
+
+void
+xpc_encoder_data(struct xpc_encoder *encoder, const char *key,
+		const void *value, uint32_t length)
+{
+	append_key(encoder, key);
+	append_u32(encoder, XPC_SERIAL_DATA);
+	append_u32(encoder, length);
+	append_bytes(encoder, value, length);
+}
+
+void
+xpc_encoder_element_uuid(struct xpc_encoder *encoder, const uint8_t value[16])
+{
+	append_key(encoder, NULL);
+	append_u32(encoder, XPC_SERIAL_UUID);
+	append_bytes(encoder, value, 16);
+}
+
+void
+xpc_encoder_object(struct xpc_encoder *encoder, const char *key,
+		const void *object, size_t size)
+{
+	append_key(encoder, key);
+	append_bytes(encoder, object, (uint32_t)size);
+}
+
+void
+xpc_encoder_shmem(struct xpc_encoder *encoder, const char *key,
+		mach_port_name_t memory_entry, uint64_t size)
+{
+	if (encoder->port_count == XPC_SERIAL_PORTS_MAX) {
+		fprintf(stderr, "limbo: too many ports in an XPC message\n");
+		abort();
+	}
+	append_key(encoder, key);
+	append_u32(encoder, XPC_SERIAL_SHMEM);
+	append_bytes(encoder, &size, sizeof(size));
+	encoder->ports[encoder->port_count] = memory_entry;
+	encoder->dispositions[encoder->port_count++] = MACH_MSG_TYPE_MOVE_SEND;
+}
+
+void
+xpc_encoder_fd(struct xpc_encoder *encoder, const char *key,
+		mach_port_name_t fileport)
+{
+	if (encoder->port_count == XPC_SERIAL_PORTS_MAX) {
+		fprintf(stderr, "limbo: too many ports in an XPC message\n");
+		abort();
+	}
+	append_key(encoder, key);
+	append_u32(encoder, XPC_SERIAL_FD);
+	encoder->ports[encoder->port_count] = fileport;
+	encoder->dispositions[encoder->port_count++] = MACH_MSG_TYPE_MOVE_SEND;
 }

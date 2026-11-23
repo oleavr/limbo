@@ -29,13 +29,14 @@
 
 #include <mach/mach.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #define XPC_SERIAL_MAGIC   0x40585043
 #define XPC_SERIAL_VERSION 5
 #define XPC_REPLY_ID       0x20000000
 
-#define XPC_SERIAL_PORTS_MAX 4
+#define XPC_SERIAL_PORTS_MAX 8
 #define XPC_SERIAL_DEPTH_MAX 8
 
 enum xpc_serial_type {
@@ -67,8 +68,8 @@ struct xpc_encoder {
 	uint8_t *buffer;
 	uint32_t offset;
 	uint32_t capacity;
-	uint32_t containers[4];
-	uint32_t counts[4];
+	uint32_t containers[XPC_SERIAL_DEPTH_MAX];
+	uint32_t counts[XPC_SERIAL_DEPTH_MAX];
 	uint32_t depth;
 	mach_port_name_t ports[XPC_SERIAL_PORTS_MAX];
 	mach_msg_type_name_t dispositions[XPC_SERIAL_PORTS_MAX];
@@ -103,6 +104,41 @@ void xpc_encoder_uuid(struct xpc_encoder *encoder, const char *key,
 		const uint8_t value[16]);
 void xpc_encoder_port(struct xpc_encoder *encoder, const char *key,
 		mach_port_name_t port, mach_msg_type_name_t disposition);
+bool xpc_serial_get_bool(const struct xpc_object *dictionary, const char *key,
+		bool *value);
+bool xpc_serial_get_uuid(const struct xpc_object *dictionary, const char *key,
+		uint8_t value[16]);
+bool xpc_serial_get_dictionary(const struct xpc_object *dictionary,
+		const char *key, struct xpc_object *value);
+bool xpc_serial_get_array(const struct xpc_object *dictionary, const char *key,
+		struct xpc_object *value);
+bool xpc_serial_array_get_int(const struct xpc_object *array, uint32_t index,
+		uint64_t *value);
+void xpc_serial_array_apply_strings(const struct xpc_object *array,
+		bool (*apply)(void *context, const char *string),
+		void *context);
+void xpc_serial_dictionary_apply_strings(const struct xpc_object *dictionary,
+		void (*apply)(void *context, const char *key,
+				const char *string),
+		void *context);
+size_t xpc_serial_object_size(const struct xpc_object *object);
+void xpc_encoder_begin_element_dictionary(struct xpc_encoder *encoder);
+void xpc_encoder_double(
+		struct xpc_encoder *encoder, const char *key, double value);
+void xpc_encoder_data(struct xpc_encoder *encoder, const char *key,
+		const void *value, uint32_t length);
+void xpc_encoder_element_uuid(
+		struct xpc_encoder *encoder, const uint8_t value[16]);
+void xpc_encoder_object(struct xpc_encoder *encoder, const char *key,
+		const void *object, size_t size);
+void xpc_encoder_shmem(struct xpc_encoder *encoder, const char *key,
+		mach_port_name_t memory_entry, uint64_t size);
+void xpc_encoder_fd(struct xpc_encoder *encoder, const char *key,
+		mach_port_name_t fileport);
+mach_msg_return_t xpc_serial_send(mach_port_name_t port,
+		mach_msg_type_name_t disposition,
+		const struct xpc_encoder *encoder,
+		mach_msg_return_t (*send)(mach_msg_header_t *message));
 mach_msg_return_t xpc_serial_reply(const mach_msg_header_t *request,
 		const struct xpc_encoder *encoder,
 		mach_msg_return_t (*send)(mach_msg_header_t *message));
