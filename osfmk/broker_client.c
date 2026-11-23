@@ -66,6 +66,7 @@ static int duplicate_fds(const int *fds, size_t fd_count, int *copies);
 
 static int broker_fd = -1;
 static uint32_t guest_id;
+static pid_t launchd_pid;
 static pthread_mutex_t call_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t send_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t reply_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -247,6 +248,23 @@ broker_client_pid(void)
 	return peer.pid;
 }
 
+pid_t
+broker_client_launchd_pid(void)
+{
+	pid_t broker = broker_client_pid();
+	return broker != 0 && launchd_pid > 0 ? launchd_pid : broker;
+}
+
+bool
+broker_client_is_launchd(pid_t pid)
+{
+	pid_t broker = broker_client_pid();
+	return broker != 0
+			&& (pid == broker
+					|| (launchd_pid > 0
+							&& pid == launchd_pid));
+}
+
 uint64_t
 broker_client_task_for_pid(int32_t pid)
 {
@@ -314,6 +332,7 @@ connect_to_broker(const char *path)
 		stop_expecting();
 	}
 	guest_id = welcome.guest_id;
+	launchd_pid = welcome.launchd_pid;
 }
 
 static void *

@@ -35,6 +35,8 @@
 #include <sys/uio.h>
 
 #define LIMBO_BROKER_SOCKET_ENV "LIMBO_BROKER"
+#define LIMBO_LAUNCHD                 "limbo-launchd"
+#define LIMBO_LAUNCHD_DEADLINE_MS     12000
 #define LIMBO_BROKER_SERVICE_NAME_MAX 128
 #define BROKER_GUEST_ID               0
 
@@ -58,6 +60,7 @@ enum broker_frame_type {
 	BROKER_REGISTERED,
 	BROKER_TASK_FOR_PID,
 	BROKER_MOVED,
+	BROKER_JOBS_LOADED,
 };
 
 struct broker_frame {
@@ -76,6 +79,7 @@ struct broker_hello {
 
 struct broker_welcome {
 	uint32_t guest_id;
+	int32_t launchd_pid;
 };
 
 struct broker_register {
