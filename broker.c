@@ -52,6 +52,9 @@
 struct connection {
 	int fd;
 	uint32_t guest_id;
+	pid_t pid;
+	uid_t peer_uid;
+	gid_t peer_gid;
 	size_t queued_fds;
 	struct broker_wire_frame *pending;
 	struct broker_wire_frame *last_pending;
@@ -413,7 +416,17 @@ add_connection(int fd)
 {
 	connections = reallocarray(connections, connection_count + 1,
 			sizeof(*connections));
-	connections[connection_count++] = (struct connection){ .fd = fd };
+	struct ucred cred = {.uid = (uid_t)-1, .gid = (gid_t)-1};
+	socklen_t cred_length = sizeof(cred);
+	if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &cred_length) != 0) {
+		cred = (struct ucred){.uid = (uid_t)-1, .gid = (gid_t)-1};
+	}
+	connections[connection_count++] = (struct connection){
+			.fd = fd,
+			.pid = cred.pid,
+			.peer_uid = cred.uid,
+			.peer_gid = cred.gid,
+	};
 }
 
 static void
