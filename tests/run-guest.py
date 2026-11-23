@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -31,7 +32,8 @@ def main():
     register_binfmt(Path(limbo).resolve(), Path(outdir) / "binfmt")
     drop_privileges()
     binary = compile_program(xcrun, Path(source), Path(outdir))
-    broker_process = (start_broker(broker, Path(outdir) / f"{binary.name}.sock")
+    broker_process = (start_broker(broker, Path(outdir) / f"{binary.name}.sock",
+                                   binary, Path(outdir))
                       if broker else None)
     try:
         result = subprocess.run([binary], cwd=outdir, timeout=240)
@@ -41,7 +43,7 @@ def main():
     sys.exit(result.returncode)
 
 
-def start_broker(broker, socket_path):
+def start_broker(broker, socket_path, binary, outdir):
     if socket_path.exists():
         socket_path.unlink()
     held_names = socket_path.with_suffix(".held")
@@ -49,8 +51,35 @@ def start_broker(broker, socket_path):
                           "com.limbo.test.ipc.late\ncom.limbo.test.ipc.orphan\n"
                           "com.limbo.test.ipc.hidden!\n"
                           "com.limbo.test.ipc.rehidden!\n"
-                          "com.limbo.test.ipc.returned\n")
-    process = subprocess.Popen([broker, str(socket_path), str(held_names)])
+                          "com.limbo.test.ipc.returned\n"
+                          "com.limbo.test.ipc.unforged\n")
+    jobs = outdir / f"{binary.stem}-jobs.txt"
+    if binary.stem != "ipc_broker":
+        jobs.write_text("")
+    else:
+        awaited_marker = outdir.resolve() / "ipc-awaited-marker"
+        hello_marker = outdir.resolve() / "ipc-hello-again-marker"
+        for marker in (awaited_marker, hello_marker):
+            if marker.exists():
+                marker.unlink()
+        header = (Path(__file__).resolve().parent.parent / "broker.h").read_text()
+        types = header[header.index("enum broker_frame_type {"):]
+        types = re.findall(r"\b(BROKER_[A-Z_]+),", types[:types.index("};")])
+        name_frame = types.index("BROKER_NAME")
+        hello_frame = types.index("BROKER_HELLO")
+        program = binary.resolve()
+        jobs.write_text(f"com.limbo.test.ipc.awaited user - - - - - - 0 "
+                        f"com.limbo.test.ipc.awaited {program} "
+                        f"serve-second {awaited_marker}\n"
+                        f"com.limbo.test.ipc.forger user - - - - - - 0 "
+                        f"com.limbo.test.ipc.forger {program} "
+                        f"forge {name_frame}\n"
+                        f"com.limbo.test.ipc.hello-again user - - - - - - 0 "
+                        f"com.limbo.test.ipc.hello-again {program} "
+                        f"hello-again {hello_marker} {hello_frame}\n")
+    env = dict(os.environ, LIMBO_JOB_LOGS=str(outdir))
+    process = subprocess.Popen([broker, str(socket_path), str(held_names),
+                                str(jobs)], env=env)
     wait_for_broker(socket_path)
     os.environ["LIMBO_BROKER"] = str(socket_path)
     return process

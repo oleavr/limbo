@@ -145,6 +145,10 @@ static const char HELD_SERVICE_NAME[] = "com.limbo.test.ipc.held";
 static const char IDLE_SERVICE_NAME[] = "com.limbo.test.ipc.idle";
 static const char LATE_SERVICE_NAME[] = "com.limbo.test.ipc.late";
 static const char ORPHAN_SERVICE_NAME[] = "com.limbo.test.ipc.orphan";
+static const char AWAITED_SERVICE_NAME[] = "com.limbo.test.ipc.awaited";
+static const char HELLO_AGAIN_SERVICE_NAME[] = "com.limbo.test.ipc.hello-again";
+static const char FORGER_SERVICE_NAME[] = "com.limbo.test.ipc.forger";
+static const char UNFORGED_SERVICE_NAME[] = "com.limbo.test.ipc.unforged";
 static const char HIDDEN_SERVICE_NAME[] = "com.limbo.test.ipc.hidden";
 static const char REHIDDEN_SERVICE_NAME[] = "com.limbo.test.ipc.rehidden";
 static const mach_msg_id_t CHECK_IN = 402;
@@ -188,6 +192,12 @@ static const mach_msg_id_t RECEIVE_KEPT_ID = 7930;
 static const mach_msg_id_t DESTROY_KEPT_ID = 7931;
 static const mach_port_name_t NO_SUCH_NAME = 0x00fffe03;
 static const char FROM_SENDER[] = "from the sender";
+
+typedef struct {
+	mach_msg_header_t Head;
+	NDR_record_t NDR;
+	int32_t pid;
+} pid_reply_t;
 static const char FROM_RECEIVER[] = "from the receiver";
 
 static const char *peer_name = PEER_NAME;
@@ -209,6 +219,14 @@ static void sender_gone_before_check_in(void);
 static void hidden_until_check_in(void);
 static void hidden_again_once_gone(void);
 static void service_back_to_launchd(void);
+static void awaited_job_starts_again(void);
+static void job_that_said_hello_twice_starts_again(void);
+static void job_is_not_launchd(void);
+static int serve_demand(const char *name);
+static int serve_second(const char *marker);
+static int hello_again(const char *marker, uint32_t hello_frame);
+static int forge(uint32_t name_frame);
+static pid_t call_job(const char *name);
 static void serve_one(mach_port_t service);
 static void call_one(mach_port_t service);
 static long milliseconds_since(const struct timespec *start);
@@ -2433,6 +2451,15 @@ look_up_after_dup2_over_low_fds(void)
 int
 main(int argc, char *argv[])
 {
+	if (argc > 2 && strcmp(argv[1], "serve-second") == 0) {
+		return serve_second(argv[2]);
+	}
+	if (argc > 2 && strcmp(argv[1], "forge") == 0) {
+		return forge((uint32_t)atoi(argv[2]));
+	}
+	if (argc > 3 && strcmp(argv[1], "hello-again") == 0) {
+		return hello_again(argv[2], (uint32_t)atoi(argv[3]));
+	}
 	if (argc == 3 && strcmp(argv[1], "descriptors") == 0) {
 		return open_descriptors() != atoi(argv[2]);
 	}
@@ -2472,6 +2499,9 @@ main(int argc, char *argv[])
 	hidden_until_check_in();
 	hidden_again_once_gone();
 	service_back_to_launchd();
+	awaited_job_starts_again();
+	job_that_said_hello_twice_starts_again();
+	job_is_not_launchd();
 	return 0;
 }
 
@@ -3182,6 +3212,154 @@ service_back_to_launchd(void)
 	int status;
 	waitpid(pid, &status, 0);
 	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
+static void
+awaited_job_starts_again(void)
+{
+	CHECK(call_job(AWAITED_SERVICE_NAME) > 0);
+}
+
+static void
+job_that_said_hello_twice_starts_again(void)
+{
+	CHECK(call_job(HELLO_AGAIN_SERVICE_NAME) > 0);
+}
+
+static void
+job_is_not_launchd(void)
+{
+	CHECK(bootstrap_call(LOOK_UP, UNFORGED_SERVICE_NAME) != MACH_PORT_NULL);
+	CHECK(call_job(FORGER_SERVICE_NAME) > 0);
+	CHECK(bootstrap_call(LOOK_UP, UNFORGED_SERVICE_NAME) != MACH_PORT_NULL);
+}
+
+static int
+serve_demand(const char *name)
+{
+	mach_port_t service = bootstrap_call(CHECK_IN, name);
+	CHECK(service != MACH_PORT_NULL);
+	struct {
+		mach_msg_header_t Head;
+		mach_msg_trailer_t trailer;
+		char padding[64];
+	} request;
+	memset(&request, 0, sizeof(request));
+	kern_return_t kr = mach_msg(&request.Head, MACH_RCV_MSG, 0,
+			sizeof(request), service, MACH_MSG_TIMEOUT_NONE,
+			MACH_PORT_NULL);
+	CHECK(kr == MACH_MSG_SUCCESS);
+
+	pid_reply_t reply;
+	memset(&reply, 0, sizeof(reply));
+	reply.Head.msgh_bits = MACH_MSGH_BITS(
+			MACH_MSGH_BITS_REMOTE(request.Head.msgh_bits), 0);
+	reply.Head.msgh_remote_port = request.Head.msgh_remote_port;
+	reply.Head.msgh_size = sizeof(reply);
+	reply.Head.msgh_id = REPLY_ID;
+	reply.pid = getpid();
+	kr = mach_msg(&reply.Head, MACH_SEND_MSG, sizeof(reply), 0,
+			MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	CHECK(kr == MACH_MSG_SUCCESS);
+	return 0;
+}
+
+static int
+serve_second(const char *marker)
+{
+	if (access(marker, F_OK) != 0) {
+		int fd = open(marker, O_WRONLY | O_CREAT, 0644);
+		CHECK(fd != -1);
+		close(fd);
+		return 0;
+	}
+	return serve_demand(AWAITED_SERVICE_NAME);
+}
+
+static int
+hello_again(const char *marker, uint32_t hello_frame)
+{
+	if (access(marker, F_OK) == 0) {
+		return serve_demand(HELLO_AGAIN_SERVICE_NAME);
+	}
+	struct {
+		uint32_t type;
+		uint32_t length;
+		uint32_t domain;
+		uint32_t uid;
+	} frame = {
+			.type = hello_frame,
+			.length = 8,
+			.uid = geteuid(),
+	};
+	for (int fd = 0; fd != 1024; fd++) {
+		send(fd, &frame, sizeof(frame), MSG_DONTWAIT);
+	}
+	int fd = open(marker, O_WRONLY | O_CREAT, 0644);
+	CHECK(fd != -1);
+	close(fd);
+	return 0;
+}
+
+static int
+forge(uint32_t name_frame)
+{
+	struct {
+		uint32_t type;
+		uint32_t length;
+		uint32_t flags;
+		uint32_t domain_count;
+		char name[128];
+	} frame = {
+			.type = name_frame,
+			.length = 8 + 128,
+			.flags = 0x1 | 0x4,
+	};
+	strlcpy(frame.name, UNFORGED_SERVICE_NAME, sizeof(frame.name));
+	for (int fd = 0; fd != 1024; fd++) {
+		send(fd, &frame, sizeof(frame), MSG_DONTWAIT);
+	}
+	return serve_demand(FORGER_SERVICE_NAME);
+}
+
+static pid_t
+call_job(const char *name)
+{
+	mach_port_t service = bootstrap_call(LOOK_UP, name);
+	CHECK(service != MACH_PORT_NULL);
+	mach_port_t reply_port;
+	mach_port_allocate(
+			mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &reply_port);
+	union {
+		mach_msg_header_t request;
+		struct {
+			pid_reply_t reply;
+			mach_msg_trailer_t trailer;
+			char padding[64];
+		} reply;
+	} message;
+	memset(&message, 0, sizeof(message));
+	message.request.msgh_bits = MACH_MSGH_BITS(
+			MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+	message.request.msgh_remote_port = service;
+	message.request.msgh_local_port = reply_port;
+	message.request.msgh_size = sizeof(message.request);
+	message.request.msgh_id = REQUEST_ID;
+	kern_return_t kr = mach_msg(&message.request,
+			MACH_SEND_MSG | MACH_RCV_MSG, sizeof(message.request),
+			sizeof(message), reply_port, 20000, MACH_PORT_NULL);
+	CHECK(kr == MACH_MSG_SUCCESS);
+	CHECK(message.reply.reply.Head.msgh_id == REPLY_ID);
+	pid_t pid = message.reply.reply.pid;
+	CHECK(pid > 0);
+	for (int i = 0; i != 100 && kill(pid, 0) == 0; i++) {
+		usleep(100000);
+	}
+	CHECK(kill(pid, 0) == -1);
+	mach_port_deallocate(mach_task_self(), service);
+	mach_port_mod_refs(mach_task_self(), reply_port,
+			MACH_PORT_RIGHT_RECEIVE, -1);
+	return pid;
 }
 
 static void

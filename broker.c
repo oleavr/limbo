@@ -71,6 +71,7 @@ struct connection {
 union broker_request {
 	struct broker_hello hello;
 	struct broker_name name;
+	struct broker_name_awaited awaited;
 	struct broker_register reg;
 	struct broker_lookup lookup;
 	struct broker_task_for_pid task_for_pid;
@@ -117,8 +118,8 @@ static bool accept_guest(int listen_fd);
 static size_t fds_ahead(void);
 static void release_queued(struct connection *conn, size_t fd_count);
 static void handle_guest(int fd);
-static void welcome_guest(
-		struct connection *conn, const struct broker_hello *hello);
+static void welcome_guest(struct connection *conn,
+		const struct broker_hello *hello, uint32_t length);
 static void read_held_names(const char *path);
 static void hold_name(const char *name);
 static void begin_hold(struct held_name *held, bool hides);
@@ -142,7 +143,10 @@ static void route_send(
 static void send_held(struct connection *conn, struct broker_wire_frame *frame,
 		struct broker_send *send);
 static uint64_t held_target(struct held_name *held, uint32_t domain);
+static void name_awaited(
+		const struct held_name *held, uint32_t domain, uint32_t flags);
 static void name_told(const struct broker_name *record);
+static void no_job(const struct broker_name_awaited *which);
 static bool has_job(const struct held_name *held, uint32_t domain);
 static struct held_name *held_of(uint64_t global_id, uint32_t *domain);
 static uint64_t held_port(const struct held_name *held, uint32_t domain);
@@ -157,6 +161,8 @@ static struct route *route_for(uint64_t global_id);
 static uint32_t route_of(uint64_t global_id);
 static void forget_routes(uint32_t guest_id);
 static void tell_guests(uint32_t type, const void *payload, uint32_t length);
+static void send_to(
+		int fd, uint32_t type, const void *payload, uint32_t length);
 static uint64_t *moved_ids(const struct broker_wire_frame *frame,
 		const struct broker_send *send, uint32_t *count);
 static void drop_frame(struct broker_wire_frame *frame);
@@ -543,7 +549,8 @@ handle_guest(int fd)
 
 	switch (type) {
 	case BROKER_HELLO:
-		welcome_guest(conn, (const struct broker_hello *)payload);
+		welcome_guest(conn, (const struct broker_hello *)payload,
+				length);
 		break;
 	case BROKER_REGISTER: {
 		if (length < sizeof(struct broker_register)) {
@@ -577,6 +584,13 @@ handle_guest(int fd)
 			launchd_loaded = true;
 		}
 		break;
+	case BROKER_NO_JOB:
+		if (conn->fd == launchd_fd
+				&& length >= sizeof(struct
+						   broker_name_awaited)) {
+			no_job((const struct broker_name_awaited *)payload);
+		}
+		break;
 	case BROKER_TASK_FOR_PID:
 		task_for_pid(conn, (const struct broker_task_for_pid *)payload);
 		break;
@@ -586,12 +600,15 @@ handle_guest(int fd)
 }
 
 static void
-welcome_guest(struct connection *conn, const struct broker_hello *hello)
+welcome_guest(struct connection *conn, const struct broker_hello *hello,
+		uint32_t length)
 {
-	if (conn->guest_id == 0) {
-		conn->guest_id = next_guest_id++;
-		conn->domain = hello->domain;
+	if (conn->guest_id != BROKER_GUEST_ID || conn->fd == launchd_fd) {
+		return;
 	}
+	conn->guest_id = next_guest_id++;
+	conn->domain = length >= sizeof(hello->domain) ? hello->domain
+						       : BROKER_DOMAIN_USER;
 	struct broker_welcome welcome = {
 			.guest_id = conn->guest_id,
 			.launchd_pid = launchd_pid,
@@ -776,6 +793,7 @@ send_held(struct connection *conn, struct broker_wire_frame *frame,
 		set_route(moved[i], BROKER_GUEST_ID, 0);
 	}
 	free(moved);
+	name_awaited(held, domain, BROKER_NAME_DEMANDED);
 }
 
 static uint64_t
@@ -786,9 +804,25 @@ held_target(struct held_name *held, uint32_t domain)
 		return service->global_id;
 	}
 	if (service != NULL && !has_job(held, domain)) {
+		name_awaited(held, domain, BROKER_NAME_DEMANDED);
 		return service->global_id;
 	}
 	return 0;
+}
+
+static void
+name_awaited(const struct held_name *held, uint32_t domain, uint32_t flags)
+{
+	if (launchd_fd == -1) {
+		return;
+	}
+	struct broker_name_awaited awaited = {.domain = domain, .flags = flags};
+	memcpy(awaited.name, held->name, sizeof(awaited.name));
+	for (const struct held_send *queued = held->queued; queued != NULL;
+			queued = queued->next) {
+		awaited.waiters++;
+	}
+	send_to(launchd_fd, BROKER_NAME_AWAITED, &awaited, sizeof(awaited));
 }
 
 static void
@@ -820,6 +854,41 @@ name_told(const struct broker_name *record)
 			drop_frame(queued->frame);
 			free(queued);
 		}
+		name_awaited(held, BROKER_DOMAIN_USER, 0);
+	}
+}
+
+static void
+no_job(const struct broker_name_awaited *which)
+{
+	char name[LIMBO_BROKER_SERVICE_NAME_MAX];
+	memcpy(name, which->name, sizeof(name));
+	name[sizeof(name) - 1] = '\0';
+	struct held_name *held = held_named(name);
+	if (held == NULL) {
+		return;
+	}
+	const struct service *service = service_named(name, which->domain);
+	bool answered = false;
+	for (struct held_send **link = &held->queued; *link != NULL;) {
+		struct held_send *queued = *link;
+		struct broker_send send;
+		uint32_t domain;
+		broker_wire_read(queued->frame, 0, &send, sizeof(send));
+		if (service == NULL
+				|| held_of(send.dest_global_id, &domain) != held
+				|| domain != which->domain) {
+			link = &queued->next;
+			continue;
+		}
+		*link = queued->next;
+		send.dest_global_id = service->global_id;
+		pass_on_held(queued->frame, &send);
+		free(queued);
+		answered = true;
+	}
+	if (answered) {
+		name_awaited(held, BROKER_DOMAIN_USER, 0);
 	}
 }
 
@@ -863,6 +932,7 @@ held_port(const struct held_name *held, uint32_t domain)
 static void
 release_held_sends(struct held_name *held)
 {
+	bool released = false;
 	struct held_send **link = &held->queued;
 	while (*link != NULL) {
 		struct held_send *queued = *link;
@@ -883,6 +953,10 @@ release_held_sends(struct held_name *held)
 		send.dest_global_id = service->global_id;
 		pass_on_held(queued->frame, &send);
 		free(queued);
+		released = true;
+	}
+	if (released) {
+		name_awaited(held, BROKER_DOMAIN_USER, 0);
 	}
 }
 
@@ -1262,6 +1336,15 @@ tell_guests(uint32_t type, const void *payload, uint32_t length)
 		if (connections[i].guest_id != BROKER_GUEST_ID) {
 			send_frame(&connections[i], type, payload, length);
 		}
+	}
+}
+
+static void
+send_to(int fd, uint32_t type, const void *payload, uint32_t length)
+{
+	struct connection *conn = connection_for_fd(fd);
+	if (conn != NULL) {
+		send_frame(conn, type, payload, length);
 	}
 }
 
