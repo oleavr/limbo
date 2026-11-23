@@ -109,6 +109,10 @@ static void release_held(uint64_t global_id);
 static struct route *route_for(uint64_t global_id);
 static uint32_t route_of(uint64_t global_id);
 static void forget_routes(uint32_t guest_id);
+static uint64_t *moved_ids(const struct broker_wire_frame *frame,
+		const struct broker_send *send, uint32_t *count);
+static void drop_frame(struct broker_wire_frame *frame);
+static void settle_moved(uint64_t global_id);
 static void take_notice(
 		struct connection *conn, const struct broker_wire_frame *frame);
 static struct connection *connection_for_fd(int fd);
@@ -244,6 +248,10 @@ handle_guest(int fd)
 	uint32_t type = frame->type & ~BROKER_FRAME_OOL;
 	if (type == BROKER_SEND && !frame->lost) {
 		route_send(conn, frame);
+		return;
+	}
+	if (type == BROKER_SEND) {
+		drop_frame(frame);
 		return;
 	}
 
@@ -402,22 +410,11 @@ pass_on(struct broker_wire_frame *frame, struct broker_send *send,
 	struct connection *owner
 			= connection_for_guest(route_of(send->dest_global_id));
 	if (owner == NULL) {
-		broker_wire_free(frame);
+		drop_frame(frame);
 		return;
 	}
-	uint32_t moved_at = sizeof(*send) + send->blob_length;
-	uint32_t moved_count
-			= send->blob_length <= frame->length - sizeof(*send)
-			? (frame->length - moved_at) / sizeof(uint64_t)
-			: 0;
-	uint64_t *moved = moved_count != 0
-			? malloc(moved_count * sizeof(*moved))
-			: NULL;
-	if (moved != NULL
-			&& !broker_wire_read(frame, moved_at, moved,
-					moved_count * sizeof(*moved))) {
-		moved_count = 0;
-	}
+	uint32_t moved_count;
+	uint64_t *moved = moved_ids(frame, send, &moved_count);
 
 	send->sender = (struct broker_sender){0};
 	memcpy(frame->payload, send, sizeof(*send));
@@ -428,6 +425,67 @@ pass_on(struct broker_wire_frame *frame, struct broker_send *send,
 		set_route(moved[i], guest_id, mover_id);
 	}
 	free(moved);
+}
+
+static uint64_t *
+moved_ids(const struct broker_wire_frame *frame, const struct broker_send *send,
+		uint32_t *count)
+{
+	uint32_t moved_at = sizeof(*send) + send->blob_length;
+	*count = send->blob_length <= frame->length - sizeof(*send)
+			? (frame->length - moved_at) / sizeof(uint64_t)
+			: 0;
+	uint64_t *moved = *count != 0 ? malloc(*count * sizeof(*moved)) : NULL;
+	if (moved != NULL
+			&& !broker_wire_read(frame, moved_at, moved,
+					*count * sizeof(*moved))) {
+		*count = 0;
+	}
+	if (*count == 0) {
+		free(moved);
+		moved = NULL;
+	}
+	return moved;
+}
+
+static void
+drop_frame(struct broker_wire_frame *frame)
+{
+	struct broker_send send;
+	uint32_t count = 0;
+	uint64_t *moved = frame->inline_length >= sizeof(send)
+					&& broker_wire_read(frame, 0, &send,
+							sizeof(send))
+			? moved_ids(frame, &send, &count)
+			: NULL;
+	broker_wire_free(frame);
+	for (uint32_t i = 0; i != count; i++) {
+		settle_moved(moved[i]);
+	}
+	free(moved);
+}
+
+static void
+settle_moved(uint64_t global_id)
+{
+	struct route *route = route_for(global_id);
+	struct held_send *held = NULL;
+	if (route != NULL) {
+		held = route->held;
+		*route = routes[--route_count];
+	}
+	broker_names_forget_port(global_id);
+	struct broker_moved moved = {.global_id = global_id};
+	for (size_t c = 0; c != connection_count; c++) {
+		send_frame(&connections[c], BROKER_MOVED, &moved,
+				sizeof(moved));
+	}
+	while (held != NULL) {
+		struct held_send *next = held->next;
+		drop_frame(held->frame);
+		free(held);
+		held = next;
+	}
 }
 
 static void
@@ -631,7 +689,7 @@ forget_routes(uint32_t guest_id)
 		release_held(routes[i].global_id);
 		i = 0;
 	}
-	for (size_t i = 0; i != route_count;) {
+	for (size_t i = 0; i < route_count;) {
 		struct broker_moved moved = {
 				.global_id = routes[i].global_id,
 				.guest_id = routes[i].guest_id,
@@ -640,14 +698,10 @@ forget_routes(uint32_t guest_id)
 		bool outlives = !lost
 				&& broker_guest_of(routes[i].global_id)
 						== guest_id;
+		struct held_send *held = NULL;
 		if (lost) {
 			broker_names_forget_port(routes[i].global_id);
-			while (routes[i].held != NULL) {
-				struct held_send *held = routes[i].held;
-				routes[i].held = held->next;
-				broker_wire_free(held->frame);
-				free(held);
-			}
+			held = routes[i].held;
 			moved.guest_id = 0;
 			routes[i] = routes[--route_count];
 		} else {
@@ -657,6 +711,12 @@ forget_routes(uint32_t guest_id)
 				c++) {
 			send_frame(&connections[c], BROKER_MOVED, &moved,
 					sizeof(moved));
+		}
+		while (held != NULL) {
+			struct held_send *next = held->next;
+			drop_frame(held->frame);
+			free(held);
+			held = next;
 		}
 	}
 }
