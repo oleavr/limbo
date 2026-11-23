@@ -117,10 +117,12 @@ struct broker_name {
 #define BROKER_NAME_HELD         0x1u
 #define BROKER_NAME_HIDES        0x2u
 #define BROKER_NAME_UNLOADED     0x4u
+#define BROKER_NAME_INSTANCES    0x8u
 #define BROKER_NAME_ACCOUNTS     0x10u
 #define BROKER_NAME_ROOT_ACCOUNT 0x20u
 
 #define BROKER_NAME_DEMANDED 0x1u
+#define BROKER_NAME_INSTANCE 0x2u
 
 struct broker_name_awaited {
 	uint32_t domain;
@@ -160,7 +162,10 @@ struct broker_registered {
 struct broker_lookup {
 	char name[LIMBO_BROKER_SERVICE_NAME_MAX];
 	uint32_t domain;
+	uint32_t instance;
 };
+
+#define BROKER_INSTANCE_VARIABLE "LIMBO_BROKER_INSTANCE"
 
 struct broker_task_for_pid {
 	int32_t pid;

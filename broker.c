@@ -692,6 +692,20 @@ broker_names_look_up(const struct broker_lookup *req)
 static void
 look_up_service(struct connection *conn, const struct broker_lookup *req)
 {
+	const char *mark = strrchr(req->name, '#');
+	if (req->instance && mark != NULL && held_named(req->name) == NULL
+			&& service_named(req->name, req->domain) == NULL) {
+		char base[LIMBO_BROKER_SERVICE_NAME_MAX];
+		snprintf(base, sizeof(base), "%.*s", (int)(mark - req->name),
+				req->name);
+		const struct held_name *of = name_known(base);
+		if (of != NULL && (of->launchd & BROKER_NAME_INSTANCES)) {
+			struct held_name *instance = name_made(req->name);
+			instance->launchd |= BROKER_NAME_HELD;
+			name_awaited(instance, req->domain,
+					BROKER_NAME_INSTANCE);
+		}
+	}
 	struct held_name *held = held_named(req->name);
 	if (held != NULL && held->hidden) {
 		answer_lookup(conn, false, true, 0);
