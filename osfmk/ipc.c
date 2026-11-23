@@ -313,8 +313,9 @@ static void send_onces_gone(uint32_t guest_id);
 static void move_send_once(struct ipc_entry *entry, uint32_t from, uint32_t to);
 static void receive_notice(
 		uint64_t dest_global_id, const struct remote_notice *notice);
-static void deliver(uint64_t dest_global_id, const void *blob, uint32_t length,
-		const int *fds, size_t fd_count, bool lost);
+static void deliver(uint64_t dest_global_id, const struct broker_sender *sender,
+		const void *blob, uint32_t length, const int *fds,
+		size_t fd_count, bool lost);
 static void send_remote_notice(const struct pending_notice *notice);
 static uint64_t export_local_port(mach_port_name_t name);
 static struct ipc_port *port_for_global_id(uint64_t global_id);
@@ -1685,21 +1686,23 @@ import_remote_send(uint64_t global_id, mach_msg_type_name_t type,
 }
 
 void
-ipc_remote_deliver(uint64_t dest_global_id, const void *blob, uint32_t length,
-		const int *fds, size_t fd_count)
+ipc_remote_deliver(uint64_t dest_global_id, const struct broker_sender *sender,
+		const void *blob, uint32_t length, const int *fds,
+		size_t fd_count)
 {
-	deliver(dest_global_id, blob, length, fds, fd_count, false);
+	deliver(dest_global_id, sender, blob, length, fds, fd_count, false);
 }
 
 void
 ipc_remote_lost(uint64_t dest_global_id, const void *blob, uint32_t length)
 {
-	deliver(dest_global_id, blob, length, NULL, 0, true);
+	deliver(dest_global_id, NULL, blob, length, NULL, 0, true);
 }
 
 static void
-deliver(uint64_t dest_global_id, const void *blob, uint32_t length,
-		const int *fds, size_t fd_count, bool lost)
+deliver(uint64_t dest_global_id, const struct broker_sender *sender,
+		const void *blob, uint32_t length, const int *fds,
+		size_t fd_count, bool lost)
 {
 	const struct remote_header *rh = blob;
 	if (!remote_message_fits(rh, length, fd_count, lost)) {
@@ -1722,6 +1725,12 @@ deliver(uint64_t dest_global_id, const void *blob, uint32_t length,
 	struct ipc_kmsg *kmsg = malloc(sizeof(*kmsg) + rh->message_size
 			+ sizeof(mach_msg_max_trailer_t));
 	kmsg->sender = rh->sender;
+	if (sender != NULL && sender->pid > 0) {
+		kmsg->sender.pid = sender->pid;
+		kmsg->sender.uid = kmsg->sender.euid = sender->uid;
+		kmsg->sender.gid = kmsg->sender.egid
+				= gid_from_linux(sender->gid);
+	}
 	memcpy(kmsg->header, message, rh->message_size);
 
 	mach_msg_type_name_t reply_type = received_type(rh->reply_disposition);

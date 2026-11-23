@@ -354,8 +354,9 @@ dispatch_frame(const struct broker_frame *header, const void *payload,
 	case BROKER_DELIVER: {
 		const struct broker_send *send = (const struct broker_send *)payload;
 		if (send->blob_length <= header->length - sizeof(*send)) {
-			ipc_remote_deliver(send->dest_global_id, send + 1,
-					send->blob_length, fds, fd_count);
+			ipc_remote_deliver(send->dest_global_id, &send->sender,
+					send + 1, send->blob_length, fds,
+					fd_count);
 		}
 		break;
 	}

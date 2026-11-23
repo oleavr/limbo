@@ -91,9 +91,16 @@ struct broker_lookup_reply {
 	uint64_t global_id;
 };
 
+struct broker_sender {
+	int32_t pid;
+	uint32_t uid;
+	uint32_t gid;
+};
+
 struct broker_send {
 	uint64_t dest_global_id;
 	uint32_t blob_length;
+	struct broker_sender sender;
 };
 
 struct broker_guest_gone {

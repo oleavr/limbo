@@ -332,6 +332,8 @@ route_send(struct broker_wire_frame *frame)
 		return;
 	}
 
+	send.sender = (struct broker_sender){0};
+	memcpy(frame->payload, &send, sizeof(send));
 	frame->type = BROKER_DELIVER | (frame->type & BROKER_FRAME_OOL);
 	queue_frame(owner, frame);
 }
