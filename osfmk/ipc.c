@@ -222,6 +222,7 @@ static const struct mig_subsystem *const kobject_subsystems[] = {
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t notice_order = PTHREAD_MUTEX_INITIALIZER;
 static struct arrival_waiter *arrival_waiters;
+static __thread bool kernel_receive;
 static struct dead_name_request *dead_name_requests;
 static struct remote_send_once *remote_send_onces;
 static struct port_return *port_returns;
@@ -719,6 +720,19 @@ ipc_mach_msg(mach_msg_header_t *msg, mach_msg_option64_t options,
 	}
 
 	return MACH_MSG_SUCCESS;
+}
+
+mach_msg_return_t
+ipc_mach_msg_kernel(mach_msg_header_t *msg, mach_msg_option64_t options,
+		mach_msg_size_t send_size, mach_msg_size_t rcv_size,
+		mach_port_name_t rcv_name, mach_msg_timeout_t timeout)
+{
+	bool outer = kernel_receive;
+	kernel_receive = true;
+	mach_msg_return_t mr = ipc_mach_msg(
+			msg, options, send_size, rcv_size, rcv_name, timeout);
+	kernel_receive = outer;
+	return mr;
 }
 
 static mach_msg_return_t
@@ -3140,8 +3154,11 @@ wait_for_arrival(const struct ipc_port *port, mach_msg_option64_t options,
 			.port = port,
 	};
 	arrival_waiters = &waiter;
-	int error = signals_futex_wait(
-			&waiter.woken, &lock, timed ? deadline : NULL);
+	int error;
+	do {
+		error = signals_futex_wait(
+				&waiter.woken, &lock, timed ? deadline : NULL);
+	} while (error == EINTR && kernel_receive);
 	struct arrival_waiter **link = &arrival_waiters;
 	while (*link != &waiter) {
 		link = &(*link)->next;

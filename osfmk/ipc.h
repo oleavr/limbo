@@ -122,6 +122,10 @@ mach_msg_return_t ipc_mach_msg(mach_msg_header_t *msg,
 		mach_msg_option64_t options, mach_msg_size_t send_size,
 		mach_msg_size_t rcv_size, mach_port_name_t rcv_name,
 		mach_msg_timeout_t timeout);
+mach_msg_return_t ipc_mach_msg_kernel(mach_msg_header_t *msg,
+		mach_msg_option64_t options, mach_msg_size_t send_size,
+		mach_msg_size_t rcv_size, mach_port_name_t rcv_name,
+		mach_msg_timeout_t timeout);
 mach_msg_return_t ipc_kernel_send(mach_msg_header_t *msg);
 
 mach_msg_return_t ipc_launchd_send(mach_msg_header_t *msg);
