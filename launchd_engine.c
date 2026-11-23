@@ -30,6 +30,7 @@
 #endif
 
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
@@ -58,6 +59,7 @@
 #define DEFAULT_THROTTLE   10
 #define OTHER_PERSONA_TYPE 6
 #define STOP_TIMEOUT_MS    LIMBO_LAUNCHD_STOP_MS
+#define SHUTDOWN_POLL_MS   100
 
 #define LOGS_VARIABLE "LIMBO_JOB_LOGS"
 
@@ -71,6 +73,8 @@ enum job_state {
 
 enum job_session {
 	SESSION_BOOT,
+	SESSION_GUI,
+	SESSION_LOGIN_WINDOW,
 	SESSION_BOOT_TASK,
 };
 
@@ -124,6 +128,8 @@ struct job {
 	int64_t kill_at;
 	bool stopping;
 	bool restart;
+	bool unloading;
+	bool reload;
 	bool demanded;
 	bool has_status;
 	int status;
@@ -147,6 +153,19 @@ static void load_start(struct job *job);
 static void next_boot_task(void);
 static void hold_names(struct job *job);
 static bool starts_at_load(const struct job *job);
+static void at_login_window(FILE *out);
+static void log_in(FILE *out);
+static void unload(enum job_session session);
+static void log_out(FILE *out);
+static void add_session_process(FILE *out, pid_t pid);
+static void end_session_processes(void);
+static void kill_session_processes(int64_t now);
+static unsigned long long process_start_time(pid_t pid);
+static bool left_processes_gone(void);
+static size_t signal_left_processes(int signo);
+static bool descends_from(const pid_t (*parents)[2], size_t count, pid_t pid,
+		pid_t ancestor);
+static bool process_running(pid_t pid);
 static void process_exited(struct job *job, int status);
 static void take_exit(struct job *job);
 static void job_exited(struct job *job, int status);
@@ -192,7 +211,16 @@ static int signal_fd = -1;
 static pid_t broker;
 static bool shutting_down;
 static bool booted;
-
+static int64_t left_kill_at;
+static bool logged_in;
+static bool login_window;
+struct session_process {
+	pid_t pid;
+	unsigned long long start_time;
+	int64_t kill_at;
+};
+static struct session_process *session_processes;
+static size_t session_process_count;
 static uid_t user_uid;
 static gid_t user_gid;
 static gid_t user_groups[16];
@@ -443,8 +471,13 @@ load_session(enum job_session session)
 		if (job->session != session) {
 			continue;
 		}
-		if (load_into(job)) {
-			loaded[count++] = job;
+		if (job->state == JOB_UNLOADED || session == SESSION_BOOT) {
+			job->unloading = false;
+			if (load_into(job)) {
+				loaded[count++] = job;
+			}
+		} else if (job->unloading && session == SESSION_GUI) {
+			job->reload = true;
 		}
 	}
 	for (size_t i = 0; i != count; i++) {
@@ -493,6 +526,331 @@ starts_at_load(const struct job *job)
 	return job->run_at_load || k->always
 			|| (k->successful_exit != -1
 					&& !k->after_initial_demand);
+}
+
+static void
+at_login_window(FILE *out)
+{
+	if (logged_in || login_window) {
+		fprintf(out, "%s\n",
+				logged_in ? "someone is logged in"
+					  : "at the login window already");
+		return;
+	}
+	say("the login window's session loads");
+	login_window = true;
+	load_session(SESSION_LOGIN_WINDOW);
+	fprintf(out, "at the login window\n");
+}
+
+static void
+log_in(FILE *out)
+{
+	if (logged_in) {
+		fprintf(out, "%s is logged in already\n", user_name);
+		return;
+	}
+	if (login_window) {
+		say("the login window's session unloads");
+		login_window = false;
+		unload(SESSION_LOGIN_WINDOW);
+	}
+	say("%s logs in", user_name);
+	logged_in = true;
+	load_session(SESSION_GUI);
+	fprintf(out, "%s logged in\n", user_name);
+}
+
+static void
+log_out(FILE *out)
+{
+	if (!logged_in) {
+		if (out != NULL) {
+			fprintf(out, "no one is logged in\n");
+		}
+		return;
+	}
+	say("%s logs out", user_name);
+	logged_in = false;
+	unload(SESSION_GUI);
+	end_session_processes();
+	if (out != NULL) {
+		fprintf(out, "%s logged out\n", user_name);
+	}
+}
+
+static void
+unload(enum job_session session)
+{
+	for (size_t i = 0; i != job_count; i++) {
+		struct job *job = jobs[i];
+		if (job->session != session) {
+			continue;
+		}
+		job->restart = false;
+		job->demanded = false;
+		if (job->state == JOB_RUNNING) {
+			job->unloading = true;
+			if (!job->stopping) {
+				stop(job);
+			}
+		} else {
+			set_state(job, JOB_UNLOADED);
+		}
+	}
+}
+
+static void
+add_session_process(FILE *out, pid_t pid)
+{
+	unsigned long long start_time = process_start_time(pid);
+	if (pid <= 0 || start_time == 0) {
+		fprintf(out, "no process %d\n", (int)pid);
+		return;
+	}
+	size_t kept = 0;
+	for (size_t i = 0; i != session_process_count; i++) {
+		struct session_process *process = &session_processes[i];
+		if (process->pid != pid
+				&& process_start_time(process->pid)
+						== process->start_time) {
+			session_processes[kept++] = *process;
+		}
+	}
+	session_process_count = kept;
+	struct session_process *grown = realloc(session_processes,
+			(kept + 1) * sizeof(*session_processes));
+	if (grown == NULL) {
+		return;
+	}
+	session_processes = grown;
+	session_processes[session_process_count++] = (struct session_process){
+			.pid = pid,
+			.start_time = start_time,
+			.kill_at = INT64_MAX,
+	};
+}
+
+static void
+end_session_processes(void)
+{
+	int64_t kill_at = now_ms() + STOP_TIMEOUT_MS;
+	size_t kept = 0;
+	for (size_t i = 0; i != session_process_count; i++) {
+		struct session_process *process = &session_processes[i];
+		if (process_start_time(process->pid) != process->start_time) {
+			continue;
+		}
+		say("stopping the session's process %d", (int)process->pid);
+		kill(-process->pid, SIGTERM);
+		kill(process->pid, SIGTERM);
+		process->kill_at = kill_at;
+		session_processes[kept++] = *process;
+	}
+	session_process_count = kept;
+}
+
+static void
+kill_session_processes(int64_t now)
+{
+	size_t kept = 0;
+	for (size_t i = 0; i != session_process_count; i++) {
+		struct session_process *process = &session_processes[i];
+		if (process->kill_at > now) {
+			session_processes[kept++] = *process;
+			continue;
+		}
+		if (process_start_time(process->pid) == process->start_time) {
+			say("the session's process %d didn't stop: killed",
+					(int)process->pid);
+			kill(-process->pid, SIGKILL);
+			kill(process->pid, SIGKILL);
+		}
+	}
+	session_process_count = kept;
+}
+
+static unsigned long long
+process_start_time(pid_t pid)
+{
+	char path[64];
+	snprintf(path, sizeof(path), "/proc/%d/stat", (int)pid);
+	FILE *file = fopen(path, "r");
+	if (file == NULL) {
+		return 0;
+	}
+	char line[1024];
+	size_t length = fread(line, 1, sizeof(line) - 1, file);
+	fclose(file);
+	line[length] = '\0';
+	char *field = strrchr(line, ')');
+	if (field == NULL) {
+		return 0;
+	}
+	if (field[1] != ' ') {
+		return 0;
+	}
+	char state = field[2];
+	long threads = 0;
+	for (int n = 3; n <= 22 && field != NULL; n++) {
+		field = strchr(field + 1, ' ');
+		if (n == 20 && field != NULL) {
+			threads = strtol(field + 1, NULL, 10);
+		}
+	}
+	if (state == 'Z' && threads <= 1) {
+		return 0;
+	}
+	return field != NULL ? strtoull(field + 1, NULL, 10) : 0;
+}
+
+static bool
+left_processes_gone(void)
+{
+	int64_t now = now_ms();
+	if (left_kill_at == 0) {
+		left_kill_at = now + STOP_TIMEOUT_MS;
+		return signal_left_processes(SIGTERM) == 0;
+	}
+	if (now < left_kill_at) {
+		return signal_left_processes(0) == 0;
+	}
+	signal_left_processes(SIGKILL);
+	return true;
+}
+
+static size_t
+signal_left_processes(int signo)
+{
+	DIR *proc = opendir("/proc");
+	if (proc == NULL) {
+		return 0;
+	}
+	pid_t(*parents)[2] = NULL;
+	size_t count = 0;
+	size_t capacity = 0;
+	struct dirent *entry;
+	while ((entry = readdir(proc)) != NULL) {
+		char *end;
+		long pid = strtol(entry->d_name, &end, 10);
+		if (*end != '\0' || pid <= 0) {
+			continue;
+		}
+		char path[64];
+		snprintf(path, sizeof(path), "/proc/%ld/stat", pid);
+		FILE *file = fopen(path, "r");
+		if (file == NULL) {
+			continue;
+		}
+		char line[1024];
+		size_t length = fread(line, 1, sizeof(line) - 1, file);
+		fclose(file);
+		line[length] = '\0';
+		char *field = strrchr(line, ')');
+		int parent;
+		if (field == NULL
+				|| sscanf(field + 1, " %*c %d", &parent) != 1) {
+			continue;
+		}
+		if (count == capacity) {
+			capacity = capacity != 0 ? capacity * 2 : 512;
+			pid_t(*grown)[2] = reallocarray(
+					parents, capacity, sizeof(*parents));
+			if (grown == NULL) {
+				break;
+			}
+			parents = grown;
+		}
+		parents[count][0] = (pid_t)pid;
+		parents[count][1] = (pid_t)parent;
+		count++;
+	}
+	closedir(proc);
+
+	pid_t root = getppid() == broker ? broker : getpid();
+	size_t signalled = 0;
+	for (size_t i = 0; i != count; i++) {
+		pid_t pid = parents[i][0];
+		if (pid == getpid() || !descends_from(parents, count, pid, root)
+				|| !process_running(pid)) {
+			continue;
+		}
+		if (signo != 0) {
+			char path[64], name[64] = "";
+			snprintf(path, sizeof(path), "/proc/%d/comm", (int)pid);
+			FILE *file = fopen(path, "r");
+			if (file != NULL) {
+				if (fgets(name, sizeof(name), file) != NULL) {
+					name[strcspn(name, "\n")] = '\0';
+				}
+				fclose(file);
+			}
+			say(signo == SIGKILL ? "%s, pid %d, which the jobs "
+					       "left, "
+					       "didn't stop: killed"
+					     : "stopping %s, pid %d, which the "
+					       "jobs left",
+					name, (int)pid);
+			kill(pid, signo);
+		}
+		signalled++;
+	}
+	free(parents);
+	return signalled;
+}
+
+static bool
+descends_from(const pid_t (*parents)[2], size_t count, pid_t pid,
+		pid_t ancestor)
+{
+	for (size_t depth = 0; depth != count && pid > 1; depth++) {
+		pid_t parent = 0;
+		for (size_t i = 0; i != count; i++) {
+			if (parents[i][0] == pid) {
+				parent = parents[i][1];
+				break;
+			}
+		}
+		if (parent == ancestor) {
+			return true;
+		}
+		pid = parent;
+	}
+	return false;
+}
+
+static bool
+process_running(pid_t pid)
+{
+	char path[64];
+	snprintf(path, sizeof(path), "/proc/%d/task", (int)pid);
+	DIR *tasks = opendir(path);
+	if (tasks == NULL) {
+		return false;
+	}
+	bool running = false;
+	struct dirent *entry;
+	while (!running && (entry = readdir(tasks)) != NULL) {
+		if (entry->d_name[0] == '.') {
+			continue;
+		}
+		char stat_path[PATH_MAX];
+		snprintf(stat_path, sizeof(stat_path), "%s/%s/stat", path,
+				entry->d_name);
+		FILE *file = fopen(stat_path, "r");
+		if (file == NULL) {
+			continue;
+		}
+		char line[1024];
+		size_t length = fread(line, 1, sizeof(line) - 1, file);
+		fclose(file);
+		line[length] = '\0';
+		char *field = strrchr(line, ')');
+		running = field != NULL && field[1] == ' ' && field[2] != 'Z'
+				&& field[2] != 'X';
+	}
+	closedir(tasks);
+	return running;
 }
 
 size_t
@@ -548,6 +906,7 @@ jobs_poll_handle(const struct pollfd *fds, size_t count)
 			job->kill_at = INT64_MAX;
 		}
 	}
+	kill_session_processes(now);
 	tell_changes();
 }
 
@@ -569,7 +928,16 @@ jobs_poll_timeout(void)
 			next = job->exit_at;
 		}
 	}
+	for (size_t i = 0; i != session_process_count; i++) {
+		if (session_processes[i].kill_at < next) {
+			next = session_processes[i].kill_at;
+		}
+	}
 	int64_t now = now_ms();
+	if (shutting_down && (session_process_count != 0 || left_kill_at != 0)
+			&& next > now + SHUTDOWN_POLL_MS) {
+		next = now + SHUTDOWN_POLL_MS;
+	}
 	int64_t wait = next == INT64_MAX ? -1 : next - now;
 	if (wait < 0 && next != INT64_MAX) {
 		wait = 0;
@@ -876,6 +1244,26 @@ control(char **argv, size_t argc, uint32_t *status)
 		fclose(out);
 		return text;
 	}
+	if (strcmp(command, "session") == 0 && argc > 1) {
+		add_session_process(out, (pid_t)strtol(argv[1], NULL, 10));
+		fclose(out);
+		return text;
+	}
+	if (strcmp(command, "login") == 0 || strcmp(command, "logout") == 0
+			|| strcmp(command, "loginwindow") == 0) {
+		if (shutting_down) {
+			fprintf(out, "the broker is stopping\n");
+			*status = 1;
+		} else if (strcmp(command, "loginwindow") == 0) {
+			at_login_window(out);
+		} else if (strcmp(command, "login") == 0) {
+			log_in(out);
+		} else {
+			log_out(out);
+		}
+		fclose(out);
+		return text;
+	}
 	if (strcmp(command, "print") != 0 && strcmp(command, "start") != 0
 			&& strcmp(command, "stop") != 0
 			&& strcmp(command, "restart") != 0) {
@@ -967,6 +1355,15 @@ jobs_done(void)
 			return false;
 		}
 	}
+	for (size_t i = 0; i != session_process_count; i++) {
+		const struct session_process *process = &session_processes[i];
+		if (process_start_time(process->pid) == process->start_time) {
+			return false;
+		}
+	}
+	if (!left_processes_gone()) {
+		return false;
+	}
 	return true;
 }
 
@@ -983,6 +1380,7 @@ jobs_shut_down(void)
 			stop(jobs[i]);
 		}
 	}
+	end_session_processes();
 	tell_changes();
 }
 
@@ -1068,7 +1466,7 @@ job_exited(struct job *job, int status)
 	} else {
 		say("%s exited with %d", job->name, shell_status(status));
 	}
-	if (group > 0 && shutting_down) {
+	if (group > 0 && (shutting_down || job->unloading)) {
 		kill(-group, SIGKILL);
 	}
 
@@ -1082,8 +1480,20 @@ job_exited(struct job *job, int status)
 		return;
 	}
 
+	if (!shutting_down && job->session == SESSION_BOOT && job->label != NULL
+			&& strcmp(job->label, "com.apple.loginwindow") == 0) {
+		log_out(NULL);
+	}
+
 	if (shutting_down) {
 		set_state(job, JOB_STOPPED);
+	} else if (job->unloading) {
+		job->unloading = false;
+		set_state(job, JOB_UNLOADED);
+		if (job->reload) {
+			job->reload = false;
+			load(job);
+		}
 	} else if (job->restart) {
 		job->restart = false;
 		set_state(job, JOB_IDLE);
@@ -1333,6 +1743,7 @@ make_environment(const struct job *job)
 			"LIMBO_LAUNCHD_ENVIRONMENT",
 			"LIMBO_LAUNCHD_PERSONA_TYPE",
 			"LIMBO_SYSROOT",
+			LIMBO_LAUNCHD_SESSION_TYPE_ENV,
 			BROKER_DOMAIN_VARIABLE,
 			BROKER_INSTANCE_VARIABLE,
 	};
@@ -1380,6 +1791,13 @@ make_environment(const struct job *job)
 	if (job->instance != NULL) {
 		asprintf(&env[n++], BROKER_INSTANCE_VARIABLE "=%s",
 				job->instance);
+	}
+	if (job->session == SESSION_LOGIN_WINDOW) {
+		env[n++] = strdup(
+				LIMBO_LAUNCHD_SESSION_TYPE_ENV "=LoginWindow");
+	}
+	if (job->system_session) {
+		env[n++] = strdup(LIMBO_LAUNCHD_SESSION_TYPE_ENV "=System");
 	}
 	if (job->environment != NULL) {
 		asprintf(&env[n++], "LIMBO_LAUNCHD_ENVIRONMENT=%s",
@@ -1471,8 +1889,12 @@ parse_job(char *line)
 
 	struct job *job = calloc(1, sizeof(*job));
 	job->name = strdup(fields[0]);
-	job->session = strncmp(fields[0], "boot/", 5) == 0 ? SESSION_BOOT_TASK
-							   : SESSION_BOOT;
+	job->session = strncmp(fields[0], "gui/", 4) == 0 ? SESSION_GUI
+			: strncmp(fields[0], "loginwindow/", 12) == 0
+			? SESSION_LOGIN_WINDOW
+			: strncmp(fields[0], "boot/", 5) == 0
+			? SESSION_BOOT_TASK
+			: SESSION_BOOT;
 	job->root = strcmp(fields[1], "root") == 0;
 	if (!job->root && strcmp(fields[1], "user") != 0) {
 		job->account = strdup(fields[1]);
@@ -1534,7 +1956,10 @@ parse_job(char *line)
 	for (size_t i = 1; i != argc; i++) {
 		job->argv[i] = strdup(arguments[i]);
 	}
-	job->log = log_path("", program_name(job->argv[0]), arguments + 1);
+	job->log = log_path(job->session == SESSION_LOGIN_WINDOW
+					? "loginwindow-"
+					: "",
+			program_name(job->argv[0]), arguments + 1);
 	return job;
 }
 
@@ -1699,6 +2124,8 @@ describe(FILE *out, const struct job *job, bool details)
 	};
 	static const char *const sessions[] = {
 			[SESSION_BOOT] = "boot",
+			[SESSION_GUI] = "gui",
+			[SESSION_LOGIN_WINDOW] = "loginwindow",
 			[SESSION_BOOT_TASK] = "boot task",
 	};
 	char pid[16] = "-", status[16] = "-";
