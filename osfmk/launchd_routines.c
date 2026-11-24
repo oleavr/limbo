@@ -151,6 +151,12 @@ struct caller {
 
 #define REGISTER_PER_PID 0x1
 
+struct event_channel {
+	struct event_channel *next;
+	char *name;
+	mach_port_name_t port;
+};
+
 struct subscription {
 	struct subscription *next;
 	char *stream;
@@ -236,6 +242,8 @@ static uid_t caller_euid(void);
 static bool reboot_system(mach_msg_header_t *request, uint64_t flags);
 static bool spawn(mach_msg_header_t *request, const char *label);
 static bool check_in_sockets(mach_msg_header_t *request, const char *name);
+static bool reply_event_channel(mach_msg_header_t *request, const char *name);
+static mach_port_name_t event_channel(const char *name);
 static void reply_with_port(mach_msg_header_t *request, mach_port_name_t port,
 		mach_msg_type_name_t disposition, bool with_metadata);
 static void reply_with_named_port(mach_msg_header_t *request, const char *key,
@@ -303,6 +311,7 @@ static bool register_name(
 		mach_msg_header_t *request, const char *name, uint64_t flags);
 static bool check_in(
 		mach_msg_header_t *request, const char *name, uint64_t flags);
+static mach_port_name_t job_event_channel(const mach_msg_header_t *request);
 static bool reply_bootstrap(mach_msg_header_t *request);
 static bool set_bootstrap(mach_msg_header_t *request, const char *name);
 static void reply_user_sessions_info(mach_msg_header_t *request);
@@ -324,6 +333,7 @@ static const struct xpc_bootstrap_routines launchd_routines = {
 };
 
 XPC_BOOTSTRAP_ROUTINES(launchd_routines);
+static struct event_channel *event_channels;
 static struct loaded_stream *loaded_streams;
 
 static struct subscription *subscriptions;
@@ -368,6 +378,8 @@ launchd_answer(mach_msg_header_t *request)
 	case XPC_ROUTINE_CHECK_IN_LEGACY:
 		if (parsed.flags & CHECK_IN_SOCKETS) {
 			answered = check_in_sockets(request, parsed.name);
+		} else if (parsed.flags & CHECK_IN_EVENT_STREAM) {
+			answered = reply_event_channel(request, parsed.name);
 		}
 		break;
 	case XPC_ROUTINE_SET_EVENT:
@@ -953,6 +965,68 @@ check_in_sockets(mach_msg_header_t *request, const char *name)
 	return true;
 }
 
+static bool
+reply_event_channel(mach_msg_header_t *request, const char *name)
+{
+	char label[256], plist[PATH_MAX];
+	if (!job_of_pid(caller_pid(), label, sizeof(label), plist,
+			    sizeof(plist))) {
+		reply_with_errno(request, XPC_ESRCH);
+		return true;
+	}
+	char buffer[300], per_job[600];
+	snprintf(per_job, sizeof(per_job), "%s#%s",
+			xpc_services_check_in_name(
+					name, buffer, sizeof(buffer)),
+			label);
+	mach_port_name_t port = event_channel(per_job);
+	if (port == MACH_PORT_NULL) {
+		reply_with_errno(request, XPC_ESRCH);
+		return true;
+	}
+	reply_with_port(request, port, MACH_MSG_TYPE_MOVE_RECEIVE, false);
+	return true;
+}
+
+static mach_port_name_t
+event_channel(const char *name)
+{
+	struct event_channel *channel = event_channels;
+	while (channel != NULL && strcmp(channel->name, name) != 0) {
+		channel = channel->next;
+	}
+	mach_port_type_t type = 0;
+	if (channel != NULL
+			&& ipc_port_type(channel->port, &type) == KERN_SUCCESS
+			&& (type & MACH_PORT_TYPE_RECEIVE)) {
+		return channel->port;
+	}
+	if (channel != NULL && (type & MACH_PORT_TYPE_SEND)) {
+		return MACH_PORT_NULL;
+	}
+	if (channel != NULL && (type & MACH_PORT_TYPE_DEAD_NAME)) {
+		ipc_port_mod_refs(channel->port, MACH_PORT_RIGHT_DEAD_NAME, -1);
+	}
+	mach_port_name_t port;
+	if (ipc_port_allocate(MACH_PORT_RIGHT_RECEIVE, &port) != KERN_SUCCESS) {
+		return MACH_PORT_NULL;
+	}
+	ipc_port_insert_right(port, port, MACH_MSG_TYPE_MAKE_SEND);
+	if (names_register(name, port) != KERN_SUCCESS) {
+		ipc_port_mod_refs(port, MACH_PORT_RIGHT_RECEIVE, -1);
+		ipc_port_deallocate(port);
+		return MACH_PORT_NULL;
+	}
+	if (channel == NULL) {
+		channel = calloc(1, sizeof(*channel));
+		channel->name = strdup(name);
+		channel->next = event_channels;
+		event_channels = channel;
+	}
+	channel->port = port;
+	return port;
+}
+
 static void
 reply_with_port(mach_msg_header_t *request, mach_port_name_t port,
 		mach_msg_type_name_t disposition, bool with_metadata)
@@ -1070,6 +1144,9 @@ reply_subscriber_listener(
 			    sizeof(job), &job_domain)) {
 		reply_with_errno(request, XPC_ESRCH);
 		return true;
+	}
+	if (job[0] != '\0') {
+		event_channel(subscriber);
 	}
 	int64_t ran_ms = job[0] != '\0' ? job_running_or_start(job) : -1;
 	uint8_t buffer[1024];
@@ -2314,6 +2391,13 @@ check_in(mach_msg_header_t *request, const char *name, uint64_t flags)
 	if (stream) {
 		xpc_services_host_name(service_name, getpid(), per_pid,
 				sizeof(per_pid));
+		mach_port_name_t channel = job_event_channel(request);
+		if (channel != MACH_PORT_NULL) {
+			names_register(per_pid, channel);
+			reply_with_port(request, channel,
+					MACH_MSG_TYPE_MOVE_RECEIVE, false);
+			return true;
+		}
 	}
 	mach_port_name_t service;
 	kern_return_t kr = names_check_in(
@@ -2327,6 +2411,29 @@ check_in(mach_msg_header_t *request, const char *name, uint64_t flags)
 	}
 	reply_with_port(request, service, MACH_MSG_TYPE_MOVE_RECEIVE, false);
 	return true;
+}
+
+static mach_port_name_t
+job_event_channel(const mach_msg_header_t *request)
+{
+	mach_msg_header_t *answer = ask_launchd(request);
+	mach_port_name_t port = MACH_PORT_NULL;
+	if (answer != NULL && (answer->msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
+		const mach_msg_body_t *body
+				= (const mach_msg_body_t *)(answer + 1);
+		const mach_msg_port_descriptor_t *descriptors
+				= (const void *)(body + 1);
+		for (mach_msg_size_t i = 0; i < body->msgh_descriptor_count;
+				i++) {
+			if (descriptors[i].type == MACH_MSG_PORT_DESCRIPTOR
+					&& descriptors[i].disposition
+							== MACH_MSG_TYPE_PORT_RECEIVE) {
+				port = descriptors[i].name;
+			}
+		}
+	}
+	free(answer);
+	return port;
 }
 
 static bool

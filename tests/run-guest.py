@@ -55,7 +55,26 @@ def start_broker(broker, socket_path, binary, outdir):
                           "com.limbo.test.ipc.returned\n"
                           "com.limbo.test.ipc.unforged\n")
     jobs = outdir / f"{binary.stem}-jobs.txt"
-    if binary.stem != "ipc_broker":
+    if binary.stem == "xpc_launchd":
+        sysroot = Path(os.environ["LIMBO_SYSROOT"])
+        plist = "private/tmp/limbo-test-jobevents.plist"
+        (sysroot / plist).write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<plist version="1.0"><dict>'
+            '<key>Label</key><string>com.limbo.test.jobevents</string>'
+            '<key>LaunchEvents</key><dict>'
+            '<key>com.limbo.test.jobevents</key><dict>'
+            '<key>limbo-job-event</key><dict>'
+            '<key>key</key><string>job</string>'
+            '</dict></dict></dict></dict></plist>\n')
+        marker = outdir.resolve() / "xpc-job-event.txt"
+        if marker.exists():
+            marker.unlink()
+        jobs.write_text(f"com.limbo.test.jobevents user {plist} com.limbo.test.jobevents "
+                        f"- - - - 0 com.limbo.test.jobevents#com.limbo.test.jobevents "
+                        f"{binary.resolve()} job-subscriber {marker}\n")
+        os.environ["LIMBO_TEST_JOB_EVENT"] = str(marker)
+    elif binary.stem != "ipc_broker":
         jobs.write_text("")
     else:
         awaited_marker = outdir.resolve() / "ipc-awaited-marker"
