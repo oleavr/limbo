@@ -438,6 +438,7 @@ int sys_guarded_kqueue_np(void *guard, uint32_t guardflags);
 int sys_change_fdguard_np(int fd, void *guard, uint32_t guardflags,
 		void *nguard, uint32_t nguardflags, int *fdflagsp);
 int sys_usrctl(uint32_t flags);
+int proc_coalition_leader(uint64_t id, int32_t *leader);
 int sys_proc_rlimit_control(uint64_t pid, int flavor, void *arg);
 int sys_coalition_policy_set(uint64_t cid, int flavor, uint32_t value);
 int sys_connectx(int socket, void *endpoints, void *associd, void *flags,

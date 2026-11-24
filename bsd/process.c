@@ -404,3 +404,17 @@ executing(const char *dir)
 	}
 	return virtual_size != 0 && value == 0;
 }
+
+bool
+process_is_guest(int32_t pid)
+{
+	char line[PATH_MAX];
+	ssize_t length = read_process_file(
+			pid, "cmdline", line, sizeof(line) - 1);
+	if (length <= 0) {
+		return false;
+	}
+	line[length] = '\0';
+	const char *program = strrchr(line, '/');
+	return strcmp(program != NULL ? program + 1 : line, "limbo") == 0;
+}

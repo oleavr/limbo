@@ -45,11 +45,13 @@
 #include "bsd/process.h"
 #include "launchd.h"
 #include "launchd_engine.h"
+#include "launchd_jobs.h"
 #include "osfmk/bootstrap/bootstrap_defs.h"
 #include "osfmk/broker_client.h"
 #include "osfmk/ipc.h"
 #include "osfmk/mach_vm.h"
 #include "osfmk/xpc_bootstrap.h"
+#include "plist.h"
 #include "sysroot.h"
 #include "xpc_service.h"
 #include "xpc_services.h"
@@ -79,7 +81,21 @@ enum xpc_routine {
 	XPC_ROUTINE_LEGACY_LIST = 0x32f,
 	XPC_ROUTINE_LOOK_UP_PER_USER = 0xd1,
 	XPC_ROUTINE_SWITCH_TO_SESSION = 0x338,
+	XPC_ROUTINE_COALITION_INFO = 0x33d,
+	XPC_ROUTINE_JOBS_LOADED_BY_COALITION = 0x3f8,
+	XPC_ROUTINE_EXTENSION_LIVE = 0x2cc,
 	XPC_ROUTINE_SWAP = 0x12d,
+	XPC_ROUTINE_PROPERTIES_FOR_PID = 0x2c8,
+	XPC_ROUTINE_JOB_FOR_PID = 0x3f0,
+	XPC_ROUTINE_JOB_SUBMIT_AND_START = 0x3e8,
+	XPC_ROUTINE_JOB_REMOVE = 0x3eb,
+	XPC_ROUTINE_JOB_FOR_LABEL = 0x3ed,
+	XPC_ROUTINE_JOB_INFO = 0x3f7,
+	XPC_ROUTINE_JOB_PROPERTIES = 0x3f1,
+	XPC_ROUTINE_JOB_MONITOR = 0x3e9,
+	XPC_ROUTINE_JOB_MONITOR_POLL = 0x3ea,
+	XPC_ROUTINE_JOBS_MANAGED_BY = 0x3ec,
+	XPC_ROUTINE_JOB_START = 0x3ee,
 	XPC_ROUTINE_KILL_SERVICE = 0x32c,
 	XPC_ROUTINE_ADD_SERVICE_PATHS = 0x320,
 	XPC_ROUTINE_REGISTER_SERVICE_PATHS = 0x322,
@@ -91,9 +107,13 @@ enum xpc_routine {
 
 #define RB_HALT 0x8
 
-#define XPC_ESRCH   3
-#define XPC_EINVAL  22
-#define XPC_ENOTSUP 45
+#define SERVICE_TYPE_DAEMON      1
+#define SERVICE_TYPE_APP         4
+#define SERVICE_TYPE_XPC_SERVICE 5
+#define RBS_IDENTITY_MAC_APP     1
+#define XPC_ESRCH                3
+#define XPC_EINVAL               22
+#define XPC_ENOTSUP              45
 
 #define GETAUDIT_ADDR_ASID 10
 
@@ -289,6 +309,9 @@ static bool reply_event(mach_msg_header_t *request, const char *stream,
 		const char *name);
 static bool create_session(mach_msg_header_t *request, bool login_window);
 static mach_msg_header_t *ask_launchd(const mach_msg_header_t *request);
+static bool reply_coalition_info(mach_msg_header_t *request, uint64_t cid);
+static bool app_identifier(const char *path, char *identifier, size_t size);
+static bool reply_properties_for_pid(mach_msg_header_t *request, int64_t pid);
 static void release_request(mach_msg_header_t *request);
 static void release_right(
 		mach_port_name_t name, mach_msg_type_name_t disposition);
@@ -433,6 +456,45 @@ launchd_answer(mach_msg_header_t *request)
 				parsed.has_uid
 						&& (uid_t)parsed.uid
 								== (uid_t)-1);
+		break;
+	case XPC_ROUTINE_COALITION_INFO:
+		answered = reply_coalition_info(request, parsed.cid);
+		break;
+	case XPC_ROUTINE_PROPERTIES_FOR_PID:
+		answered = reply_properties_for_pid(request, parsed.pid);
+		break;
+	case XPC_ROUTINE_JOB_FOR_PID:
+		if (!launchd_jobs_handle_for_pid(request, (pid_t)parsed.pid)) {
+			reply_with_errno(request, XPC_ESRCH);
+		}
+		answered = true;
+		break;
+	case XPC_ROUTINE_JOB_SUBMIT_AND_START:
+		answered = launchd_jobs_submit_and_start(request);
+		break;
+	case XPC_ROUTINE_JOB_REMOVE:
+		answered = launchd_jobs_remove(request);
+		break;
+	case XPC_ROUTINE_JOB_FOR_LABEL:
+		answered = launchd_jobs_copy_with_label(request);
+		break;
+	case XPC_ROUTINE_JOB_INFO:
+		answered = launchd_jobs_info(request);
+		break;
+	case XPC_ROUTINE_JOB_PROPERTIES:
+		answered = launchd_jobs_properties(request);
+		break;
+	case XPC_ROUTINE_JOB_MONITOR:
+		answered = launchd_jobs_monitor(request);
+		break;
+	case XPC_ROUTINE_JOB_MONITOR_POLL:
+		answered = launchd_jobs_monitor_poll(request);
+		break;
+	case XPC_ROUTINE_JOBS_MANAGED_BY:
+		answered = launchd_jobs_managed(request);
+		break;
+	case XPC_ROUTINE_JOB_START:
+		answered = launchd_jobs_start(request);
 		break;
 	}
 	answering = NULL;
@@ -1887,6 +1949,179 @@ ask_launchd(const mach_msg_header_t *request)
 	return message;
 }
 
+static bool
+reply_coalition_info(mach_msg_header_t *request, uint64_t cid)
+{
+	if (forward_to_launchd(request)) {
+		return true;
+	}
+	int32_t leader;
+	if (proc_coalition_leader(cid, &leader) != 0 || leader == 0) {
+		reply_with_errno(request, XPC_ESRCH);
+		return true;
+	}
+	char label[256] = "", plist[PATH_MAX], path[PATH_MAX];
+	char identifier[256] = "";
+	struct xpc_service_of_pid service;
+	struct process process;
+	if (job_of_pid(leader, label, sizeof(label), plist, sizeof(plist))) {
+		if (strncmp(label, "application.", strlen("application."))
+				== 0) {
+			if (!process_executable_path(leader, path)
+					|| !app_identifier(path, identifier,
+							sizeof(identifier))) {
+				identifier[0] = '\0';
+			}
+		} else if (plist[0] != '\0' && strcmp(plist, "-") != 0) {
+			char guest[PATH_MAX], buffer[PATH_MAX];
+			snprintf(guest, sizeof(guest), "%s%s",
+					plist[0] == '/' ? "" : "/", plist);
+			char *text = plist_read(
+					sysroot_host_path(guest, 0, buffer));
+			if (text == NULL
+					|| !plist_string(text,
+							text + strlen(text),
+							"CFBundleIdentifier",
+							identifier,
+							sizeof(identifier))) {
+				identifier[0] = '\0';
+			}
+			free(text);
+		}
+	} else if (process_executable_path(leader, path)
+			&& app_identifier(
+					path, identifier, sizeof(identifier))) {
+		snprintf(label, sizeof(label), "application.%s.%d.%d",
+				identifier, leader, leader);
+	} else if (xpc_services_of_pid(leader, &service)) {
+		snprintf(label, sizeof(label), "%s", service.name);
+	} else if (process_lookup(leader, &process) == 0) {
+		snprintf(label, sizeof(label), "%s", process.name);
+	}
+	uint8_t buffer[2048];
+	struct xpc_encoder encoder;
+	xpc_encoder_init(&encoder, buffer, sizeof(buffer));
+	xpc_encoder_begin_dictionary(&encoder, NULL);
+	xpc_encoder_uint64(&encoder, "cid", cid);
+	xpc_encoder_string(&encoder, "name", label);
+	if (identifier[0] != '\0') {
+		xpc_encoder_string(&encoder, "bundle_identifier", identifier);
+	}
+	xpc_encoder_int64(&encoder, "leader-pid", leader);
+	xpc_encoder_end_dictionary(&encoder);
+	xpc_launchd_reply(request, &encoder);
+	return true;
+}
+
+static bool
+app_identifier(const char *path, char *identifier, size_t size)
+{
+	char bundle[PATH_MAX];
+	snprintf(bundle, sizeof(bundle), "%s", sysroot_guest_path(path));
+	char *contents = strstr(bundle, ".app/Contents/MacOS/");
+	if (contents == NULL
+			|| strchr(contents + strlen(".app/Contents/MacOS/"),
+					   '/')
+					!= NULL) {
+		return false;
+	}
+	contents[strlen(".app")] = '\0';
+	return xpc_services_bundle_identifier(bundle, identifier, size);
+}
+
+static bool
+reply_properties_for_pid(mach_msg_header_t *request, int64_t pid)
+{
+	if (launchd_jobs_reply_properties(request, (pid_t)pid)) {
+		return true;
+	}
+	if (forward_to_launchd(request)) {
+		return true;
+	}
+
+	char label[256];
+	char plist[PATH_MAX];
+	char path[PATH_MAX];
+	bool known = job_of_pid(pid, label, sizeof(label), plist, sizeof(plist))
+			&& process_executable_path((int32_t)pid, path);
+	char identifier[256];
+	bool app = !known && process_executable_path((int32_t)pid, path)
+			&& app_identifier(path, identifier, sizeof(identifier));
+	if (app) {
+		snprintf(label, sizeof(label), "application.%s.%lld.%lld",
+				identifier, (long long)pid, (long long)pid);
+	}
+	struct xpc_service_of_pid service_of_pid;
+	bool service = !known && !app
+			&& process_executable_path((int32_t)pid, path)
+			&& xpc_services_of_pid((pid_t)pid, &service_of_pid);
+	if (service) {
+		snprintf(label, sizeof(label), "%s", service_of_pid.name);
+	}
+
+	uint8_t storage[1024 + 3 * PATH_MAX];
+	struct xpc_encoder encoder;
+	xpc_encoder_init(&encoder, storage, sizeof(storage));
+	xpc_encoder_begin_dictionary(&encoder, NULL);
+	xpc_encoder_uint64(&encoder, "rec_execcnt", 10);
+	xpc_encoder_uint64(&encoder, "req_pid", getpid());
+	if (known) {
+		xpc_encoder_begin_dictionary(&encoder, "attrs");
+		xpc_encoder_string(&encoder, "label", label);
+		xpc_encoder_string(
+				&encoder, "program", sysroot_guest_path(path));
+		xpc_encoder_string(&encoder, "path", plist);
+		xpc_encoder_uint64(
+				&encoder, "service-type", SERVICE_TYPE_DAEMON);
+		xpc_encoder_end(&encoder);
+	} else if (app) {
+		struct process process;
+		uint32_t auid = process_lookup((int32_t)pid, &process) == 0
+				? process.uid[0]
+				: getuid();
+		xpc_encoder_begin_dictionary(&encoder, "attrs");
+		xpc_encoder_string(&encoder, "label", label);
+		xpc_encoder_string(
+				&encoder, "program", sysroot_guest_path(path));
+		xpc_encoder_uint64(&encoder, "service-type", SERVICE_TYPE_APP);
+		xpc_encoder_begin_dictionary(&encoder, "additional-properties");
+		xpc_encoder_begin_dictionary(&encoder, "RunningBoard");
+		xpc_encoder_begin_dictionary(
+				&encoder, "RunningBoardLaunchedIdentity");
+		xpc_encoder_int64(&encoder, "TYPE", RBS_IDENTITY_MAC_APP);
+		xpc_encoder_string(&encoder, "AJL", label);
+		xpc_encoder_string(&encoder, "EAI", identifier);
+		xpc_encoder_uint64(&encoder, "AUID", auid);
+		xpc_encoder_uint64(&encoder, "PLAT",
+				codesign_platform((int32_t)pid));
+		xpc_encoder_end(&encoder);
+		xpc_encoder_end(&encoder);
+		xpc_encoder_end(&encoder);
+		xpc_encoder_end(&encoder);
+	} else if (service) {
+		xpc_encoder_begin_dictionary(&encoder, "attrs");
+		xpc_encoder_string(&encoder, "label", label);
+		xpc_encoder_string(
+				&encoder, "program", sysroot_guest_path(path));
+		xpc_encoder_string(&encoder, "path", service_of_pid.bundle);
+		xpc_encoder_uint64(&encoder, "service-type",
+				SERVICE_TYPE_XPC_SERVICE);
+		xpc_encoder_int64(&encoder, "XPCExtensionHostPID",
+				service_of_pid.host);
+		if (service_of_pid.has_instance) {
+			xpc_encoder_uuid(&encoder, "instance",
+					service_of_pid.instance);
+		}
+		xpc_encoder_end(&encoder);
+	} else {
+		xpc_encoder_int64(&encoder, "error", XPC_ESRCH);
+	}
+	xpc_encoder_end(&encoder);
+
+	xpc_launchd_reply(request, &encoder);
+	return true;
+}
+
 static void
 release_request(mach_msg_header_t *request)
 {
@@ -2081,6 +2316,11 @@ serve(mach_msg_header_t *request)
 	case XPC_ROUTINE_PUBLISHER_SUBSCRIBER_ASID:
 		return reply_subscriber_session(
 				request, parsed.stream, parsed.token);
+	case XPC_ROUTINE_PROPERTIES_FOR_PID:
+		if (parsed.pid != getpid() && forward_to_launchd(request)) {
+			return true;
+		}
+		return reply_properties_for_pid(request, parsed.pid);
 	case XPC_ROUTINE_KILL_SERVICE: {
 		if (xpc_services_kill(parsed.name, (int)parsed.signal) != 0) {
 			reply_with_errno(request, XPC_ESRCH);
@@ -2093,6 +2333,20 @@ serve(mach_msg_header_t *request)
 	case XPC_ROUTINE_REGISTER_SERVICE_PATHS:
 		reply_empty(request);
 		return true;
+	case XPC_ROUTINE_JOB_FOR_PID:
+	case XPC_ROUTINE_JOB_SUBMIT_AND_START:
+	case XPC_ROUTINE_JOB_REMOVE:
+	case XPC_ROUTINE_JOB_FOR_LABEL:
+	case XPC_ROUTINE_JOB_INFO:
+	case XPC_ROUTINE_JOB_PROPERTIES:
+	case XPC_ROUTINE_JOB_MONITOR:
+	case XPC_ROUTINE_JOB_MONITOR_POLL:
+	case XPC_ROUTINE_JOBS_MANAGED_BY:
+	case XPC_ROUTINE_JOB_START:
+		if (forward_to_launchd(request)) {
+			return true;
+		}
+		break;
 	case XPC_ROUTINE_BOOTSTRAP_PARENT:
 		reply_with_named_port(request, "parent", ipc_bootstrap_self(),
 				MACH_MSG_TYPE_MOVE_SEND, false);
@@ -2108,7 +2362,23 @@ serve(mach_msg_header_t *request)
 		return true;
 	case XPC_ROUTINE_LEGACY_LIST:
 		return reply_legacy_list(request, parsed.name);
+	case XPC_ROUTINE_COALITION_INFO:
+		return reply_coalition_info(request, parsed.cid);
+	case XPC_ROUTINE_JOBS_LOADED_BY_COALITION: {
+		uint8_t buffer[256];
+		struct xpc_encoder encoder;
+		xpc_encoder_init(&encoder, buffer, sizeof(buffer));
+		xpc_encoder_begin_dictionary(&encoder, NULL);
+		xpc_encoder_begin_array(&encoder, "handles");
+		xpc_encoder_end_array(&encoder);
+		xpc_encoder_end_dictionary(&encoder);
+		xpc_launchd_reply(request, &encoder);
+		return true;
+	}
 	case XPC_ROUTINE_UNCORK_PID_DOMAIN:
+		reply_empty(request);
+		return true;
+	case XPC_ROUTINE_EXTENSION_LIVE:
 		reply_empty(request);
 		return true;
 	case XPC_ROUTINE_SET_EVENT:

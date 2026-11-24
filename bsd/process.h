@@ -75,6 +75,7 @@ bool process_executable_path(int32_t pid, char *path);
 
 /* The process's arguments, NUL-separated, as /proc has them */
 ssize_t process_cmdline(int32_t pid, char *buffer, size_t size);
+bool process_is_guest(int32_t pid);
 
 bool process_environment_value(
 		int32_t pid, const char *name, char *value, size_t size);

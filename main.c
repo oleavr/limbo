@@ -307,6 +307,7 @@ apply_job_environment(void)
 {
 	join_job_persona();
 	apply_environment("LIMBO_LAUNCHD_ENVIRONMENT", true);
+	apply_environment("LIMBO_LAUNCHD_DOMAIN_ENVIRONMENT", false);
 }
 
 static void
