@@ -33,6 +33,8 @@
 
 #include "broker.h"
 
+#define LAUNCHD_SUBMIT_SERVICE_ID 0x4c494d02
+
 int launchd_main(int argc, char *argv[]);
 char *launchd_command(char **argv, size_t argc, uid_t uid, uint32_t *status);
 void launchd_answer(mach_msg_header_t *request);

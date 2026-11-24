@@ -44,6 +44,7 @@
 #include "broker.h"
 #include "broker_client.h"
 #include "ipc.h"
+#include "launchd.h"
 #include "thread.h"
 
 static void connect_to_broker(const char *path);
@@ -291,6 +292,52 @@ broker_client_hold(const char *name)
 	struct broker_hold hold = {0};
 	strncpy(hold.name, name, sizeof(hold.name) - 1);
 	send_frame(BROKER_HOLD, &hold, sizeof(hold));
+}
+
+void
+broker_client_submit_service(const char *bundle)
+{
+	uint64_t port = broker_client_launchd_port();
+	mach_port_name_t launchd = port != 0 ? ipc_names_send_right(port)
+					     : MACH_PORT_NULL;
+	mach_port_name_t reply = MACH_PORT_NULL;
+	if (!MACH_PORT_VALID(launchd)
+			|| ipc_port_allocate(MACH_PORT_RIGHT_RECEIVE, &reply)
+					!= KERN_SUCCESS) {
+		if (MACH_PORT_VALID(launchd)) {
+			ipc_port_deallocate(launchd);
+		}
+		return;
+	}
+	union {
+		struct {
+			mach_msg_header_t header;
+			struct broker_submit_service submit;
+		} asked;
+		struct {
+			mach_msg_header_t header;
+			mach_msg_max_trailer_t trailer;
+		} answer;
+	} message = {
+			.asked.header = {
+					.msgh_bits = MACH_MSGH_BITS(
+							MACH_MSG_TYPE_MOVE_SEND,
+							MACH_MSG_TYPE_MAKE_SEND_ONCE),
+					.msgh_size = sizeof(message.asked),
+					.msgh_remote_port = launchd,
+					.msgh_local_port = reply,
+					.msgh_id = LAUNCHD_SUBMIT_SERVICE_ID,
+			},
+	};
+	strncpy(message.asked.submit.bundle, bundle,
+			sizeof(message.asked.submit.bundle) - 1);
+	mach_msg_return_t mr = ipc_mach_msg_kernel(&message.asked.header,
+			MACH64_SEND_MSG | MACH64_RCV_MSG, sizeof(message.asked),
+			sizeof(message), reply, 0);
+	ipc_port_mod_refs(reply, MACH_PORT_RIGHT_RECEIVE, -1);
+	if (mr >= MACH_SEND_IN_PROGRESS && mr < MACH_RCV_IN_PROGRESS) {
+		ipc_port_deallocate(launchd);
+	}
 }
 
 uint64_t

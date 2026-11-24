@@ -49,6 +49,7 @@ bool jobs_rebooting(void);
 int jobs_open_log(const char *program, char **arguments, uid_t uid, gid_t gid);
 bool jobs_set_keepalive(pid_t pid, bool keep_alive);
 size_t jobs_sockets(pid_t pid, const char *name, int *fds, size_t most);
+void jobs_submit_service(const char *bundle);
 
 struct broker_name;
 void broker_name(const struct broker_name *record);

@@ -1690,6 +1690,119 @@ set_job_event(const char *label, const char *stream, const char *name,
 	return true;
 }
 
+void
+jobs_submit_service(const char *bundle)
+{
+	static const char *const frameworks[] = {
+			"/System/Library/Frameworks/",
+			"/System/Library/PrivateFrameworks/",
+			"/System/iOSSupport/System/Library/Frameworks/",
+			"/System/iOSSupport/System/Library/PrivateFrameworks/",
+	};
+	bool inside = false;
+	for (size_t i = 0; i != sizeof(frameworks) / sizeof(*frameworks); i++) {
+		inside = inside
+				|| strncmp(bundle, frameworks[i],
+						   strlen(frameworks[i]))
+						== 0;
+	}
+	size_t length = strlen(bundle);
+	if (!inside || strstr(bundle, "/../") != NULL
+			|| strstr(bundle, "/XPCServices/") == NULL || length < 4
+			|| strcmp(bundle + length - 4, ".xpc") != 0) {
+		say("%s: not a system framework's XPC service, not run",
+				bundle);
+		return;
+	}
+	char path[PATH_MAX];
+	snprintf(path, sizeof(path), "%s%s/Contents/Info.plist", sysroot,
+			bundle);
+	bool flat = access(path, F_OK) != 0;
+	if (flat) {
+		snprintf(path, sizeof(path), "%s%s/Info.plist", sysroot,
+				bundle);
+	}
+	char *plist = plist_read(path);
+	if (plist == NULL) {
+		say("%s: no Info.plist, not run", bundle);
+		return;
+	}
+	const char *end = plist + strlen(plist);
+	const char *service_end = end;
+	const char *service = plist_dictionary(
+			plist, end, "XPCService", &service_end);
+	char type[32] = "Application";
+	char identifier[LIMBO_BROKER_SERVICE_NAME_MAX];
+	char executable[NAME_MAX + 1];
+	if (service != NULL) {
+		plist_string(service, service_end, "ServiceType", type,
+				sizeof(type));
+	}
+	if (strcmp(type, "System") != 0
+			|| !plist_string(plist, end, "CFBundleIdentifier",
+					identifier, sizeof(identifier))
+			|| !plist_string(plist, end, "CFBundleExecutable",
+					executable, sizeof(executable))) {
+		say("%s: not a System XPC service, not run", bundle);
+		free(plist);
+		return;
+	}
+	char name[LIMBO_BROKER_SERVICE_NAME_MAX + 8];
+	snprintf(name, sizeof(name), "system/%s", identifier);
+	for (size_t i = 0; i != job_count; i++) {
+		if (strcmp(jobs[i]->name, name) == 0) {
+			free(plist);
+			return;
+		}
+	}
+
+	struct job *job = calloc(1, sizeof(*job));
+	job->name = strdup(name);
+	job->session = SESSION_BOOT;
+	job->root = true;
+	job->plist = strdup(bundle + 1);
+	job->throttle = DEFAULT_THROTTLE;
+	job->services = calloc(1, sizeof(char *));
+	job->services_hidden = calloc(1, sizeof(bool));
+	job->services[job->service_count++] = strdup(identifier);
+	char *variables[64];
+	size_t variable_count = service == NULL
+			? 0
+			: plist_variables(service, service_end,
+					  "EnvironmentVariables", variables,
+					  64);
+	char *environment = NULL;
+	size_t environment_length = 0;
+	FILE *out = open_memstream(&environment, &environment_length);
+	fprintf(out, "LIMBO_XPC_SERVICE=%s;LIMBO_XPC_BUNDLE=%s", identifier,
+			bundle);
+	for (size_t i = 0; i != variable_count; i++) {
+		fprintf(out, ";%s", variables[i]);
+		free(variables[i]);
+	}
+	fclose(out);
+	job->environment = environment;
+	asprintf(&job->executable, "%s%s/%s%s", sysroot, bundle,
+			flat ? "" : "Contents/MacOS/", executable);
+	job->argv = calloc(2, sizeof(char *));
+	job->argv[0] = program_argv0(job->executable, executable);
+	job->log = log_path("", executable, job->argv + 1);
+	free(plist);
+	for (size_t i = 0; i != job_count; i++) {
+		if (jobs[i]->persona_type > 0) {
+			job->persona_type = OTHER_PERSONA_TYPE;
+			break;
+		}
+	}
+
+	jobs = reallocarray(jobs, job_count + 1, sizeof(*jobs));
+	jobs[job_count++] = job;
+	hold_names(job);
+	say("%s: a System XPC service a guest looked up, %s", name, bundle);
+	load(job);
+	tell_changes();
+}
+
 bool
 jobs_rebooting(void)
 {

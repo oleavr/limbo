@@ -195,6 +195,10 @@ struct broker_hold {
 	char name[LIMBO_BROKER_SERVICE_NAME_MAX];
 };
 
+struct broker_submit_service {
+	char bundle[1024];
+};
+
 struct broker_sender {
 	int32_t pid;
 	uint32_t uid;
