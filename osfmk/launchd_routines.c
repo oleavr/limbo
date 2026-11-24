@@ -84,6 +84,8 @@ enum xpc_routine {
 #define XPC_EINVAL  22
 #define XPC_ENOTSUP 45
 
+#define CHECK_IN_SOCKETS 0x20
+
 #define XPC_DOMAIN_SYSTEM 1
 #define XPC_DOMAIN_USER   2
 
@@ -161,6 +163,7 @@ static bool reply_legacy_list(mach_msg_header_t *request, const char *name);
 static uid_t caller_euid(void);
 static bool reboot_system(mach_msg_header_t *request, uint64_t flags);
 static bool spawn(mach_msg_header_t *request, const char *label);
+static bool check_in_sockets(mach_msg_header_t *request, const char *name);
 static void reply_with_port(mach_msg_header_t *request, mach_port_name_t port,
 		mach_msg_type_name_t disposition, bool with_metadata);
 static void reply_with_named_port(mach_msg_header_t *request, const char *key,
@@ -239,6 +242,12 @@ launchd_answer(mach_msg_header_t *request)
 		break;
 	case XPC_ROUTINE_SPAWN:
 		answered = spawn(request, parsed.label);
+		break;
+	case XPC_ROUTINE_CHECK_IN:
+	case XPC_ROUTINE_CHECK_IN_LEGACY:
+		if (parsed.flags & CHECK_IN_SOCKETS) {
+			answered = check_in_sockets(request, parsed.name);
+		}
 		break;
 	case XPC_ROUTINE_CREATE_SESSION:
 		answered = create_session(request,
@@ -748,6 +757,35 @@ spawn(mach_msg_header_t *request, const char *label)
 	return true;
 }
 
+static bool
+check_in_sockets(mach_msg_header_t *request, const char *name)
+{
+	if (forward_to_launchd(request)) {
+		return true;
+	}
+	int fds[8];
+	size_t count = answering != NULL
+			? jobs_sockets(answering->pid, name, fds, 8)
+			: 0;
+	if (count == 0) {
+		reply_with_errno(request, ENOENT);
+		return true;
+	}
+
+	uint8_t storage[256];
+	struct xpc_encoder encoder;
+	xpc_encoder_init(&encoder, storage, sizeof(storage));
+	xpc_encoder_begin_dictionary(&encoder, NULL);
+	xpc_encoder_begin_array(&encoder, "port");
+	for (size_t i = 0; i != count; i++) {
+		xpc_encoder_fd(&encoder, NULL, ipc_fileport_alloc(fds[i]));
+	}
+	xpc_encoder_end(&encoder);
+	xpc_encoder_end(&encoder);
+	xpc_launchd_reply(request, &encoder);
+	return true;
+}
+
 static void
 reply_with_port(mach_msg_header_t *request, mach_port_name_t port,
 		mach_msg_type_name_t disposition, bool with_metadata)
@@ -1012,6 +1050,9 @@ serve(mach_msg_header_t *request)
 		return register_name(request, parsed.name, parsed.flags);
 	case XPC_ROUTINE_CHECK_IN:
 	case XPC_ROUTINE_CHECK_IN_LEGACY:
+		if (parsed.flags & CHECK_IN_SOCKETS) {
+			return check_in_sockets(request, parsed.name);
+		}
 		return check_in(request, parsed.name, parsed.flags);
 	case XPC_ROUTINE_KILL_SERVICE: {
 		if (xpc_services_kill(parsed.name, (int)parsed.signal) != 0) {

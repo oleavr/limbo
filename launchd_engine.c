@@ -89,6 +89,7 @@ struct job {
 	char *name;
 	char *label;
 	char *plist;
+	char *sockets;
 	char *environment;
 	bool root;
 	char *account;
@@ -117,6 +118,8 @@ struct job {
 	char *log;
 	char **variables;
 	size_t variable_count;
+	int *listeners;
+	size_t listener_count;
 
 	enum job_state state;
 	pid_t pid;
@@ -169,6 +172,8 @@ static bool process_running(pid_t pid);
 static void process_exited(struct job *job, int status);
 static void take_exit(struct job *job);
 static void job_exited(struct job *job, int status);
+static void make_listeners(struct job *job);
+static int make_listener(const struct job *job, char *entry);
 static bool crashed(int status);
 static char *exit_reason(const char *log);
 static int open_log(struct job *job);
@@ -492,6 +497,9 @@ load_session(enum job_session session)
 static bool
 load_into(struct job *job)
 {
+	if (job->listener_count == 0) {
+		make_listeners(job);
+	}
 	if (job->root && geteuid() != 0) {
 		say("%s runs as root, and the broker doesn't", job->name);
 		set_state(job, JOB_STOPPED);
@@ -859,14 +867,29 @@ process_running(pid_t pid)
 size_t
 jobs_poll_count(void)
 {
-	return (signal_fd != -1) ? 1 : 0;
+	size_t count = (signal_fd != -1) ? 1 : 0;
+	for (size_t i = 0; i != job_count; i++) {
+		count += jobs[i]->listener_count;
+	}
+	return count;
 }
 
 void
 jobs_poll_fill(struct pollfd *fds)
 {
+	size_t n = 0;
 	if (signal_fd != -1) {
-		fds[0] = (struct pollfd){.fd = signal_fd, .events = POLLIN};
+		fds[n++] = (struct pollfd){.fd = signal_fd, .events = POLLIN};
+	}
+	for (size_t i = 0; i != job_count; i++) {
+		struct job *job = jobs[i];
+		bool idle = job->state == JOB_IDLE;
+		for (size_t j = 0; j != job->listener_count; j++) {
+			fds[n++] = (struct pollfd){
+					.fd = idle ? job->listeners[j] : -1,
+					.events = POLLIN,
+			};
+		}
 	}
 }
 
@@ -880,6 +903,13 @@ jobs_poll_handle(const struct pollfd *fds, size_t count)
 		if (fds[n].fd == signal_fd) {
 			handle_signals();
 			continue;
+		}
+		for (size_t i = 0; i != job_count; i++) {
+			for (size_t j = 0; j != jobs[i]->listener_count; j++) {
+				if (jobs[i]->listeners[j] == fds[n].fd) {
+					demand(jobs[i], "a connection");
+				}
+			}
 		}
 	}
 
@@ -1408,6 +1438,109 @@ jobs_set_keepalive(pid_t pid, bool keep_alive)
 		}
 	}
 	return false;
+}
+
+size_t
+jobs_sockets(pid_t pid, const char *name, int *fds, size_t most)
+{
+	const struct job *job = NULL;
+	for (size_t i = 0; i != job_count && job == NULL; i++) {
+		if (jobs[i]->state == JOB_RUNNING && jobs[i]->pid == pid
+				&& pid > 0) {
+			job = jobs[i];
+		}
+	}
+	if (job == NULL || job->sockets == NULL) {
+		return 0;
+	}
+	size_t count = 0;
+	size_t length = strlen(name);
+	const char *entry = job->sockets;
+	for (size_t i = 0; i != job->listener_count && count != most; i++) {
+		if (strncmp(entry, name, length) == 0 && entry[length] == ':'
+				&& job->listeners[i] != -1) {
+			int fd = fcntl(job->listeners[i], F_DUPFD_CLOEXEC, 0);
+			if (fd != -1) {
+				fds[count++] = fd;
+			}
+		}
+		const char *next = strchr(entry, ';');
+		if (next == NULL) {
+			break;
+		}
+		entry = next + 1;
+	}
+	return count;
+}
+
+static void
+make_listeners(struct job *job)
+{
+	if (job->sockets == NULL) {
+		return;
+	}
+	char *copy = strdup(job->sockets);
+	char *save = NULL;
+	for (char *entry = strtok_r(copy, ";", &save); entry != NULL;
+			entry = strtok_r(NULL, ";", &save)) {
+		job->listeners = reallocarray(job->listeners,
+				job->listener_count + 1, sizeof(int));
+		job->listeners[job->listener_count++]
+				= make_listener(job, entry);
+	}
+	free(copy);
+}
+
+static int
+make_listener(const struct job *job, char *entry)
+{
+	char *fields[5];
+	char *rest = entry;
+	for (size_t i = 0; i != 5; i++) {
+		fields[i] = rest;
+		if (i == 4) {
+			break;
+		}
+		rest = strchr(rest, ':');
+		if (rest == NULL) {
+			return -1;
+		}
+		*rest++ = '\0';
+	}
+	if (strcmp(fields[1], "Unix") != 0) {
+		say("%s: no %s sockets", job->name, fields[1]);
+		return -1;
+	}
+	struct sockaddr_un address = {.sun_family = AF_UNIX};
+	int length = snprintf(address.sun_path, sizeof(address.sun_path),
+			"%s%s", sysroot, fields[4]);
+	if (length < 0 || (size_t)length >= sizeof(address.sun_path)) {
+		say("%s: socket path too long: %s", job->name, fields[4]);
+		return -1;
+	}
+	int fd = socket(AF_UNIX,
+			(strcmp(fields[2], "dgram") == 0 ? SOCK_DGRAM
+							 : SOCK_STREAM)
+					| SOCK_CLOEXEC,
+			0);
+	if (fd == -1) {
+		return -1;
+	}
+	unlink(address.sun_path);
+	if (bind(fd, (struct sockaddr *)&address, sizeof(address)) == -1
+			|| chmod(address.sun_path,
+					   (mode_t)strtoul(fields[3], NULL, 8))
+					== -1
+			|| (strcmp(fields[2], "dgram") != 0
+					&& listen(fd, SOMAXCONN) == -1)) {
+		say("%s: socket %s: %s", job->name, fields[4], strerror(errno));
+		close(fd);
+		return -1;
+	}
+	if (!job->root && geteuid() == 0) {
+		(void)!lchown(address.sun_path, user_uid, user_gid);
+	}
+	return fd;
 }
 
 bool
@@ -1943,6 +2076,7 @@ parse_job(char *line)
 	}
 	job->plist = optional(fields[2]);
 	job->label = optional(fields[3]);
+	job->sockets = optional(fields[4]);
 
 	job->run_at_load = strstr(fields[5], "runatload") != NULL;
 	job->unheld = strstr(fields[5], "unheld") != NULL;
@@ -2216,6 +2350,9 @@ describe(FILE *out, const struct job *job, bool details)
 	fprintf(out, "\n\tthrottle: %u s\n", job->throttle);
 	for (size_t i = 0; i != job->service_count; i++) {
 		fprintf(out, "\tservice: %s\n", job->services[i]);
+	}
+	if (job->sockets != NULL) {
+		fprintf(out, "\tsockets: %s\n", job->sockets);
 	}
 	for (size_t i = 0; i != job->variable_count; i++) {
 		fprintf(out, "\tvariable: %s\n", job->variables[i]);
