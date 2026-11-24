@@ -237,9 +237,10 @@ task_audit_token_of_pid(pid_t pid, audit_token_t *token)
 	memset(token, 0, sizeof(*token));
 	char line[256];
 	char state = 0;
-	unsigned int real, effective;
-	while (state != 'Z' && fgets(line, sizeof(line), status) != NULL) {
-		if (sscanf(line, "State: %c", &state) == 1) {
+	unsigned int real, effective, threads = 0;
+	while (fgets(line, sizeof(line), status) != NULL) {
+		if (sscanf(line, "State: %c", &state) == 1
+				|| sscanf(line, "Threads: %u", &threads) == 1) {
 			continue;
 		}
 		if (sscanf(line, "Uid: %u %u", &real, &effective) == 2) {
@@ -253,7 +254,7 @@ task_audit_token_of_pid(pid_t pid, audit_token_t *token)
 	}
 	fclose(status);
 	token->val[5] = pid;
-	return state != 'Z';
+	return state != 'Z' || threads > 1;
 }
 
 struct memory_usage {
