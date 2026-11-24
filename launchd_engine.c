@@ -1393,6 +1393,24 @@ jobs_shut_down(bool reboot)
 }
 
 bool
+jobs_set_keepalive(pid_t pid, bool keep_alive)
+{
+	for (size_t i = 0; i != job_count; i++) {
+		struct job *job = jobs[i];
+		if (job->state == JOB_RUNNING && job->pid == pid && pid > 0) {
+			if (job->keepalive.always != keep_alive) {
+				say("%s: kept alive %s, as it asks", job->name,
+						keep_alive ? "always"
+							   : "on demand");
+			}
+			job->keepalive.always = keep_alive;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool
 jobs_rebooting(void)
 {
 	return rebooting;

@@ -54,6 +54,7 @@
 #include "osfmk/task.h"
 #include "plist.h"
 #include "sysroot.h"
+#include "xpc_service.h"
 #include "xpc_services.h"
 
 #define SERVICE_VARIABLE   "LIMBO_XPC_SERVICE"
@@ -104,6 +105,7 @@ static char *bootstrap_variable(const char *name);
 static char *hex_variable(const char *name, const void *data, size_t size);
 static void remember_started(
 		const char *identifier, const char *instance, pid_t pid);
+static size_t from_hex(const char *hex, uint8_t *out, size_t size);
 
 extern char **environ;
 
@@ -667,4 +669,67 @@ xpc_services_kill(const char *name, int signo)
 	}
 	pthread_mutex_unlock(&lock);
 	return error;
+}
+
+void
+xpc_services_set_bootstrap(
+		const char *name, const void *dictionary, size_t size)
+{
+	pthread_mutex_lock(&bootstraps_lock);
+	struct bootstrap *found = bootstraps;
+	while (found != NULL && strcmp(found->name, name) != 0) {
+		found = found->next;
+	}
+	if (found == NULL) {
+		found = calloc(1, sizeof(*found));
+		found->name = strdup(name);
+		found->next = bootstraps;
+		bootstraps = found;
+	}
+	free(found->dictionary);
+	found->dictionary = malloc(size ? size : 1);
+	memcpy(found->dictionary, dictionary, size);
+	found->size = size;
+	pthread_mutex_unlock(&bootstraps_lock);
+}
+
+bool
+xpc_services_copy_bootstrap(struct xpc_encoder *encoder, size_t *size)
+{
+	const char *bootstrap = getenv(BOOTSTRAP_VARIABLE);
+	const char *creator = getenv(CREATOR_VARIABLE);
+	if (bootstrap == NULL || creator == NULL) {
+		return false;
+	}
+	size_t length = strlen(bootstrap) / 2;
+	if (encoder == NULL) {
+		*size = 256 + length;
+		return true;
+	}
+	uint8_t *dictionary = malloc(length ? length : 1);
+	length = from_hex(bootstrap, dictionary, length);
+	audit_token_t token;
+	memset(&token, 0, sizeof(token));
+	from_hex(creator, (uint8_t *)&token, sizeof(token));
+	xpc_encoder_begin_dictionary(encoder, NULL);
+	xpc_encoder_object(encoder, "bootstrap", dictionary, length);
+	xpc_encoder_data(encoder, "creator", &token, sizeof(token));
+	xpc_encoder_end_dictionary(encoder);
+	free(dictionary);
+	return true;
+}
+
+static size_t
+from_hex(const char *hex, uint8_t *out, size_t size)
+{
+	size_t count = 0;
+	while (count < size && hex[count * 2] != '\0'
+			&& hex[count * 2 + 1] != '\0') {
+		unsigned int byte;
+		if (sscanf(hex + count * 2, "%2x", &byte) != 1) {
+			break;
+		}
+		out[count++] = (uint8_t)byte;
+	}
+	return count;
 }

@@ -46,6 +46,7 @@
 #include "launchd_engine.h"
 #include "osfmk/broker_client.h"
 #include "osfmk/ipc.h"
+#include "sysroot.h"
 #include "thread.h"
 
 static void open_port(void);
@@ -93,6 +94,7 @@ launchd_main(int argc, char *argv[])
 		control_fd = -1;
 	}
 	prctl(PR_SET_NAME, LIMBO_LAUNCHD, 0, 0, 0);
+	sysroot_open();
 
 	jobs_init(maker.pid);
 	if (argc > 3) {

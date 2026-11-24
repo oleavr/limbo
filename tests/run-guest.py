@@ -49,6 +49,7 @@ def start_broker(broker, socket_path, binary, outdir):
     held_names = socket_path.with_suffix(".held")
     held_names.write_text("com.limbo.test.ipc.held\ncom.limbo.test.ipc.idle\n"
                           "com.limbo.test.ipc.late\ncom.limbo.test.ipc.orphan\n"
+                          "com.limbo.test.ipc.demand\n"
                           "com.limbo.test.ipc.hidden!\n"
                           "com.limbo.test.ipc.rehidden!\n"
                           "com.limbo.test.ipc.returned\n"
@@ -68,7 +69,12 @@ def start_broker(broker, socket_path, binary, outdir):
         name_frame = types.index("BROKER_NAME")
         hello_frame = types.index("BROKER_HELLO")
         program = binary.resolve()
-        jobs.write_text(f"com.limbo.test.ipc.awaited user - - - - - - 0 "
+        jobs.write_text(f"gui/com.limbo.test.ipc.demand user - - - runatload - - 0 "
+                        f"com.limbo.test.ipc.demand {program} serve-demand\n"
+                        f"loginwindow/com.limbo.test.ipc.prompt user - - - runatload "
+                        f"- - 0 com.limbo.test.ipc.prompt {program} "
+                        f"serve-demand com.limbo.test.ipc.prompt\n"
+                        f"com.limbo.test.ipc.awaited user - - - - - - 0 "
                         f"com.limbo.test.ipc.awaited {program} "
                         f"serve-second {awaited_marker}\n"
                         f"com.limbo.test.ipc.forger user - - - - - - 0 "

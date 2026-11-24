@@ -33,6 +33,7 @@
 #include <ctype.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -79,6 +80,7 @@ enum {
 #define LC_CODE_SIGNATURE          0x1d
 #define LC_BUILD_VERSION           0x32
 #define PLATFORM_MACOS             1
+#define PLATFORM_IOS               2
 #define CPU_TYPE_ARM64             0x0100000c
 #define CPU_SUBTYPE_ARM64E         2
 #define CSMAGIC_EMBEDDED_SIGNATURE 0xfade0cc0
@@ -538,4 +540,16 @@ big(const uint8_t *bytes)
 	uint32_t value;
 	memcpy(&value, bytes, sizeof(value));
 	return ntohl(value);
+}
+
+bool
+codesign_embedded(void)
+{
+	static _Atomic int8_t embedded = -1;
+	int8_t answer = atomic_load_explicit(&embedded, memory_order_relaxed);
+	if (answer == -1) {
+		answer = codesign_platform(0) == PLATFORM_IOS;
+		atomic_store_explicit(&embedded, answer, memory_order_relaxed);
+	}
+	return answer == 1;
 }

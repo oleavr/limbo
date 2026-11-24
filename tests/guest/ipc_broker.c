@@ -27,6 +27,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
@@ -145,6 +146,8 @@ static const char HELD_SERVICE_NAME[] = "com.limbo.test.ipc.held";
 static const char IDLE_SERVICE_NAME[] = "com.limbo.test.ipc.idle";
 static const char LATE_SERVICE_NAME[] = "com.limbo.test.ipc.late";
 static const char ORPHAN_SERVICE_NAME[] = "com.limbo.test.ipc.orphan";
+static const char DEMAND_SERVICE_NAME[] = "com.limbo.test.ipc.demand";
+static const char PROMPT_SERVICE_NAME[] = "com.limbo.test.ipc.prompt";
 static const char AWAITED_SERVICE_NAME[] = "com.limbo.test.ipc.awaited";
 static const char HELLO_AGAIN_SERVICE_NAME[] = "com.limbo.test.ipc.hello-again";
 static const char FORGER_SERVICE_NAME[] = "com.limbo.test.ipc.forger";
@@ -222,6 +225,8 @@ static void service_back_to_launchd(void);
 static void awaited_job_starts_again(void);
 static void job_that_said_hello_twice_starts_again(void);
 static void job_is_not_launchd(void);
+static void start_at_the_prompt(void);
+static void start_at_login_and_on_demand(void);
 static int serve_demand(const char *name);
 static int serve_second(const char *marker);
 static int hello_again(const char *marker, uint32_t hello_frame);
@@ -238,6 +243,10 @@ static void send_empty(mach_port_t dest, mach_msg_id_t id);
 static void signal_to(int fd);
 static void wait_for(int fd);
 int fileport_makeport(int fd, mach_port_t *port);
+typedef mach_port_t (*load_at_prompt_fn)(void);
+typedef int (*create_session_fn)(const char *login, int flags, ...);
+typedef pid_t (*spawn_fn)(const char *label, const char *const *argv,
+		const void *attributes, int version);
 int pid_suspend(int pid);
 int pid_resume(int pid);
 int fileport_makefd(mach_port_t port);
@@ -2451,6 +2460,9 @@ look_up_after_dup2_over_low_fds(void)
 int
 main(int argc, char *argv[])
 {
+	if (argc > 1 && strcmp(argv[1], "serve-demand") == 0) {
+		return serve_demand(argc > 2 ? argv[2] : DEMAND_SERVICE_NAME);
+	}
 	if (argc > 2 && strcmp(argv[1], "serve-second") == 0) {
 		return serve_second(argv[2]);
 	}
@@ -2502,6 +2514,8 @@ main(int argc, char *argv[])
 	awaited_job_starts_again();
 	job_that_said_hello_twice_starts_again();
 	job_is_not_launchd();
+	start_at_the_prompt();
+	start_at_login_and_on_demand();
 	return 0;
 }
 
@@ -3232,6 +3246,41 @@ job_is_not_launchd(void)
 	CHECK(bootstrap_call(LOOK_UP, UNFORGED_SERVICE_NAME) != MACH_PORT_NULL);
 	CHECK(call_job(FORGER_SERVICE_NAME) > 0);
 	CHECK(bootstrap_call(LOOK_UP, UNFORGED_SERVICE_NAME) != MACH_PORT_NULL);
+}
+
+static void
+start_at_the_prompt(void)
+{
+	load_at_prompt_fn load_at_prompt = (load_at_prompt_fn)dlsym(
+			RTLD_DEFAULT,
+			"load_launchd_jobs_at_loginwindow_prompt");
+	CHECK(load_at_prompt != NULL);
+	CHECK(bootstrap_call(LOOK_UP, PROMPT_SERVICE_NAME) == MACH_PORT_NULL);
+	CHECK(load_at_prompt() != MACH_PORT_NULL);
+	CHECK(call_job(PROMPT_SERVICE_NAME) > 0);
+}
+
+static void
+start_at_login_and_on_demand(void)
+{
+	create_session_fn create_session = (create_session_fn)dlsym(
+			RTLD_DEFAULT,
+			"create_and_switch_to_per_session_launchd");
+	spawn_fn spawn = (spawn_fn)dlsym(RTLD_DEFAULT, "_spawn_via_launchd");
+	CHECK(create_session != NULL && spawn != NULL);
+	const char *const argv[] = {DEMAND_SERVICE_NAME, NULL};
+
+	CHECK(spawn(DEMAND_SERVICE_NAME, argv, NULL, 6) == -1);
+
+	CHECK(create_session("user", 2) == 1);
+	pid_t first = call_job(DEMAND_SERVICE_NAME);
+	pid_t second = call_job(DEMAND_SERVICE_NAME);
+	pid_t third = spawn(DEMAND_SERVICE_NAME, argv, NULL, 6);
+	CHECK(third > 0);
+	CHECK(call_job(DEMAND_SERVICE_NAME) == third);
+	CHECK(first != second && second != third && first != third);
+
+	CHECK(bootstrap_call(LOOK_UP, PROMPT_SERVICE_NAME) == MACH_PORT_NULL);
 }
 
 static int

@@ -49,3 +49,7 @@ bool xpc_services_multiple_instances(const char *name);
 bool xpc_services_start(const char *name, const uint8_t *instance, bool *shared,
 		pid_t *pid);
 int xpc_services_kill(const char *name, int signo);
+struct xpc_encoder;
+void xpc_services_set_bootstrap(
+		const char *name, const void *dictionary, size_t size);
+bool xpc_services_copy_bootstrap(struct xpc_encoder *encoder, size_t *size);
