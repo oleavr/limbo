@@ -101,6 +101,19 @@ struct strings {
 	size_t count;
 };
 
+struct endpoints {
+	struct xpc_encoder *encoder;
+	pid_t host;
+	const uint8_t *instance;
+};
+
+struct endpoint_match {
+	pid_t host;
+	const uint8_t *instance;
+	mach_port_name_t port;
+	bool found;
+};
+
 static void reply_error(mach_msg_header_t *request, int64_t error);
 static uid_t domain_user(uint64_t type, uint64_t handle);
 static uid_t user_named(const char *name);
@@ -125,13 +138,19 @@ static void encode_info(struct xpc_encoder *encoder, struct job *job,
 static bool collect_status(struct job *job);
 static void reply_handle(mach_msg_header_t *request, const struct job *job);
 static bool running(pid_t pid);
+static bool hold_service(void *context, const char *name);
+static const char *service_name(const char *name, pid_t host,
+		const uint8_t *instance, char *buffer, size_t size);
 static struct job *job_for_handle(const uint8_t handle[16]);
+static void hold_instance_services(const struct job *job);
 static struct job *job_for_pid(pid_t pid);
 static void tell_exit(struct job *job);
+static bool match_endpoint(void *context, const char *name);
 static bool reply_own_properties(mach_msg_header_t *request);
 static bool parse_uuid_text(const char *text, uint8_t *out);
 static void reply_properties(mach_msg_header_t *request, struct job *job);
 static bool broker_job_plist(pid_t pid, char *path, size_t size);
+static bool add_endpoint(void *context, const char *name);
 
 enum {
 	JOB_STATE_WAITING = 0,
@@ -758,12 +777,183 @@ reply_handle(mach_msg_header_t *request, const struct job *job)
 	xpc_launchd_reply(request, &encoder);
 }
 
+bool
+launchd_jobs_submit_extension(mach_msg_header_t *request)
+{
+	struct xpc_object message, overlay, service;
+	uint64_t host = 0, domain = 0;
+	const char *path;
+	if (!xpc_message_payload(request, &message)
+			|| (path = xpc_dictionary_get_string(&message, "path"))
+					== NULL
+			|| !xpc_dictionary_get_dictionary(
+					&message, "overlay", &overlay)
+			|| !xpc_dictionary_get_dictionary(
+					&overlay, "XPCService", &service)) {
+		reply_error(request, EINVAL);
+		return true;
+	}
+	xpc_dictionary_get_uint64(&message, "type", &domain);
+	xpc_dictionary_get_uint64(&message, "handle", &host);
+
+	char bundle[PATH_MAX];
+	snprintf(bundle, sizeof(bundle), "%s", path);
+	char *contents = strstr(bundle, "/Contents/MacOS/");
+	char identifier[256] = "";
+	if (contents != NULL) {
+		*contents = '\0';
+		xpc_services_bundle_identifier(
+				bundle, identifier, sizeof(identifier));
+	} else {
+		char *slash = strrchr(bundle, '/');
+		size_t length = slash != NULL ? (size_t)(slash - bundle) : 0;
+		if (length > 6 && strncmp(slash - 6, ".appex", 6) == 0) {
+			*slash = '\0';
+			xpc_services_bundle_identifier(
+					bundle, identifier, sizeof(identifier));
+		}
+	}
+	pid_t host_pid = domain == DOMAIN_TYPE_PID ? (pid_t)host : 0;
+	uid_t user = domain_user(domain, host);
+	pthread_mutex_lock(&lock);
+	struct job *running = jobs;
+	while (running != NULL
+			&& !(running->service_type == SERVICE_TYPE_EXTENSION
+					&& !running->has_instance
+					&& running->broker_name == NULL
+					&& running->host == host_pid
+					&& host_pid != 0 && running->uid == user
+					&& strcmp(running->program, path) == 0
+					&& running->pid > 0
+					&& !collect_status(running))) {
+		running = running->next;
+	}
+	pthread_mutex_unlock(&lock);
+	if (running != NULL) {
+		reply_handle(request, running);
+		return true;
+	}
+
+	struct job *job = calloc(1, sizeof(*job));
+	getrandom(job->handle, sizeof(job->handle), 0);
+	job->label = strdup(identifier[0] != '\0' ? identifier : path);
+	job->program = strdup(path);
+	job->service_type = SERVICE_TYPE_EXTENSION;
+	job->host = host_pid;
+	job->uid = user;
+	job->plist = copy_object(&service, &job->plist_size);
+	struct xpc_object services;
+	if (broker_client_available()
+			&& xpc_dictionary_get_array(&service,
+					"_ManagedBy_Services", &services)) {
+		xpc_array_apply_strings(&services, hold_service, job);
+	}
+	if (broker_client_available() && identifier[0] != '\0'
+			&& job->host != 0) {
+		hold_service(job, identifier);
+	}
+	add_job(job);
+	reply_handle(request, job);
+	return true;
+}
+
 static bool
 running(pid_t pid)
 {
 	struct process process;
 	return process_lookup((int32_t)pid, &process) == 0
 			&& !process_exited(&process);
+}
+
+static bool
+hold_service(void *context, const char *name)
+{
+	const struct job *job = context;
+	char domain_name[300];
+	broker_client_hold(service_name(name, job->host,
+			job->has_instance ? job->instance : NULL, domain_name,
+			sizeof(domain_name)));
+	return true;
+}
+
+static const char *
+service_name(const char *name, pid_t host, const uint8_t *instance,
+		char *buffer, size_t size)
+{
+	if (host == 0) {
+		return name;
+	}
+	xpc_services_instance_name(name, host, instance, buffer, size);
+	return buffer;
+}
+
+bool
+launchd_jobs_create_instance(mach_msg_header_t *request)
+{
+	struct xpc_object message;
+	uint8_t handle[16];
+	if (!xpc_message_payload(request, &message)
+			|| !xpc_dictionary_get_uuid(
+					&message, "job-handle", handle)) {
+		return false;
+	}
+	uint8_t instance[16];
+	bool has_instance = xpc_dictionary_get_uuid(
+			&message, "instance-uuid", instance);
+	pthread_mutex_lock(&lock);
+	struct job *template = job_for_handle(handle);
+	struct job *running = jobs;
+	while (template != NULL && has_instance && running != NULL
+			&& !(running->service_type == template->service_type
+					&& running->has_instance
+					&& memcmp(running->instance, instance,
+							   sizeof(instance))
+							== 0
+					&& running->host == template->host
+					&& running->uid == template->uid
+					&& strcmp(running->program,
+							   template->program)
+							== 0
+					&& running->pid > 0
+					&& !collect_status(running))) {
+		running = running->next;
+	}
+	struct job *job = NULL;
+	if (template != NULL && (!has_instance || running == NULL)) {
+		job = calloc(1, sizeof(*job));
+		getrandom(job->handle, sizeof(job->handle), 0);
+		job->label = strdup(template->label);
+		job->program = strdup(template->program);
+		job->service_type = template->service_type;
+		job->host = template->host;
+		job->uid = template->uid;
+		job->plist_size = template->plist_size;
+		job->plist = malloc(job->plist_size);
+		memcpy(job->plist, template->plist, job->plist_size);
+	}
+	pthread_mutex_unlock(&lock);
+	if (template != NULL && has_instance && running != NULL) {
+		reply_handle(request, running);
+		return true;
+	}
+	if (job == NULL) {
+		reply_error(request, ESRCH);
+		return true;
+	}
+	job->has_instance = has_instance;
+	if (has_instance) {
+		memcpy(job->instance, instance, sizeof(job->instance));
+	}
+	struct xpc_object variables;
+	if (xpc_dictionary_get_dictionary(&message, "envvars", &variables)) {
+		job->variables = copy_object(&variables, &job->variables_size);
+	}
+	if (has_instance && job->service_type == SERVICE_TYPE_EXTENSION) {
+		hold_instance_services(job);
+	}
+	add_job(job);
+	reply_handle(request, job);
+	return true;
 }
 
 static struct job *
@@ -775,6 +965,26 @@ job_for_handle(const uint8_t handle[16])
 		}
 	}
 	return NULL;
+}
+
+static void
+hold_instance_services(const struct job *job)
+{
+	if (!broker_client_available() || job->host == 0) {
+		return;
+	}
+	struct xpc_object plist = {
+			.data = job->plist,
+			.end = (const uint8_t *)job->plist + job->plist_size,
+	};
+	struct xpc_object services;
+	if (xpc_dictionary_get_array(
+			    &plist, "_ManagedBy_Services", &services)) {
+		xpc_array_apply_strings(&services, hold_service, (void *)job);
+	}
+	if (job->label[0] != '/') {
+		hold_service((void *)job, job->label);
+	}
 }
 
 bool
@@ -1029,6 +1239,119 @@ launchd_jobs_exited(pid_t pid, int status)
 }
 
 bool
+launchd_jobs_handle_for_endpoint(mach_msg_header_t *request)
+{
+	if (!(request->msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
+		return false;
+	}
+	mach_msg_body_t *body = (mach_msg_body_t *)(request + 1);
+	mach_msg_port_descriptor_t *descriptors = (void *)(body + 1);
+	mach_port_name_t port = MACH_PORT_NULL;
+	for (mach_msg_size_t i = 0; i < body->msgh_descriptor_count; i++) {
+		if (descriptors[i].type == MACH_MSG_PORT_DESCRIPTOR
+				&& descriptors[i].disposition
+						== MACH_MSG_TYPE_PORT_SEND) {
+			port = descriptors[i].name;
+		}
+	}
+	if (port == MACH_PORT_NULL) {
+		return false;
+	}
+	struct candidate {
+		uint8_t handle[16];
+		char *label;
+		pid_t host;
+		uint8_t instance[16];
+		bool has_instance;
+		void *plist;
+		size_t plist_size;
+	} *candidates = NULL;
+	size_t count = 0;
+	pthread_mutex_lock(&lock);
+	for (struct job *job = jobs; job != NULL; job = job->next) {
+		if (job->service_type != SERVICE_TYPE_EXTENSION
+				|| job->host == 0) {
+			continue;
+		}
+		candidates = reallocarray(
+				candidates, count + 1, sizeof(*candidates));
+		struct candidate *c = &candidates[count++];
+		memcpy(c->handle, job->handle, sizeof(c->handle));
+		c->label = strdup(job->label);
+		c->host = job->host;
+		memcpy(c->instance, job->instance, sizeof(c->instance));
+		c->has_instance = job->has_instance;
+		c->plist = malloc(job->plist_size);
+		memcpy(c->plist, job->plist, job->plist_size);
+		c->plist_size = job->plist_size;
+	}
+	pthread_mutex_unlock(&lock);
+	uint8_t handle[16];
+	bool found = false;
+	for (size_t i = 0; i < count; i++) {
+		struct xpc_object plist = {
+				.data = candidates[i].plist,
+				.end = (const uint8_t *)candidates[i].plist
+						+ candidates[i].plist_size,
+		};
+		struct xpc_object services;
+		struct endpoint_match match = {
+				.host = candidates[i].host,
+				.instance = candidates[i].has_instance
+						? candidates[i].instance
+						: NULL,
+				.port = port,
+		};
+		if (!found
+				&& xpc_dictionary_get_array(&plist,
+						"_ManagedBy_Services",
+						&services)) {
+			xpc_array_apply_strings(
+					&services, match_endpoint, &match);
+		}
+		if (!found && !match.found && candidates[i].label[0] != '/') {
+			match_endpoint(&match, candidates[i].label);
+		}
+		if (match.found) {
+			memcpy(handle, candidates[i].handle, sizeof(handle));
+			found = true;
+		}
+		free(candidates[i].plist);
+		free(candidates[i].label);
+	}
+	free(candidates);
+	if (!found) {
+		reply_error(request, ESRCH);
+		return true;
+	}
+	uint8_t buffer[256];
+	struct xpc_encoder encoder;
+	xpc_encoder_init(&encoder, buffer, sizeof(buffer));
+	xpc_encoder_begin_dictionary(&encoder, NULL);
+	xpc_encoder_uuid(&encoder, "job-handle", handle);
+	xpc_encoder_end_dictionary(&encoder);
+	xpc_launchd_reply(request, &encoder);
+	return true;
+}
+
+static bool
+match_endpoint(void *context, const char *name)
+{
+	struct endpoint_match *match = context;
+	char domain_name[300];
+	mach_port_name_t port;
+	xpc_service_look_up(service_name(name, match->host, match->instance,
+					    domain_name, sizeof(domain_name)),
+			&port);
+	if (port == MACH_PORT_NULL) {
+		return true;
+	}
+	match->found = port == match->port;
+	ipc_port_deallocate(port);
+	return !match->found;
+}
+
+bool
 launchd_jobs_reply_properties(mach_msg_header_t *request, pid_t pid)
 {
 	pthread_mutex_lock(&lock);
@@ -1128,6 +1451,33 @@ reply_properties(mach_msg_header_t *request, struct job *job)
 	if (job->has_instance) {
 		xpc_encoder_uuid(&encoder, "instance", job->instance);
 	}
+	if (job->service_type == SERVICE_TYPE_EXTENSION) {
+		xpc_encoder_bool(&encoder, "extension", true);
+		xpc_encoder_int64(&encoder, "XPCExtensionHostPID", job->host);
+		struct xpc_object services;
+		bool listed = xpc_dictionary_get_array(
+				&plist, "_ManagedBy_Services", &services);
+		bool own = job->host != 0 && job->label[0] != '/';
+		if (listed || own) {
+			xpc_encoder_begin_array(
+					&encoder, "XPCServiceEndpoints");
+			struct endpoints endpoints = {
+					.encoder = &encoder,
+					.host = job->host,
+					.instance = job->has_instance
+							? job->instance
+							: NULL,
+			};
+			if (listed) {
+				xpc_array_apply_strings(&services, add_endpoint,
+						&endpoints);
+			}
+			if (own) {
+				add_endpoint(&endpoints, job->label);
+			}
+			xpc_encoder_end_array(&encoder);
+		}
+	}
 	xpc_encoder_end_dictionary(&encoder);
 	xpc_encoder_end_dictionary(&encoder);
 	xpc_launchd_reply(request, &encoder);
@@ -1152,6 +1502,32 @@ broker_job_plist(pid_t pid, char *path, size_t size)
 	}
 	free(text);
 	return tab != NULL;
+}
+
+static bool
+add_endpoint(void *context, const char *name)
+{
+	struct endpoints *endpoints = context;
+	struct xpc_encoder *encoder = endpoints->encoder;
+	char domain_name[300];
+	mach_port_name_t port;
+	xpc_service_look_up(
+			service_name(name, endpoints->host, endpoints->instance,
+					domain_name, sizeof(domain_name)),
+			&port);
+	if (port == MACH_PORT_NULL) {
+		return true;
+	}
+	if (encoder->port_count
+			>= sizeof(encoder->ports) / sizeof(encoder->ports[0])) {
+		return false;
+	}
+	xpc_encoder_begin_element_dictionary(encoder);
+	xpc_encoder_string(encoder, "XPCServiceEndpointName", name);
+	xpc_encoder_bool(encoder, "XPCServiceEndpointNonLaunching", false);
+	xpc_encoder_mach_send(encoder, "XPCServiceEndpointPort", port);
+	xpc_encoder_end_dictionary(encoder);
+	return true;
 }
 
 bool
@@ -1215,4 +1591,24 @@ launchd_jobs_own_variable(const char *variable)
 	memcpy(name, variable, length);
 	name[length] = '\0';
 	return xpc_dictionary_get_string(&variables, name) != NULL;
+}
+
+bool
+launchd_jobs_reply_service_info(mach_msg_header_t *request)
+{
+	if (own_dictionary == NULL) {
+		return false;
+	}
+	size_t capacity = 512 + strlen(own_label) + own_dictionary_size;
+	uint8_t *buffer = malloc(capacity);
+	struct xpc_encoder encoder;
+	xpc_encoder_init(&encoder, buffer, (uint32_t)capacity);
+	xpc_encoder_begin_dictionary(&encoder, NULL);
+	xpc_encoder_string(&encoder, "identifier", own_label);
+	xpc_encoder_object(&encoder, "xpcservice-dict", own_dictionary,
+			own_dictionary_size);
+	xpc_encoder_end_dictionary(&encoder);
+	xpc_launchd_reply(request, &encoder);
+	free(buffer);
+	return true;
 }

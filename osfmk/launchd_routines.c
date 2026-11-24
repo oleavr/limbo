@@ -87,6 +87,7 @@ enum xpc_routine {
 	XPC_ROUTINE_SWAP = 0x12d,
 	XPC_ROUTINE_PROPERTIES_FOR_PID = 0x2c8,
 	XPC_ROUTINE_JOB_FOR_PID = 0x3f0,
+	XPC_ROUTINE_JOB_FOR_ENDPOINT = 0x3f4,
 	XPC_ROUTINE_JOB_SUBMIT_AND_START = 0x3e8,
 	XPC_ROUTINE_JOB_REMOVE = 0x3eb,
 	XPC_ROUTINE_JOB_FOR_LABEL = 0x3ed,
@@ -95,7 +96,10 @@ enum xpc_routine {
 	XPC_ROUTINE_JOB_MONITOR = 0x3e9,
 	XPC_ROUTINE_JOB_MONITOR_POLL = 0x3ea,
 	XPC_ROUTINE_JOBS_MANAGED_BY = 0x3ec,
+	XPC_ROUTINE_JOB_SUBMIT_EXTENSION = 0x3ef,
+	XPC_ROUTINE_JOB_CREATE_INSTANCE = 0x3f2,
 	XPC_ROUTINE_JOB_START = 0x3ee,
+	XPC_ROUTINE_SERVICE_INFO = 0x2ce,
 	XPC_ROUTINE_KILL_SERVICE = 0x32c,
 	XPC_ROUTINE_ADD_SERVICE_PATHS = 0x320,
 	XPC_ROUTINE_REGISTER_SERVICE_PATHS = 0x322,
@@ -335,6 +339,7 @@ static bool register_name(
 static bool check_in(
 		mach_msg_header_t *request, const char *name, uint64_t flags);
 static mach_port_name_t job_event_channel(const mach_msg_header_t *request);
+static bool reply_service_info(mach_msg_header_t *request);
 static bool reply_bootstrap(mach_msg_header_t *request);
 static bool set_bootstrap(mach_msg_header_t *request, const char *name);
 static void reply_user_sessions_info(mach_msg_header_t *request);
@@ -463,6 +468,9 @@ launchd_answer(mach_msg_header_t *request)
 	case XPC_ROUTINE_PROPERTIES_FOR_PID:
 		answered = reply_properties_for_pid(request, parsed.pid);
 		break;
+	case XPC_ROUTINE_JOB_FOR_ENDPOINT:
+		answered = launchd_jobs_handle_for_endpoint(request);
+		break;
 	case XPC_ROUTINE_JOB_FOR_PID:
 		if (!launchd_jobs_handle_for_pid(request, (pid_t)parsed.pid)) {
 			reply_with_errno(request, XPC_ESRCH);
@@ -492,6 +500,12 @@ launchd_answer(mach_msg_header_t *request)
 		break;
 	case XPC_ROUTINE_JOBS_MANAGED_BY:
 		answered = launchd_jobs_managed(request);
+		break;
+	case XPC_ROUTINE_JOB_SUBMIT_EXTENSION:
+		answered = launchd_jobs_submit_extension(request);
+		break;
+	case XPC_ROUTINE_JOB_CREATE_INSTANCE:
+		answered = launchd_jobs_create_instance(request);
 		break;
 	case XPC_ROUTINE_JOB_START:
 		answered = launchd_jobs_start(request);
@@ -2321,6 +2335,8 @@ serve(mach_msg_header_t *request)
 			return true;
 		}
 		return reply_properties_for_pid(request, parsed.pid);
+	case XPC_ROUTINE_SERVICE_INFO:
+		return reply_service_info(request);
 	case XPC_ROUTINE_KILL_SERVICE: {
 		if (xpc_services_kill(parsed.name, (int)parsed.signal) != 0) {
 			reply_with_errno(request, XPC_ESRCH);
@@ -2333,6 +2349,7 @@ serve(mach_msg_header_t *request)
 	case XPC_ROUTINE_REGISTER_SERVICE_PATHS:
 		reply_empty(request);
 		return true;
+	case XPC_ROUTINE_JOB_FOR_ENDPOINT:
 	case XPC_ROUTINE_JOB_FOR_PID:
 	case XPC_ROUTINE_JOB_SUBMIT_AND_START:
 	case XPC_ROUTINE_JOB_REMOVE:
@@ -2342,6 +2359,8 @@ serve(mach_msg_header_t *request)
 	case XPC_ROUTINE_JOB_MONITOR:
 	case XPC_ROUTINE_JOB_MONITOR_POLL:
 	case XPC_ROUTINE_JOBS_MANAGED_BY:
+	case XPC_ROUTINE_JOB_SUBMIT_EXTENSION:
+	case XPC_ROUTINE_JOB_CREATE_INSTANCE:
 	case XPC_ROUTINE_JOB_START:
 		if (forward_to_launchd(request)) {
 			return true;
@@ -2704,6 +2723,22 @@ job_event_channel(const mach_msg_header_t *request)
 	}
 	free(answer);
 	return port;
+}
+
+static bool
+reply_service_info(mach_msg_header_t *request)
+{
+	size_t capacity = xpc_services_service_info_size();
+	uint8_t *buffer = malloc(capacity);
+	struct xpc_encoder encoder;
+	xpc_encoder_init(&encoder, buffer, (uint32_t)capacity);
+	if (xpc_services_service_info(&encoder)) {
+		xpc_launchd_reply(request, &encoder);
+	} else if (!launchd_jobs_reply_service_info(request)) {
+		reply_with_errno(request, XPC_ESRCH);
+	}
+	free(buffer);
+	return true;
 }
 
 static bool

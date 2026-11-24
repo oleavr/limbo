@@ -60,6 +60,7 @@ bool xpc_services_of_pid(pid_t pid, struct xpc_service_of_pid *out);
 bool xpc_services_bundle_identifier(
 		const char *bundle, char *identifier, size_t size);
 struct xpc_encoder;
+bool xpc_services_service_info(struct xpc_encoder *encoder);
 void xpc_services_set_bootstrap(
 		const char *name, const void *dictionary, size_t size);
 bool xpc_services_copy_bootstrap(struct xpc_encoder *encoder, size_t *size);
@@ -70,3 +71,4 @@ void xpc_services_job_events(const char *plist_path, const char *stream,
 		void (*each)(void *context, const char *name,
 				const uint8_t *descriptor, size_t size),
 		void *context);
+size_t xpc_services_service_info_size(void);

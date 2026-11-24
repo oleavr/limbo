@@ -285,6 +285,14 @@ broker_client_launchd_port(void)
 	return port;
 }
 
+void
+broker_client_hold(const char *name)
+{
+	struct broker_hold hold = {0};
+	strncpy(hold.name, name, sizeof(hold.name) - 1);
+	send_frame(BROKER_HOLD, &hold, sizeof(hold));
+}
+
 uint64_t
 broker_client_task_for_pid(int32_t pid)
 {

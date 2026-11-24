@@ -815,6 +815,34 @@ from_hex(const char *hex, uint8_t *out, size_t size)
 	return count;
 }
 
+bool
+xpc_services_service_info(struct xpc_encoder *encoder)
+{
+	const char *name = getenv(SERVICE_VARIABLE);
+	const char *bundle = getenv(BUNDLE_VARIABLE);
+	if (name == NULL || bundle == NULL) {
+		return false;
+	}
+	xpc_encoder_begin_dictionary(encoder, NULL);
+	xpc_encoder_string(encoder, "identifier", name);
+	char *plist = read_info_plist(bundle);
+	const char *dictionary_end = NULL;
+	const char *dictionary = plist == NULL
+			? NULL
+			: plist_dictionary(plist, plist + strlen(plist),
+					  "XPCService", &dictionary_end);
+	if (dictionary != NULL) {
+		encode_plist(encoder, "xpcservice-dict", dictionary,
+				dictionary_end);
+	} else {
+		xpc_encoder_begin_dictionary(encoder, "xpcservice-dict");
+		xpc_encoder_end_dictionary(encoder);
+	}
+	xpc_encoder_end_dictionary(encoder);
+	free(plist);
+	return true;
+}
+
 static const char *
 encode_plist(struct xpc_encoder *encoder, const char *key, const char *value,
 		const char *end)
@@ -1029,6 +1057,16 @@ xpc_services_job_events(const char *plist_path, const char *stream,
 	}
 	free(buffer);
 	free(plist);
+}
+
+size_t
+xpc_services_service_info_size(void)
+{
+	const char *bundle = getenv(BUNDLE_VARIABLE);
+	char *plist = bundle != NULL ? read_info_plist(bundle) : NULL;
+	size_t size = 1024 + (plist != NULL ? strlen(plist) * 2 : 0);
+	free(plist);
+	return size;
 }
 
 bool

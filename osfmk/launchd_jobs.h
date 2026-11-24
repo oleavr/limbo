@@ -33,7 +33,9 @@
 
 void launchd_jobs_init(void);
 bool launchd_jobs_submit_and_start(mach_msg_header_t *request);
+bool launchd_jobs_submit_extension(mach_msg_header_t *request);
 bool launchd_jobs_copy_with_label(mach_msg_header_t *request);
+bool launchd_jobs_create_instance(mach_msg_header_t *request);
 bool launchd_jobs_start(mach_msg_header_t *request);
 bool launchd_jobs_info(mach_msg_header_t *request);
 bool launchd_jobs_remove(mach_msg_header_t *request);
@@ -41,7 +43,9 @@ bool launchd_jobs_monitor(mach_msg_header_t *request);
 bool launchd_jobs_managed(mach_msg_header_t *request);
 bool launchd_jobs_monitor_poll(mach_msg_header_t *request);
 bool launchd_jobs_handle_for_pid(mach_msg_header_t *request, pid_t pid);
+bool launchd_jobs_handle_for_endpoint(mach_msg_header_t *request);
 bool launchd_jobs_reply_properties(mach_msg_header_t *request, pid_t pid);
 bool launchd_jobs_properties(mach_msg_header_t *request);
+bool launchd_jobs_reply_service_info(mach_msg_header_t *request);
 bool launchd_jobs_own_variable(const char *variable);
 void launchd_jobs_exited(pid_t pid, int status);
