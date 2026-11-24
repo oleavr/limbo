@@ -70,6 +70,7 @@ struct service {
 	char *bundle;
 	char *executable;
 	bool shared;
+	bool system;
 	bool multiple;
 };
 
@@ -415,6 +416,9 @@ read_folder(struct folder *folder)
 							.executable
 							= strdup(executable),
 							.shared = shared,
+							.system
+							= strcmp(type, "System")
+									== 0,
 							.multiple = multiple,
 			};
 		}
@@ -447,13 +451,20 @@ xpc_services_start(const char *name, const uint8_t *instance, bool *shared,
 	}
 	*shared = found.shared;
 	*pid = 0;
-	char text[37];
-	if (instance != NULL && found.multiple && !found.shared) {
-		xpc_services_uuid_text(instance, text);
+	broker_client_ensure();
+	if (found.system && broker_client_available()) {
+		broker_client_submit_service(found.bundle);
+	} else {
+		char text[37];
+		if (instance != NULL && found.multiple && !found.shared) {
+			xpc_services_uuid_text(instance, text);
+		}
+		bool own_instance = instance != NULL && found.multiple
+				&& !found.shared;
+		*pid = spawn(&found, own_instance ? text : NULL);
+		remember_started(found.identifier, own_instance ? text : NULL,
+				*pid);
 	}
-	bool own_instance = instance != NULL && found.multiple && !found.shared;
-	*pid = spawn(&found, own_instance ? text : NULL);
-	remember_started(found.identifier, own_instance ? text : NULL, *pid);
 	return true;
 }
 

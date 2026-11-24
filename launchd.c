@@ -52,6 +52,7 @@
 static void open_port(void);
 static void *receive_requests(void *unused);
 static void answer_requests(void);
+static void answer_submit_service(mach_msg_header_t *request);
 static void handle_broker(void);
 static void handle_commands(const struct pollfd *ready);
 static void answer_command(int fd);
@@ -188,9 +189,36 @@ answer_requests(void)
 	while (poll(&ready, 1, 0) == 1
 			&& read(requests[0], &request, sizeof(request))
 					== sizeof(request)) {
-		launchd_answer(request);
+		if (request->msgh_id == LAUNCHD_SUBMIT_SERVICE_ID) {
+			answer_submit_service(request);
+		} else {
+			launchd_answer(request);
+		}
 		free(request);
 	}
+}
+
+static void
+answer_submit_service(mach_msg_header_t *request)
+{
+	struct broker_submit_service submit = {0};
+	uint32_t length = request->msgh_size > sizeof(*request)
+			? request->msgh_size - (uint32_t)sizeof(*request)
+			: 0;
+	memcpy(&submit, request + 1,
+			length < sizeof(submit) ? length : sizeof(submit));
+	submit.bundle[sizeof(submit.bundle) - 1] = '\0';
+	jobs_submit_service(submit.bundle);
+	mach_msg_header_t reply = {
+			.msgh_bits
+			= MACH_MSGH_BITS(MACH_MSGH_BITS_REMOTE(
+							 request->msgh_bits),
+					0),
+			.msgh_size = sizeof(reply),
+			.msgh_remote_port = request->msgh_remote_port,
+			.msgh_id = request->msgh_id + 100,
+	};
+	ipc_launchd_send(&reply);
 }
 
 static void
