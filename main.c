@@ -53,8 +53,10 @@
 #include "launchd.h"
 #include "linker.h"
 #include "osfmk/broker_client.h"
+#include "osfmk/launchd_jobs.h"
 #include "osfmk/mach_vm.h"
 #include "osfmk/task.h"
+#include "osfmk/xpc_services.h"
 #include "shared_cache.h"
 #include "syscall.h"
 #include "sysroot.h"
@@ -202,6 +204,8 @@ run(int argc, char *argv[], char *envp[])
 	bool task_suspended
 			= suspended != NULL && strcmp(suspended, "task") == 0;
 	unsetenv("LIMBO_START_SUSPENDED");
+	xpc_services_init(argv[1]);
+	launchd_jobs_init();
 	prctl(PR_SET_NAME, basename(argv[1]));
 	prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
 
