@@ -33,6 +33,7 @@
 
 int codesign_ops(int32_t pid, uint32_t ops, void *buffer, size_t size);
 
+bool codesign_embedded(void);
 uint32_t codesign_platform(int32_t pid);
 
 /*

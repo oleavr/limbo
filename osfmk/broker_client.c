@@ -68,6 +68,7 @@ static int broker_fd = -1;
 static uint32_t guest_id;
 static pid_t launchd_pid;
 static pthread_mutex_t call_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t port_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t send_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t reply_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t reply_ready = PTHREAD_COND_INITIALIZER;
@@ -263,6 +264,25 @@ broker_client_is_launchd(pid_t pid)
 			&& (pid == broker
 					|| (launchd_pid > 0
 							&& pid == launchd_pid));
+}
+
+uint64_t
+broker_client_launchd_port(void)
+{
+	static bool asked;
+	static uint64_t port;
+	pthread_mutex_lock(&port_lock);
+	if (!asked) {
+		broker_client_ensure();
+		struct broker_lookup_reply reply = {0};
+		asked = broker_fd == -1
+				|| broker_client_call(BROKER_LAUNCHD_PORT, NULL,
+						0, BROKER_LOOKUP_REPLY, &reply,
+						sizeof(reply));
+		port = reply.found ? reply.global_id : 0;
+	}
+	pthread_mutex_unlock(&port_lock);
+	return port;
 }
 
 uint64_t

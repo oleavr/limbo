@@ -46,6 +46,7 @@ void jobs_shut_down(bool reboot);
 void jobs_process_exited(pid_t pid);
 void jobs_broker_gone(void);
 bool jobs_rebooting(void);
+bool jobs_set_keepalive(pid_t pid, bool keep_alive);
 
 struct broker_name;
 void broker_name(const struct broker_name *record);
