@@ -149,6 +149,12 @@ void ipc_remote_all_gone(void);
 kern_return_t names_check_in(const char *name, mach_port_name_t *port);
 kern_return_t names_register(const char *name, mach_port_name_t port);
 kern_return_t names_look_up(const char *name, mach_port_name_t *port);
+kern_return_t names_look_up_in(const char *name, uint32_t domain,
+		mach_port_name_t *port, bool *hidden);
+kern_return_t names_look_up_registered(
+		const char *name, uint32_t domain, mach_port_name_t *port);
+kern_return_t names_look_up_instance(
+		const char *name, uint32_t domain, mach_port_name_t *port);
 void ipc_port_adopt_kobject(
 		mach_port_name_t name, ipc_kobject_type_t type, void *kobject);
 

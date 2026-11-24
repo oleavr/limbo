@@ -41,6 +41,8 @@ struct xpc_service {
 };
 
 kern_return_t xpc_service_look_up(const char *name, mach_port_name_t *port);
+kern_return_t xpc_service_look_up_in(
+		const char *name, uint32_t domain, mach_port_name_t *port);
 mach_port_name_t xpc_service_stand_in(const char *name);
 void xpc_service_serve(void *kobject, mach_msg_header_t *request);
 mach_msg_return_t xpc_service_reply(

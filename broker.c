@@ -971,7 +971,8 @@ look_up_service(struct connection *conn, const struct broker_lookup *req)
 			? req->domain
 			: account_domain(conn, req->name);
 	uint32_t domain = account != 0 ? account : req->domain;
-	if (held != NULL && !(held->launchd & BROKER_NAME_UNLOADED)) {
+	if (held != NULL && !req->registered
+			&& !(held->launchd & BROKER_NAME_UNLOADED)) {
 		if (!has_job(held, domain)
 				&& has_job(held, BROKER_DOMAIN_SYSTEM)) {
 			domain = BROKER_DOMAIN_SYSTEM;

@@ -332,6 +332,8 @@ static size_t gone_guest_index(uint32_t guest_id);
 static void names_fork_prepare(void);
 static void names_fork_parent(void);
 static void names_fork_child(void);
+static kern_return_t look_up(const char *name, uint32_t domain, bool registered,
+		bool instance, mach_port_name_t *port, bool *hidden);
 static uint32_t register_name(const char *name, uint64_t global_id);
 static uint64_t own_name(const char *name);
 static void add_own_name(const char *name, uint64_t global_id);
@@ -2904,7 +2906,38 @@ names_register(const char *name, mach_port_name_t port)
 kern_return_t
 names_look_up(const char *name, mach_port_name_t *port)
 {
+	return names_look_up_in(name, broker_client_domain(), port, NULL);
+}
+
+kern_return_t
+names_look_up_in(const char *name, uint32_t domain, mach_port_name_t *port,
+		bool *hidden)
+{
+	return look_up(name, domain, false, false, port, hidden);
+}
+
+kern_return_t
+names_look_up_registered(
+		const char *name, uint32_t domain, mach_port_name_t *port)
+{
+	return look_up(name, domain, true, false, port, NULL);
+}
+
+kern_return_t
+names_look_up_instance(
+		const char *name, uint32_t domain, mach_port_name_t *port)
+{
+	return look_up(name, domain, false, true, port, NULL);
+}
+
+static kern_return_t
+look_up(const char *name, uint32_t domain, bool registered, bool instance,
+		mach_port_name_t *port, bool *hidden)
+{
 	*port = MACH_PORT_NULL;
+	if (hidden != NULL) {
+		*hidden = false;
+	}
 	pthread_mutex_lock(&own_lock);
 	uint64_t own = own_name(name);
 	pthread_mutex_unlock(&own_lock);
@@ -2918,12 +2951,19 @@ names_look_up(const char *name, mach_port_name_t *port)
 		return BOOTSTRAP_UNKNOWN_SERVICE;
 	}
 
-	struct broker_lookup request = {.domain = broker_client_domain()};
+	struct broker_lookup request = {
+			.domain = domain,
+			.registered = registered,
+			.instance = instance,
+	};
 	strncpy(request.name, name, sizeof(request.name) - 1);
 	struct broker_lookup_reply reply = {0};
 	if (!broker_client_call(BROKER_LOOKUP, &request, sizeof(request),
 			    BROKER_LOOKUP_REPLY, &reply, sizeof(reply))
 			|| !reply.found) {
+		if (hidden != NULL) {
+			*hidden = reply.hidden;
+		}
 		return BOOTSTRAP_UNKNOWN_SERVICE;
 	}
 	*port = ipc_names_send_right(reply.global_id);
