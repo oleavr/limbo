@@ -29,6 +29,7 @@
 #include <string.h>
 
 #include "bootstrap/bootstrap_defs.h"
+#include "broker_client.h"
 #include "ipc.h"
 #include "libinfo.h"
 #include "xpc_service.h"
@@ -51,8 +52,16 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 kern_return_t
 xpc_service_look_up(const char *name, mach_port_name_t *port)
 {
-	kern_return_t kr = names_look_up(name, port);
-	if (kr != BOOTSTRAP_UNKNOWN_SERVICE) {
+	return xpc_service_look_up_in(name, broker_client_domain(), port);
+}
+
+kern_return_t
+xpc_service_look_up_in(
+		const char *name, uint32_t domain, mach_port_name_t *port)
+{
+	bool hidden;
+	kern_return_t kr = names_look_up_in(name, domain, port, &hidden);
+	if (kr != BOOTSTRAP_UNKNOWN_SERVICE || hidden) {
 		return kr;
 	}
 	*port = xpc_service_stand_in(name);

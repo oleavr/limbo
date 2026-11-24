@@ -326,7 +326,7 @@ def broker_and_launchd(broker, tool, outdir):
 
 def look_up(sock, name, instance):
     sock.send(frame("LOOKUP", name_field(name) + struct.pack(
-        "II", DOMAIN_USER, 1 if instance else 0)))
+        "III", DOMAIN_USER, 0, 1 if instance else 0)))
     found, hidden, port = struct.unpack("IIQ", answer_of(
         sock, "LOOKUP_REPLY", f"a look-up of {name}")[:16])
     return port if found else None

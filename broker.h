@@ -168,6 +168,7 @@ struct broker_registered {
 struct broker_lookup {
 	char name[LIMBO_BROKER_SERVICE_NAME_MAX];
 	uint32_t domain;
+	uint32_t registered;
 	uint32_t instance;
 };
 
