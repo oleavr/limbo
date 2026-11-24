@@ -180,15 +180,7 @@ task_info(task_name_t target_task, task_flavor_t flavor,
 			*task_info_outCnt = TASK_AUDIT_TOKEN_COUNT;
 			break;
 		}
-		memset(audit_token_p, 0, sizeof(audit_token_t));
-		audit_token_p->val[0] = getuid();
-		audit_token_p->val[1] = geteuid();
-		audit_token_p->val[2] = gid_from_linux(getegid());
-		audit_token_p->val[3] = getuid();
-		audit_token_p->val[4] = gid_from_linux(getgid());
-		audit_token_p->val[5] = getpid();
-		/* TODO: idversion_for_pid(getpid()); */
-		audit_token_p->val[7] = 10;
+		task_audit_token_self(audit_token_p);
 		*task_info_outCnt = TASK_AUDIT_TOKEN_COUNT;
 	} break;
 	case TASK_DYLD_INFO: {
@@ -224,6 +216,20 @@ task_info(task_name_t target_task, task_flavor_t flavor,
 	}
 
 	return KERN_SUCCESS;
+}
+
+void
+task_audit_token_self(audit_token_t *token)
+{
+	memset(token, 0, sizeof(audit_token_t));
+	token->val[0] = getuid();
+	token->val[1] = geteuid();
+	token->val[2] = gid_from_linux(getegid());
+	token->val[3] = getuid();
+	token->val[4] = gid_from_linux(getgid());
+	token->val[5] = getpid();
+	/* TODO: idversion_for_pid(getpid()); */
+	token->val[7] = 10;
 }
 
 bool
