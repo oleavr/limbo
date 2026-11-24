@@ -106,6 +106,10 @@ static char *hex_variable(const char *name, const void *data, size_t size);
 static void remember_started(
 		const char *identifier, const char *instance, pid_t pid);
 static size_t from_hex(const char *hex, uint8_t *out, size_t size);
+static const char *encode_plist(struct xpc_encoder *encoder, const char *key,
+		const char *value, const char *end);
+static char *plist_text(const char *text, const char *text_end);
+static size_t plist_data(const char *text, const char *text_end, uint8_t *out);
 
 extern char **environ;
 
@@ -732,4 +736,220 @@ from_hex(const char *hex, uint8_t *out, size_t size)
 		out[count++] = (uint8_t)byte;
 	}
 	return count;
+}
+
+static const char *
+encode_plist(struct xpc_encoder *encoder, const char *key, const char *value,
+		const char *end)
+{
+	value = plist_skip(value, end);
+	const char *value_end = plist_value_end(value, end);
+	bool dictionary = strncmp(value, "<dict>", 6) == 0;
+	if (dictionary || strncmp(value, "<array>", 7) == 0) {
+		if (dictionary) {
+			xpc_encoder_begin_dictionary(encoder, key);
+		} else {
+			xpc_encoder_begin_array(encoder, key);
+		}
+		const char *scan = value + (dictionary ? 6 : 7);
+		const char *close = dictionary ? "</dict>" : "</array>";
+		for (;;) {
+			scan = plist_skip(scan, value_end);
+			if (scan >= value_end
+					|| strncmp(scan, close, strlen(close))
+							== 0) {
+				break;
+			}
+			char name[256] = "";
+			if (dictionary) {
+				if (strncmp(scan, "<key>", 5) != 0) {
+					break;
+				}
+				const char *name_end = strstr(scan, "</key>");
+				if (name_end == NULL) {
+					break;
+				}
+				char *text = plist_text(scan + 5, name_end);
+				snprintf(name, sizeof(name), "%s", text);
+				free(text);
+				scan = name_end + 6;
+			}
+			scan = encode_plist(encoder, dictionary ? name : NULL,
+					scan, value_end);
+		}
+		xpc_encoder_end_dictionary(encoder);
+	} else if (strncmp(value, "<dict/>", 7) == 0) {
+		xpc_encoder_begin_dictionary(encoder, key);
+		xpc_encoder_end_dictionary(encoder);
+	} else if (strncmp(value, "<array/>", 8) == 0) {
+		xpc_encoder_begin_array(encoder, key);
+		xpc_encoder_end_array(encoder);
+	} else if (strncmp(value, "<true/>", 7) == 0
+			|| strncmp(value, "<false/>", 8) == 0) {
+		xpc_encoder_bool(encoder, key, value[1] == 't');
+	} else if (strncmp(value, "<string/>", 9) == 0) {
+		xpc_encoder_string(encoder, key, "");
+	} else {
+		const char *text = strchr(value, '>');
+		const char *text_end = text != NULL ? strchr(text, '<') : NULL;
+		if (text == NULL || text_end == NULL) {
+			return value_end;
+		}
+		text++;
+		if (strncmp(value, "<string>", 8) == 0) {
+			char *string = plist_text(text, text_end);
+			xpc_encoder_string(encoder, key, string);
+			free(string);
+		} else if (strncmp(value, "<integer>", 9) == 0) {
+			xpc_encoder_int64(encoder, key, strtoll(text, NULL, 0));
+		} else if (strncmp(value, "<real>", 6) == 0) {
+			xpc_encoder_double(encoder, key, strtod(text, NULL));
+		} else if (strncmp(value, "<data>", 6) == 0) {
+			uint8_t *data = malloc(text_end - text + 1);
+			size_t length = plist_data(text, text_end, data);
+			xpc_encoder_data(encoder, key, data, (uint32_t)length);
+			free(data);
+		}
+	}
+	return value_end;
+}
+
+static char *
+plist_text(const char *text, const char *text_end)
+{
+	char *out = malloc(text_end - text + 1);
+	size_t length = 0;
+	static const struct {
+		const char *entity;
+		char character;
+	} entities[] = {
+			{"&amp;", '&'},
+			{"&lt;", '<'},
+			{"&gt;", '>'},
+			{"&quot;", '"'},
+			{"&apos;", '\''},
+	};
+	while (text < text_end) {
+		bool replaced = false;
+		for (size_t i = 0; i < sizeof(entities) / sizeof(entities[0]);
+				i++) {
+			size_t entity = strlen(entities[i].entity);
+			if (strncmp(text, entities[i].entity, entity) == 0) {
+				out[length++] = entities[i].character;
+				text += entity;
+				replaced = true;
+				break;
+			}
+		}
+		if (!replaced) {
+			out[length++] = *text++;
+		}
+	}
+	out[length] = '\0';
+	return out;
+}
+
+static size_t
+plist_data(const char *text, const char *text_end, uint8_t *out)
+{
+	static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklm"
+				       "nopqrstuvwxyz0123456789+/";
+	uint32_t bits = 0;
+	int count = 0;
+	size_t length = 0;
+	for (; text < text_end && *text != '='; text++) {
+		const char *at = strchr(alphabet, *text);
+		if (at == NULL || *text == '\0') {
+			continue;
+		}
+		bits = bits << 6 | (uint32_t)(at - alphabet);
+		count += 6;
+		if (count >= 8) {
+			count -= 8;
+			out[length++] = (uint8_t)(bits >> count);
+		}
+	}
+	return length;
+}
+
+bool
+xpc_services_job_event(const char *plist_path, const char *stream,
+		const char *name, struct xpc_encoder *encoder)
+{
+	char buffer[PATH_MAX];
+	FILE *file = fopen(sysroot_host_path(plist_path, 0, buffer), "r");
+	if (file == NULL) {
+		return false;
+	}
+	char *plist = NULL;
+	size_t length = 0;
+	FILE *out = open_memstream(&plist, &length);
+	char chunk[4096];
+	size_t n;
+	while ((n = fread(chunk, 1, sizeof(chunk), file)) > 0) {
+		fwrite(chunk, 1, n, out);
+	}
+	fclose(out);
+	fclose(file);
+	const char *end = plist + length;
+	const char *events = plist_dictionary(plist, end, "LaunchEvents", &end);
+	const char *streams = events != NULL
+			? plist_dictionary(events, end, stream, &end)
+			: NULL;
+	const char *event = streams != NULL
+			? plist_dictionary(streams, end, name, &end)
+			: NULL;
+	if (event != NULL) {
+		xpc_encoder_begin_dictionary(encoder, NULL);
+		encode_plist(encoder, "event", event, end);
+		xpc_encoder_end_dictionary(encoder);
+	}
+	free(plist);
+	return event != NULL;
+}
+
+void
+xpc_services_job_events(const char *plist_path, const char *stream,
+		void (*each)(void *context, const char *name,
+				const uint8_t *descriptor, size_t size),
+		void *context)
+{
+	char path[PATH_MAX];
+	char *plist = plist_read(sysroot_host_path(plist_path, 0, path));
+	if (plist == NULL) {
+		return;
+	}
+	const char *end = plist + strlen(plist);
+	const char *events = plist_dictionary(plist, end, "LaunchEvents", &end);
+	const char *scan = events != NULL
+			? plist_dictionary(events, end, stream, &end)
+			: NULL;
+	if (scan != NULL) {
+		scan = plist_skip(scan, end);
+		scan += strncmp(scan, "<dict>", 6) == 0 ? 6 : 0;
+	}
+	size_t capacity = 64 * 1024;
+	uint8_t *buffer = malloc(capacity);
+	while (scan != NULL) {
+		scan = plist_skip(scan, end);
+		const char *name_end = strncmp(scan, "<key>", 5) == 0
+				? strstr(scan, "</key>")
+				: NULL;
+		if (name_end == NULL || name_end >= end) {
+			break;
+		}
+		const char *value = plist_skip(name_end + 6, end);
+		if (strncmp(value, "<dict", 5) != 0) {
+			scan = plist_value_end(value, end);
+			continue;
+		}
+		char *name = plist_text(scan + 5, name_end);
+		struct xpc_encoder encoder;
+		xpc_encoder_init(&encoder, buffer, (uint32_t)capacity);
+		scan = encode_plist(&encoder, NULL, value, end);
+		each(context, name, buffer + 8, encoder.offset - 8);
+		free(name);
+	}
+	free(buffer);
+	free(plist);
 }

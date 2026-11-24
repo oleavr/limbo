@@ -60,6 +60,17 @@ enum xpc_routine {
 	XPC_ROUTINE_LOOK_UP_LEGACY = 0xcf,
 	XPC_ROUTINE_CHECK_IN_LEGACY = 0xce,
 	XPC_ROUTINE_REGISTER = 0xcc,
+	XPC_ROUTINE_PUBLISHER_SUBSCRIPTIONS = 0x193,
+	XPC_ROUTINE_PUBLISHER_ARM_POLL = 0x196,
+	XPC_ROUTINE_PUBLISHER_CREATE_SUBSCRIPTION = 0x19c,
+	XPC_ROUTINE_PUBLISHER_SET_EVENT = 0x198,
+	XPC_ROUTINE_PUBLISHER_COPY_EVENT = 0x199,
+	XPC_ROUTINE_PUBLISHER_EVENT_NAME = 0x192,
+	XPC_ROUTINE_PUBLISHER_SUBSCRIBER = 0x19a,
+	XPC_ROUTINE_PUBLISHER_SUBSCRIBER_UID = 0x19b,
+	XPC_ROUTINE_PUBLISHER_SUBSCRIBER_ASID = 0x197,
+	XPC_ROUTINE_COPY_EVENT = 0x191,
+	XPC_ROUTINE_SET_EVENT = 0x190,
 	XPC_ROUTINE_BOOTSTRAP_PARENT = 0xcb,
 	XPC_ROUTINE_UNCORK_PID_DOMAIN = 0x323,
 	XPC_ROUTINE_COPY_BOOTSTRAP = 0x2c7,
@@ -84,7 +95,11 @@ enum xpc_routine {
 #define XPC_EINVAL  22
 #define XPC_ENOTSUP 45
 
-#define CHECK_IN_SOCKETS 0x20
+#define GETAUDIT_ADDR_ASID 10
+
+#define CHECK_IN_SOCKETS      0x20
+#define LOOK_UP_EVENT_CHANNEL 7
+#define CHECK_IN_EVENT_STREAM 0x10
 
 #define XPC_DOMAIN_SYSTEM 1
 #define XPC_DOMAIN_USER   2
@@ -136,6 +151,63 @@ struct caller {
 
 #define REGISTER_PER_PID 0x1
 
+struct subscription {
+	struct subscription *next;
+	char *stream;
+	uint32_t domain;
+	char *name;
+	uint64_t token;
+	int64_t subscriber_pid;
+	char *job;
+	uint32_t job_uid;
+	uint32_t job_domain;
+	uint8_t *descriptor;
+	size_t size;
+};
+
+struct loaded_stream {
+	struct loaded_stream *next;
+	char *stream;
+	uint32_t domain;
+	uint64_t generation;
+};
+
+struct publisher_poll {
+	struct publisher_poll *next;
+	char *stream;
+	uint32_t domain;
+	mach_port_name_t reply;
+};
+
+struct silent_listener {
+	struct silent_listener *next;
+	char *name;
+};
+
+#define LISTENER_WAIT_STEPS       100
+#define LISTENER_WAIT_STEP_US     50000
+#define LISTENER_RUNNING_GRACE_MS 1000
+
+struct job_subscriptions {
+	const char *stream;
+	const char *label;
+	uint32_t uid;
+	int64_t pid;
+	uint32_t domain;
+	struct job_event **events;
+};
+
+struct job_event {
+	struct job_event *next;
+	char *label;
+	char *name;
+	uint32_t uid;
+	int64_t pid;
+	uint32_t domain;
+	uint8_t *descriptor;
+	size_t size;
+};
+
 #define ANSWER_MAX (16 * 1024)
 
 static void parse_request(
@@ -169,6 +241,44 @@ static void reply_with_port(mach_msg_header_t *request, mach_port_name_t port,
 static void reply_with_named_port(mach_msg_header_t *request, const char *key,
 		mach_port_name_t port, mach_msg_type_name_t disposition,
 		bool with_metadata);
+static bool set_event(mach_msg_header_t *request, const char *stream,
+		const char *name, const uint8_t *descriptor, size_t size);
+static void answer_polls(void);
+static uint64_t events_generation(void);
+static bool reply_subscriber_listener(
+		mach_msg_header_t *request, const char *stream, uint64_t token);
+static bool subscriber_name(const char *stream, uint64_t token, char *name,
+		size_t size, char *job, size_t job_size, uint32_t *job_domain);
+static struct subscription *subscription_of(const char *stream, uint64_t token);
+static int64_t job_running_or_start(const char *job);
+static int64_t job_running_ms(const char *job);
+static void reply_subscriptions(
+		mach_msg_header_t *request, const char *stream, uint64_t token);
+static void load_job_subscriptions(const char *stream);
+static uint32_t publisher_domain(void);
+static size_t split_fields(char *line, char **fields, size_t max);
+static void add_job_subscription(void *context, const char *name,
+		const uint8_t *descriptor, size_t size);
+static void put_job_event(struct job_event **events,
+		const struct job_subscriptions *job, const char *name,
+		const uint8_t *descriptor, size_t size);
+static struct job_event **job_event_link(
+		struct job_event **events, const char *label, const char *name);
+static bool arm_poll(mach_msg_header_t *request, const char *stream);
+static bool create_subscription(
+		mach_msg_header_t *request, const struct xpc_request *parsed);
+static bool set_subscription_event(
+		mach_msg_header_t *request, const struct xpc_request *parsed);
+static bool reply_subscription_event(
+		mach_msg_header_t *request, const char *stream, uint64_t token);
+static bool reply_subscription_name(
+		mach_msg_header_t *request, const char *stream, uint64_t token);
+static bool reply_subscriber(
+		mach_msg_header_t *request, uint64_t token, bool uid);
+static bool reply_subscriber_session(
+		mach_msg_header_t *request, const char *stream, uint64_t token);
+static bool reply_event(mach_msg_header_t *request, const char *stream,
+		const char *name);
 static bool create_session(mach_msg_header_t *request, bool login_window);
 static mach_msg_header_t *ask_launchd(const mach_msg_header_t *request);
 static void release_request(mach_msg_header_t *request);
@@ -180,6 +290,10 @@ static bool serve_port(void *kobject, mach_msg_header_t *request, bool remote);
 static uint32_t user_domain(int64_t uid);
 static bool reply_per_user_bootstrap(mach_msg_header_t *request, int64_t uid);
 static bool serve(mach_msg_header_t *request);
+static bool look_up_subscriber(
+		mach_msg_header_t *request, const struct xpc_request *parsed);
+static bool look_up_job_listener(mach_msg_header_t *request, const char *name,
+		const char *job, uint32_t domain, int64_t ran_ms);
 static bool look_up(mach_msg_header_t *request, const char *name,
 		const uint8_t *instance, uint64_t domain_type,
 		int64_t targetpid, int64_t target_uid);
@@ -210,6 +324,13 @@ static const struct xpc_bootstrap_routines launchd_routines = {
 };
 
 XPC_BOOTSTRAP_ROUTINES(launchd_routines);
+static struct loaded_stream *loaded_streams;
+
+static struct subscription *subscriptions;
+static struct publisher_poll *publisher_polls;
+static uint64_t last_token;
+static pthread_mutex_t subscriptions_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct silent_listener *silent_listeners;
 
 void
 launchd_answer(mach_msg_header_t *request)
@@ -248,6 +369,52 @@ launchd_answer(mach_msg_header_t *request)
 		if (parsed.flags & CHECK_IN_SOCKETS) {
 			answered = check_in_sockets(request, parsed.name);
 		}
+		break;
+	case XPC_ROUTINE_SET_EVENT:
+		answered = set_event(request, parsed.stream, parsed.name,
+				parsed.descriptor, parsed.descriptor_size);
+		break;
+	case XPC_ROUTINE_LOOK_UP:
+	case XPC_ROUTINE_LOOK_UP_LEGACY:
+		answered = parsed.type == LOOK_UP_EVENT_CHANNEL
+				&& parsed.lookup_handle != 0
+				&& reply_subscriber_listener(request,
+						parsed.name,
+						parsed.lookup_handle);
+		break;
+	case XPC_ROUTINE_PUBLISHER_SUBSCRIPTIONS:
+		reply_subscriptions(request, parsed.stream, 0);
+		answered = true;
+		break;
+	case XPC_ROUTINE_PUBLISHER_ARM_POLL:
+		answered = arm_poll(request, parsed.stream);
+		break;
+	case XPC_ROUTINE_PUBLISHER_CREATE_SUBSCRIPTION:
+		answered = create_subscription(request, &parsed);
+		break;
+	case XPC_ROUTINE_PUBLISHER_SET_EVENT:
+		answered = set_subscription_event(request, &parsed);
+		break;
+	case XPC_ROUTINE_PUBLISHER_COPY_EVENT:
+		answered = reply_subscription_event(
+				request, parsed.stream, parsed.token);
+		break;
+	case XPC_ROUTINE_PUBLISHER_EVENT_NAME:
+		answered = reply_subscription_name(
+				request, parsed.stream, parsed.token);
+		break;
+	case XPC_ROUTINE_PUBLISHER_SUBSCRIBER:
+		answered = reply_subscriber(request, parsed.token, false);
+		break;
+	case XPC_ROUTINE_PUBLISHER_SUBSCRIBER_UID:
+		answered = reply_subscriber(request, parsed.token, true);
+		break;
+	case XPC_ROUTINE_PUBLISHER_SUBSCRIBER_ASID:
+		answered = reply_subscriber_session(
+				request, parsed.stream, parsed.token);
+		break;
+	case XPC_ROUTINE_COPY_EVENT:
+		answered = reply_event(request, parsed.stream, parsed.name);
 		break;
 	case XPC_ROUTINE_CREATE_SESSION:
 		answered = create_session(request,
@@ -813,6 +980,761 @@ reply_with_named_port(mach_msg_header_t *request, const char *key,
 }
 
 static bool
+set_event(mach_msg_header_t *request, const char *stream, const char *name,
+		const uint8_t *descriptor, size_t size)
+{
+	if (forward_to_launchd(request)) {
+		return true;
+	}
+	char label[256], plist[PATH_MAX];
+	if (!job_of_pid(caller_pid(), label, sizeof(label), plist,
+			    sizeof(plist))) {
+		reply_with_errno(request, XPC_ESRCH);
+		return true;
+	}
+	char *hex = malloc(descriptor != NULL ? size * 2 + 1 : 2);
+	if (descriptor == NULL) {
+		strcpy(hex, "-");
+	}
+	for (size_t i = 0; descriptor != NULL && i != size; i++) {
+		snprintf(hex + i * 2, 3, "%02x", descriptor[i]);
+	}
+	const char *const words[] = {"setevent", label, stream, name, hex};
+	uint32_t status = 0;
+	free(launchd_control(words, 5, &status));
+	free(hex);
+	reply_empty(request);
+	if (answering != NULL) {
+		answer_polls();
+	}
+	return true;
+}
+
+static void
+answer_polls(void)
+{
+	uint64_t generation = events_generation();
+	mach_port_name_t replies[16];
+	size_t count = 0;
+	pthread_mutex_lock(&subscriptions_lock);
+	for (struct publisher_poll *poll = publisher_polls;
+			poll != NULL && count != 16; poll = poll->next) {
+		const struct loaded_stream *loaded = loaded_streams;
+		while (loaded != NULL
+				&& (strcmp(loaded->stream, poll->stream) != 0
+						|| loaded->domain
+								!= poll->domain)) {
+			loaded = loaded->next;
+		}
+		if (poll->reply != MACH_PORT_NULL && loaded != NULL
+				&& loaded->generation != generation) {
+			replies[count++] = poll->reply;
+			poll->reply = MACH_PORT_NULL;
+		}
+	}
+	pthread_mutex_unlock(&subscriptions_lock);
+	for (size_t i = 0; i != count; i++) {
+		uint8_t buffer[128];
+		struct xpc_encoder encoder;
+		xpc_encoder_init(&encoder, buffer, sizeof(buffer));
+		xpc_encoder_begin_dictionary(&encoder, NULL);
+		xpc_encoder_int64(&encoder, "error", 0);
+		xpc_encoder_end_dictionary(&encoder);
+		xpc_launchd_send(replies[i], MACH_MSG_TYPE_MOVE_SEND_ONCE,
+				&encoder);
+	}
+}
+
+static uint64_t
+events_generation(void)
+{
+	const char *const words[] = {"generation"};
+	uint32_t status = 0;
+	char *text = broker_client_available()
+			? launchd_control(words, 1, &status)
+			: NULL;
+	uint64_t generation = text != NULL && status == 0
+			? strtoull(text, NULL, 10)
+			: 0;
+	free(text);
+	return generation;
+}
+
+static bool
+reply_subscriber_listener(
+		mach_msg_header_t *request, const char *stream, uint64_t token)
+{
+	char subscriber[300], job[256];
+	uint32_t job_domain = 0;
+	if (!subscriber_name(stream, token, subscriber, sizeof(subscriber), job,
+			    sizeof(job), &job_domain)) {
+		reply_with_errno(request, XPC_ESRCH);
+		return true;
+	}
+	int64_t ran_ms = job[0] != '\0' ? job_running_or_start(job) : -1;
+	uint8_t buffer[1024];
+	struct xpc_encoder encoder;
+	xpc_encoder_init(&encoder, buffer, sizeof(buffer));
+	xpc_encoder_begin_dictionary(&encoder, NULL);
+	xpc_encoder_string(&encoder, "name", subscriber);
+	xpc_encoder_string(&encoder, "job", job);
+	xpc_encoder_uint64(&encoder, "domain", job_domain);
+	xpc_encoder_int64(&encoder, "ran", ran_ms);
+	xpc_encoder_end_dictionary(&encoder);
+	xpc_launchd_reply(request, &encoder);
+	return true;
+}
+
+static bool
+subscriber_name(const char *stream, uint64_t token, char *name, size_t size,
+		char *job, size_t job_size, uint32_t *job_domain)
+{
+	pthread_mutex_lock(&subscriptions_lock);
+	const struct subscription *subscription
+			= subscription_of(stream, token);
+	bool found = subscription != NULL
+			&& (subscription->job != NULL
+					|| subscription->subscriber_pid > 0);
+	job[0] = '\0';
+	if (found && subscription->job != NULL) {
+		snprintf(name, size, "%s#%s", stream, subscription->job);
+		snprintf(job, job_size, "%s", subscription->job);
+		*job_domain = subscription->job_domain;
+	} else if (found) {
+		xpc_services_host_name(stream,
+				(pid_t)subscription->subscriber_pid, name,
+				size);
+	}
+	pthread_mutex_unlock(&subscriptions_lock);
+	return found;
+}
+
+static struct subscription *
+subscription_of(const char *stream, uint64_t token)
+{
+	struct subscription *subscription = subscriptions;
+	while (subscription != NULL
+			&& (subscription->token != token
+					|| (stream != NULL
+							&& strcmp(subscription->stream,
+									   stream)
+									!= 0))) {
+		subscription = subscription->next;
+	}
+	return subscription;
+}
+
+static int64_t
+job_running_or_start(const char *job)
+{
+	int64_t ran_ms = job_running_ms(job);
+	if (ran_ms < 0) {
+		const char *const words[] = {"start", job};
+		uint32_t status = 0;
+		free(launchd_control(words, 2, &status));
+	}
+	return ran_ms;
+}
+
+static int64_t
+job_running_ms(const char *job)
+{
+	const char *const words[] = {"print", job};
+	uint32_t status = 0;
+	char *text = launchd_control(words, 2, &status);
+	long pid = text != NULL && status == 0 ? strtol(text, NULL, 10) : 0;
+	free(text);
+	if (pid <= 0) {
+		return -1;
+	}
+	char path[64], line[1024];
+	snprintf(path, sizeof(path), "/proc/%ld/stat", pid);
+	FILE *file = fopen(path, "re");
+	if (file == NULL) {
+		return -1;
+	}
+	bool read = fgets(line, sizeof(line), file) != NULL;
+	fclose(file);
+	const char *field = read ? strrchr(line, ')') : NULL;
+	unsigned long long start = 0;
+	for (int i = 2; field != NULL && i != 22; i++) {
+		field = strchr(field + 1, ' ');
+	}
+	if (field == NULL || sscanf(field, " %llu", &start) != 1) {
+		return 0;
+	}
+	struct timespec now;
+	clock_gettime(CLOCK_BOOTTIME, &now);
+	long ticks = sysconf(_SC_CLK_TCK);
+	int64_t started_ms
+			= (int64_t)(start * 1000 / (ticks > 0 ? ticks : 100));
+	int64_t now_ms = (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+	return now_ms > started_ms ? now_ms - started_ms : 0;
+}
+
+static void
+reply_subscriptions(
+		mach_msg_header_t *request, const char *stream, uint64_t token)
+{
+	load_job_subscriptions(stream);
+	uint32_t domain = publisher_domain();
+	pthread_mutex_lock(&subscriptions_lock);
+	size_t capacity = 256;
+	for (const struct subscription *subscription = subscriptions;
+			subscription != NULL;
+			subscription = subscription->next) {
+		capacity += 16 + subscription->size;
+	}
+	uint8_t *buffer = malloc(capacity);
+	struct xpc_encoder encoder;
+	xpc_encoder_init(&encoder, buffer, (uint32_t)capacity);
+	xpc_encoder_begin_dictionary(&encoder, NULL);
+	if (token != 0) {
+		xpc_encoder_uint64(&encoder, "token", token);
+	}
+	xpc_encoder_begin_array(&encoder, "events");
+	for (const struct subscription *subscription = subscriptions;
+			subscription != NULL;
+			subscription = subscription->next) {
+		if (strcmp(subscription->stream, stream) == 0
+				&& subscription->domain == domain) {
+			xpc_encoder_uint64(&encoder, NULL, subscription->token);
+			xpc_encoder_object(&encoder, NULL,
+					subscription->descriptor,
+					subscription->size);
+		}
+	}
+	xpc_encoder_end_array(&encoder);
+	xpc_encoder_bool(&encoder, "initial-load-completed", true);
+	xpc_encoder_end_dictionary(&encoder);
+	pthread_mutex_unlock(&subscriptions_lock);
+	xpc_launchd_reply(request, &encoder);
+	free(buffer);
+}
+
+static void
+load_job_subscriptions(const char *stream)
+{
+	if (!broker_client_available()) {
+		return;
+	}
+	uint64_t generation = events_generation();
+	uint32_t publisher = publisher_domain();
+	pthread_mutex_lock(&subscriptions_lock);
+	struct loaded_stream *loaded = loaded_streams;
+	while (loaded != NULL
+			&& (strcmp(loaded->stream, stream) != 0
+					|| loaded->domain != publisher)) {
+		loaded = loaded->next;
+	}
+	bool current = loaded != NULL && loaded->generation == generation;
+	pthread_mutex_unlock(&subscriptions_lock);
+	if (current) {
+		return;
+	}
+	char domain[16];
+	snprintf(domain, sizeof(domain), "%u", (unsigned)publisher);
+	const char *const plist_words[] = {"events", stream, domain};
+	const char *const set_words[] = {"setevents", stream, domain};
+	uint32_t plist_status = 0, set_status = 0;
+	char *plists = launchd_control(plist_words, 3, &plist_status);
+	char *set = launchd_control(set_words, 3, &set_status);
+	if (plists == NULL || plist_status != 0) {
+		free(plists);
+		free(set);
+		return;
+	}
+
+	struct job_event *events = NULL;
+	char *save = NULL;
+	for (char *line = strtok_r(plists, "\n", &save); line != NULL;
+			line = strtok_r(NULL, "\n", &save)) {
+		char *fields[5];
+		if (split_fields(line, fields, 5) != 5) {
+			continue;
+		}
+		struct job_subscriptions job = {
+				.stream = stream,
+				.label = fields[0],
+				.uid = (uint32_t)strtoul(fields[2], NULL, 10),
+				.pid = strtoll(fields[3], NULL, 10),
+				.domain
+				= (uint32_t)strtoul(fields[4], NULL, 10),
+				.events = &events,
+		};
+		xpc_services_job_events(
+				fields[1], stream, add_job_subscription, &job);
+	}
+	save = NULL;
+	for (char *line = set != NULL && set_status == 0
+					? strtok_r(set, "\n", &save)
+					: NULL;
+			line != NULL; line = strtok_r(NULL, "\n", &save)) {
+		char *fields[6];
+		if (split_fields(line, fields, 6) != 6) {
+			continue;
+		}
+		if (strcmp(fields[5], "-") == 0) {
+			struct job_event **link = job_event_link(
+					&events, fields[0], fields[4]);
+			struct job_event *removed = *link;
+			if (removed != NULL) {
+				*link = removed->next;
+				free(removed->label);
+				free(removed->name);
+				free(removed->descriptor);
+				free(removed);
+			}
+			continue;
+		}
+		size_t size = strlen(fields[5]) / 2;
+		uint8_t *descriptor = malloc(size + 1);
+		for (size_t i = 0; i != size; i++) {
+			char byte[3] = {fields[5][2 * i], fields[5][2 * i + 1],
+					0};
+			descriptor[i] = (uint8_t)strtoul(byte, NULL, 16);
+		}
+		struct job_subscriptions job = {
+				.stream = stream,
+				.label = fields[0],
+				.uid = (uint32_t)strtoul(fields[1], NULL, 10),
+				.pid = strtoll(fields[2], NULL, 10),
+				.domain
+				= (uint32_t)strtoul(fields[3], NULL, 10),
+		};
+		put_job_event(&events, &job, fields[4], descriptor, size);
+		free(descriptor);
+	}
+	free(plists);
+	free(set);
+
+	pthread_mutex_lock(&subscriptions_lock);
+	struct subscription **link = &subscriptions;
+	while (*link != NULL) {
+		struct subscription *subscription = *link;
+		struct job_event **event_link = subscription->job != NULL
+						&& strcmp(subscription->stream,
+								   stream)
+								== 0
+						&& subscription->domain
+								== publisher
+				? job_event_link(&events, subscription->job,
+						  subscription->name)
+				: NULL;
+		if (event_link == NULL) {
+			link = &subscription->next;
+			continue;
+		}
+		struct job_event *event = *event_link;
+		if (event == NULL) {
+			*link = subscription->next;
+			free(subscription->stream);
+			free(subscription->name);
+			free(subscription->job);
+			free(subscription->descriptor);
+			free(subscription);
+			continue;
+		}
+		*event_link = event->next;
+		free(subscription->descriptor);
+		subscription->descriptor = event->descriptor;
+		subscription->size = event->size;
+		subscription->subscriber_pid = event->pid;
+		subscription->job_uid = event->uid;
+		subscription->job_domain = event->domain;
+		free(event->label);
+		free(event->name);
+		free(event);
+		link = &subscription->next;
+	}
+	while (events != NULL) {
+		struct job_event *event = events;
+		events = event->next;
+		struct subscription *subscription
+				= calloc(1, sizeof(*subscription));
+		subscription->stream = strdup(stream);
+		subscription->domain = publisher;
+		subscription->name = event->name;
+		subscription->subscriber_pid = event->pid;
+		subscription->job = event->label;
+		subscription->job_uid = event->uid;
+		subscription->job_domain = event->domain;
+		subscription->descriptor = event->descriptor;
+		subscription->size = event->size;
+		subscription->token = ++last_token;
+		subscription->next = subscriptions;
+		subscriptions = subscription;
+		free(event);
+	}
+	loaded = loaded_streams;
+	while (loaded != NULL
+			&& (strcmp(loaded->stream, stream) != 0
+					|| loaded->domain != publisher)) {
+		loaded = loaded->next;
+	}
+	if (loaded == NULL) {
+		loaded = calloc(1, sizeof(*loaded));
+		loaded->stream = strdup(stream);
+		loaded->domain = publisher;
+		loaded->next = loaded_streams;
+		loaded_streams = loaded;
+	}
+	loaded->generation = generation;
+	pthread_mutex_unlock(&subscriptions_lock);
+}
+
+static uint32_t
+publisher_domain(void)
+{
+	if (answering == NULL) {
+		return broker_client_domain();
+	}
+	return caller_euid() < 500 ? BROKER_DOMAIN_SYSTEM : BROKER_DOMAIN_USER;
+}
+
+static size_t
+split_fields(char *line, char **fields, size_t max)
+{
+	size_t count = 0;
+	char *save = NULL;
+	for (char *field = strtok_r(line, "\t", &save);
+			field != NULL && count != max;
+			field = strtok_r(NULL, "\t", &save)) {
+		fields[count++] = field;
+	}
+	return count;
+}
+
+static void
+add_job_subscription(void *context, const char *name, const uint8_t *descriptor,
+		size_t size)
+{
+	const struct job_subscriptions *job = context;
+	put_job_event(job->events, job, name, descriptor, size);
+}
+
+static void
+put_job_event(struct job_event **events, const struct job_subscriptions *job,
+		const char *name, const uint8_t *descriptor, size_t size)
+{
+	struct job_event **link = job_event_link(events, job->label, name);
+	struct job_event *event = *link;
+	if (event == NULL) {
+		event = calloc(1, sizeof(*event));
+		event->label = strdup(job->label);
+		event->name = strdup(name);
+		*link = event;
+	}
+	free(event->descriptor);
+	event->uid = job->uid;
+	event->pid = job->pid;
+	event->domain = job->domain;
+	event->descriptor = malloc(size);
+	memcpy(event->descriptor, descriptor, size);
+	event->size = size;
+}
+
+static struct job_event **
+job_event_link(struct job_event **events, const char *label, const char *name)
+{
+	while (*events != NULL
+			&& (strcmp((*events)->label, label) != 0
+					|| strcmp((*events)->name, name)
+							!= 0)) {
+		events = &(*events)->next;
+	}
+	return events;
+}
+
+static bool
+arm_poll(mach_msg_header_t *request, const char *stream)
+{
+	if (forward_to_launchd(request)) {
+		return true;
+	}
+	mach_port_name_t reply = request->msgh_remote_port;
+	if (reply == MACH_PORT_NULL
+			|| MACH_MSGH_BITS_REMOTE(request->msgh_bits)
+					!= MACH_MSG_TYPE_PORT_SEND_ONCE) {
+		return false;
+	}
+	uint32_t domain = publisher_domain();
+	pthread_mutex_lock(&subscriptions_lock);
+	struct publisher_poll *poll = publisher_polls;
+	while (poll != NULL
+			&& (strcmp(poll->stream, stream) != 0
+					|| poll->domain != domain)) {
+		poll = poll->next;
+	}
+	if (poll == NULL) {
+		poll = calloc(1, sizeof(*poll));
+		poll->stream = strdup(stream);
+		poll->domain = domain;
+		poll->next = publisher_polls;
+		publisher_polls = poll;
+	} else if (poll->reply != MACH_PORT_NULL) {
+		ipc_port_deallocate(poll->reply);
+	}
+	poll->reply = reply;
+	pthread_mutex_unlock(&subscriptions_lock);
+	return true;
+}
+
+static bool
+create_subscription(
+		mach_msg_header_t *request, const struct xpc_request *parsed)
+{
+	if (forward_to_launchd(request)) {
+		return true;
+	}
+	if (parsed->descriptor == NULL) {
+		reply_with_errno(request, XPC_EINVAL);
+		return true;
+	}
+	struct subscription *subscription = calloc(1, sizeof(*subscription));
+	subscription->stream = strdup(parsed->stream);
+	subscription->domain = publisher_domain();
+	subscription->name = strdup(parsed->name);
+	subscription->subscriber_pid = parsed->subscriber_pid;
+	subscription->descriptor = malloc(parsed->descriptor_size);
+	memcpy(subscription->descriptor, parsed->descriptor,
+			parsed->descriptor_size);
+	subscription->size = parsed->descriptor_size;
+	pthread_mutex_lock(&subscriptions_lock);
+	subscription->token = ++last_token;
+	subscription->next = subscriptions;
+	subscriptions = subscription;
+	pthread_mutex_unlock(&subscriptions_lock);
+	reply_subscriptions(request, parsed->stream, subscription->token);
+	return true;
+}
+
+static bool
+set_subscription_event(
+		mach_msg_header_t *request, const struct xpc_request *parsed)
+{
+	if (forward_to_launchd(request)) {
+		return true;
+	}
+	pthread_mutex_lock(&subscriptions_lock);
+	struct subscription **link = &subscriptions;
+	while (*link != NULL
+			&& ((*link)->token != parsed->token
+					|| strcmp((*link)->stream,
+							   parsed->stream)
+							!= 0)) {
+		link = &(*link)->next;
+	}
+	struct subscription *subscription = *link;
+	if (subscription == NULL) {
+		pthread_mutex_unlock(&subscriptions_lock);
+		reply_with_errno(request, XPC_ESRCH);
+		return true;
+	}
+	free(subscription->descriptor);
+	if (parsed->descriptor == NULL) {
+		*link = subscription->next;
+		free(subscription->stream);
+		free(subscription->name);
+		free(subscription->job);
+		free(subscription);
+	} else {
+		subscription->descriptor = malloc(parsed->descriptor_size);
+		memcpy(subscription->descriptor, parsed->descriptor,
+				parsed->descriptor_size);
+		subscription->size = parsed->descriptor_size;
+	}
+	pthread_mutex_unlock(&subscriptions_lock);
+	reply_subscriptions(request, parsed->stream, parsed->token);
+	return true;
+}
+
+static bool
+reply_subscription_event(
+		mach_msg_header_t *request, const char *stream, uint64_t token)
+{
+	if (forward_to_launchd(request)) {
+		return true;
+	}
+	pthread_mutex_lock(&subscriptions_lock);
+	const struct subscription *subscription
+			= subscription_of(stream, token);
+	if (subscription == NULL) {
+		pthread_mutex_unlock(&subscriptions_lock);
+		reply_with_errno(request, XPC_ESRCH);
+		return true;
+	}
+	size_t capacity = 128 + subscription->size;
+	uint8_t *buffer = malloc(capacity);
+	struct xpc_encoder encoder;
+	xpc_encoder_init(&encoder, buffer, (uint32_t)capacity);
+	xpc_encoder_begin_dictionary(&encoder, NULL);
+	xpc_encoder_object(&encoder, "event", subscription->descriptor,
+			subscription->size);
+	xpc_encoder_end_dictionary(&encoder);
+	pthread_mutex_unlock(&subscriptions_lock);
+	xpc_launchd_reply(request, &encoder);
+	free(buffer);
+	return true;
+}
+
+static bool
+reply_subscription_name(
+		mach_msg_header_t *request, const char *stream, uint64_t token)
+{
+	if (forward_to_launchd(request)) {
+		return true;
+	}
+	pthread_mutex_lock(&subscriptions_lock);
+	const struct subscription *subscription
+			= subscription_of(stream, token);
+	char name[256];
+	bool found = subscription != NULL;
+	if (found) {
+		snprintf(name, sizeof(name), "%s", subscription->name);
+	}
+	pthread_mutex_unlock(&subscriptions_lock);
+	if (!found) {
+		reply_with_errno(request, XPC_ESRCH);
+		return true;
+	}
+	uint8_t buffer[512];
+	struct xpc_encoder encoder;
+	xpc_encoder_init(&encoder, buffer, sizeof(buffer));
+	xpc_encoder_begin_dictionary(&encoder, NULL);
+	xpc_encoder_string(&encoder, "name", name);
+	xpc_encoder_end_dictionary(&encoder);
+	xpc_launchd_reply(request, &encoder);
+	return true;
+}
+
+static bool
+reply_subscriber(mach_msg_header_t *request, uint64_t token, bool uid)
+{
+	if (forward_to_launchd(request)) {
+		return true;
+	}
+	pthread_mutex_lock(&subscriptions_lock);
+	const struct subscription *subscription = subscription_of(NULL, token);
+	int64_t pid = subscription != NULL ? subscription->subscriber_pid : 0;
+	char label[256], plist[PATH_MAX];
+	struct process process;
+	bool job = subscription != NULL && subscription->job != NULL;
+	if (job) {
+		snprintf(label, sizeof(label), "%s", subscription->job);
+		process.uid[1] = subscription->job_uid;
+	}
+	pthread_mutex_unlock(&subscriptions_lock);
+	if (!job
+			&& (pid <= 0
+					|| (uid ? process_lookup((int32_t)pid,
+								  &process) != 0
+						: !job_of_pid(pid, label,
+								  sizeof(label),
+								  plist,
+								  sizeof(plist))))) {
+		reply_with_errno(request, XPC_ESRCH);
+		return true;
+	}
+	uint8_t buffer[512];
+	struct xpc_encoder encoder;
+	xpc_encoder_init(&encoder, buffer, sizeof(buffer));
+	xpc_encoder_begin_dictionary(&encoder, NULL);
+	if (uid) {
+		xpc_encoder_uint64(&encoder, "uid", process.uid[1]);
+	} else {
+		xpc_encoder_string(&encoder, "identifier", label);
+	}
+	xpc_encoder_end_dictionary(&encoder);
+	xpc_launchd_reply(request, &encoder);
+	return true;
+}
+
+static bool
+reply_subscriber_session(
+		mach_msg_header_t *request, const char *stream, uint64_t token)
+{
+	if (forward_to_launchd(request)) {
+		return true;
+	}
+	pthread_mutex_lock(&subscriptions_lock);
+	const struct subscription *subscription
+			= subscription_of(stream, token);
+	bool found = subscription != NULL;
+	pthread_mutex_unlock(&subscriptions_lock);
+	if (!found) {
+		reply_with_errno(request, XPC_ESRCH);
+		return true;
+	}
+	uint8_t buffer[256];
+	struct xpc_encoder encoder;
+	xpc_encoder_init(&encoder, buffer, sizeof(buffer));
+	xpc_encoder_begin_dictionary(&encoder, NULL);
+	xpc_encoder_int64(&encoder, "asid", GETAUDIT_ADDR_ASID);
+	xpc_encoder_end_dictionary(&encoder);
+	xpc_launchd_reply(request, &encoder);
+	return true;
+}
+
+static bool
+reply_event(mach_msg_header_t *request, const char *stream, const char *name)
+{
+	if (forward_to_launchd(request)) {
+		return true;
+	}
+	char label[256], plist[PATH_MAX];
+	bool job = job_of_pid(caller_pid(), label, sizeof(label), plist,
+			sizeof(plist));
+	char domain[16];
+	snprintf(domain, sizeof(domain), "%u", (unsigned)BROKER_DOMAIN_SYSTEM);
+	const char *const words[] = {"setevents", stream, domain};
+	uint32_t status = 0;
+	char *set = job ? launchd_control(words, 3, &status) : NULL;
+	const char *description = NULL;
+	char *save = NULL;
+	for (char *line = set != NULL && status == 0
+					? strtok_r(set, "\n", &save)
+					: NULL;
+			line != NULL && description == NULL;
+			line = strtok_r(NULL, "\n", &save)) {
+		char *fields[6];
+		if (split_fields(line, fields, 6) == 6
+				&& strcmp(fields[0], label) == 0
+				&& strcmp(fields[4], name) == 0) {
+			description = fields[5];
+		}
+	}
+	size_t capacity = 64 * 1024;
+	uint8_t *buffer = malloc(capacity);
+	struct xpc_encoder encoder;
+	xpc_encoder_init(&encoder, buffer, (uint32_t)capacity);
+	size_t size = description != NULL ? strlen(description) / 2 : 0;
+	if (description != NULL && strcmp(description, "-") != 0
+			&& size + 256 <= capacity) {
+		uint8_t *descriptor = malloc(size + 1);
+		for (size_t i = 0; i != size; i++) {
+			char byte[3] = {description[2 * i],
+					description[2 * i + 1], 0};
+			descriptor[i] = (uint8_t)strtoul(byte, NULL, 16);
+		}
+		xpc_encoder_begin_dictionary(&encoder, NULL);
+		xpc_encoder_object(&encoder, "event", descriptor, size);
+		xpc_encoder_end_dictionary(&encoder);
+		free(descriptor);
+		xpc_launchd_reply(request, &encoder);
+	} else if (job && description == NULL
+			&& xpc_services_job_event(
+					plist, stream, name, &encoder)) {
+		xpc_launchd_reply(request, &encoder);
+	} else {
+		reply_with_errno(request, XPC_ESRCH);
+	}
+	free(set);
+	free(buffer);
+	return true;
+}
+
+static bool
 create_session(mach_msg_header_t *request, bool login_window)
 {
 	if (login_window && answering != NULL) {
@@ -1030,6 +1952,10 @@ serve(mach_msg_header_t *request)
 	switch (request->msgh_id & 0xffff) {
 	case XPC_ROUTINE_LOOK_UP:
 	case XPC_ROUTINE_LOOK_UP_LEGACY:
+		if (parsed.type == LOOK_UP_EVENT_CHANNEL
+				&& parsed.lookup_handle != 0) {
+			return look_up_subscriber(request, &parsed);
+		}
 		return look_up(request, parsed.name,
 				parsed.has_instance ? parsed.instance : NULL,
 				parsed.type, parsed.targetpid,
@@ -1054,6 +1980,30 @@ serve(mach_msg_header_t *request)
 			return check_in_sockets(request, parsed.name);
 		}
 		return check_in(request, parsed.name, parsed.flags);
+	case XPC_ROUTINE_PUBLISHER_SUBSCRIPTIONS:
+		if (!forward_to_launchd(request)) {
+			reply_subscriptions(request, parsed.stream, 0);
+		}
+		return true;
+	case XPC_ROUTINE_PUBLISHER_ARM_POLL:
+		return arm_poll(request, parsed.stream);
+	case XPC_ROUTINE_PUBLISHER_CREATE_SUBSCRIPTION:
+		return create_subscription(request, &parsed);
+	case XPC_ROUTINE_PUBLISHER_SET_EVENT:
+		return set_subscription_event(request, &parsed);
+	case XPC_ROUTINE_PUBLISHER_COPY_EVENT:
+		return reply_subscription_event(
+				request, parsed.stream, parsed.token);
+	case XPC_ROUTINE_PUBLISHER_EVENT_NAME:
+		return reply_subscription_name(
+				request, parsed.stream, parsed.token);
+	case XPC_ROUTINE_PUBLISHER_SUBSCRIBER:
+		return reply_subscriber(request, parsed.token, false);
+	case XPC_ROUTINE_PUBLISHER_SUBSCRIBER_UID:
+		return reply_subscriber(request, parsed.token, true);
+	case XPC_ROUTINE_PUBLISHER_SUBSCRIBER_ASID:
+		return reply_subscriber_session(
+				request, parsed.stream, parsed.token);
 	case XPC_ROUTINE_KILL_SERVICE: {
 		if (xpc_services_kill(parsed.name, (int)parsed.signal) != 0) {
 			reply_with_errno(request, XPC_ESRCH);
@@ -1084,6 +2034,11 @@ serve(mach_msg_header_t *request)
 	case XPC_ROUTINE_UNCORK_PID_DOMAIN:
 		reply_empty(request);
 		return true;
+	case XPC_ROUTINE_SET_EVENT:
+		return set_event(request, parsed.stream, parsed.name,
+				parsed.descriptor, parsed.descriptor_size);
+	case XPC_ROUTINE_COPY_EVENT:
+		return reply_event(request, parsed.stream, parsed.name);
 	case XPC_ROUTINE_CREATE_SESSION:
 		return create_session(request,
 				parsed.has_uid
@@ -1108,6 +2063,98 @@ serve(mach_msg_header_t *request)
 		break;
 	}
 	return false;
+}
+
+static bool
+look_up_subscriber(mach_msg_header_t *request, const struct xpc_request *parsed)
+{
+	char subscriber[300], job[256];
+	uint32_t job_domain = 0;
+	int64_t ran_ms = -1;
+	bool found;
+	mach_msg_header_t *answer = ask_launchd(request);
+	if (answer != NULL) {
+		struct xpc_object payload;
+		const char *name = NULL, *label = NULL;
+		uint64_t domain = 0, ran = 0;
+		found = xpc_message_payload(answer, &payload)
+				&& (name = xpc_dictionary_get_string(
+						    &payload, "name"))
+						!= NULL
+				&& (label = xpc_dictionary_get_string(
+						    &payload, "job"))
+						!= NULL
+				&& xpc_dictionary_get_uint64(
+						&payload, "domain", &domain)
+				&& xpc_dictionary_get_uint64(
+						&payload, "ran", &ran);
+		if (found) {
+			snprintf(subscriber, sizeof(subscriber), "%s", name);
+			snprintf(job, sizeof(job), "%s", label);
+			job_domain = (uint32_t)domain;
+			ran_ms = (int64_t)ran;
+		}
+		free(answer);
+	} else {
+		found = subscriber_name(parsed->name, parsed->lookup_handle,
+				subscriber, sizeof(subscriber), job,
+				sizeof(job), &job_domain);
+		if (found && job[0] != '\0') {
+			ran_ms = job_running_or_start(job);
+		}
+	}
+	if (!found) {
+		reply_with_errno(request, XPC_ESRCH);
+		return true;
+	}
+	if (job[0] != '\0') {
+		return look_up_job_listener(
+				request, subscriber, job, job_domain, ran_ms);
+	}
+	return look_up(request, subscriber, NULL, parsed->type, 0, -1);
+}
+
+static bool
+look_up_job_listener(mach_msg_header_t *request, const char *name,
+		const char *job, uint32_t domain, int64_t ran_ms)
+{
+	mach_port_name_t listener;
+	names_look_up_registered(name, domain, &listener);
+	pthread_mutex_lock(&subscriptions_lock);
+	struct silent_listener *silent = silent_listeners;
+	while (silent != NULL && strcmp(silent->name, name) != 0) {
+		silent = silent->next;
+	}
+	pthread_mutex_unlock(&subscriptions_lock);
+	if (listener == MACH_PORT_NULL && silent == NULL) {
+		int steps = LISTENER_WAIT_STEPS;
+		if (ran_ms >= 0) {
+			int64_t left_ms = LISTENER_RUNNING_GRACE_MS - ran_ms;
+			steps = left_ms > 0
+					? (int)(left_ms * 1000
+							  / LISTENER_WAIT_STEP_US)
+							+ 1
+					: 0;
+		}
+		for (int i = 0; i != steps && listener == MACH_PORT_NULL; i++) {
+			usleep(LISTENER_WAIT_STEP_US);
+			names_look_up_registered(name, domain, &listener);
+		}
+		if (listener == MACH_PORT_NULL) {
+			silent = calloc(1, sizeof(*silent));
+			silent->name = strdup(name);
+			pthread_mutex_lock(&subscriptions_lock);
+			silent->next = silent_listeners;
+			silent_listeners = silent;
+			pthread_mutex_unlock(&subscriptions_lock);
+		}
+	}
+	if (listener == MACH_PORT_NULL) {
+		reply_with_errno(request, XPC_ESRCH);
+		return true;
+	}
+	reply_with_port(request, listener, MACH_MSG_TYPE_MOVE_SEND, true);
+	return true;
 }
 
 static bool
@@ -1262,8 +2309,15 @@ check_in(mach_msg_header_t *request, const char *name, uint64_t flags)
 	char host_name[300];
 	const char *service_name = xpc_services_check_in_name(
 			name, host_name, sizeof(host_name));
+	bool stream = (flags & CHECK_IN_EVENT_STREAM) != 0;
+	char per_pid[300];
+	if (stream) {
+		xpc_services_host_name(service_name, getpid(), per_pid,
+				sizeof(per_pid));
+	}
 	mach_port_name_t service;
-	kern_return_t kr = names_check_in(service_name, &service);
+	kern_return_t kr = names_check_in(
+			stream ? per_pid : service_name, &service);
 	if (kr == BOOTSTRAP_NOT_PRIVILEGED && xpc_services_is_service(name)) {
 		_exit(0);
 	}

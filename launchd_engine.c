@@ -138,6 +138,14 @@ struct job {
 	int status;
 	char *reason;
 	unsigned runs;
+	struct set_event *set_events;
+	size_t set_event_count;
+};
+
+struct set_event {
+	char *stream;
+	char *name;
+	char *description;
 };
 
 static void handle_signals(void);
@@ -174,6 +182,11 @@ static void take_exit(struct job *job);
 static void job_exited(struct job *job, int status);
 static void make_listeners(struct job *job);
 static int make_listener(const struct job *job, char *entry);
+static void jobs_events(FILE *out, const char *stream, uint32_t domain);
+static void jobs_set_events(FILE *out, const char *stream, uint32_t domain);
+static bool set_job_event(const char *label, const char *stream,
+		const char *name, const char *description);
+static uid_t job_uid(const struct job *job);
 static bool crashed(int status);
 static char *exit_reason(const char *log);
 static int open_log(struct job *job);
@@ -210,6 +223,7 @@ static void say(const char *format, ...);
 
 static struct job **jobs;
 static size_t job_count;
+static uint64_t events_generation;
 static struct job **account_jobs;
 static size_t account_job_count;
 static int signal_fd = -1;
@@ -1282,6 +1296,30 @@ control(char **argv, size_t argc, uint32_t *status)
 		fclose(out);
 		return text;
 	}
+	if (strcmp(command, "events") == 0 && argc > 2) {
+		jobs_events(out, argv[1], (uint32_t)strtoul(argv[2], NULL, 10));
+		fclose(out);
+		return text;
+	}
+	if (strcmp(command, "setevents") == 0 && argc > 2) {
+		jobs_set_events(out, argv[1],
+				(uint32_t)strtoul(argv[2], NULL, 10));
+		fclose(out);
+		return text;
+	}
+	if (strcmp(command, "setevent") == 0 && argc > 4) {
+		if (!set_job_event(argv[1], argv[2], argv[3], argv[4])) {
+			fprintf(out, "no such job\n");
+			*status = 1;
+		}
+		fclose(out);
+		return text;
+	}
+	if (strcmp(command, "generation") == 0) {
+		fprintf(out, "%llu\n", (unsigned long long)events_generation);
+		fclose(out);
+		return text;
+	}
 	if (strcmp(command, "login") == 0 || strcmp(command, "logout") == 0
 			|| strcmp(command, "loginwindow") == 0) {
 		if (shutting_down) {
@@ -1541,6 +1579,113 @@ make_listener(const struct job *job, char *entry)
 		(void)!lchown(address.sun_path, user_uid, user_gid);
 	}
 	return fd;
+}
+
+static void
+jobs_events(FILE *out, const char *stream, uint32_t domain)
+{
+	for (size_t i = 0; i != job_count; i++) {
+		const struct job *job = jobs[i];
+		if (job->plist == NULL || job->label == NULL
+				|| job->state == JOB_UNLOADED
+				|| (domain != BROKER_DOMAIN_SYSTEM
+						&& job_domain_of(job)
+								!= domain)) {
+			continue;
+		}
+		char path[PATH_MAX];
+		snprintf(path, sizeof(path), "%s/%s", sysroot, job->plist);
+		char *plist = plist_read(path);
+		if (plist == NULL) {
+			continue;
+		}
+		const char *end = plist + strlen(plist);
+		const char *events = plist_dictionary(
+				plist, end, "LaunchEvents", &end);
+		if (events != NULL
+				&& plist_dictionary(events, end, stream, &end)
+						!= NULL) {
+			uid_t uid = job_uid(job);
+			fprintf(out, "%s\t/%s\t%u\t%d\t%u\n", job->label,
+					job->plist, (unsigned)uid,
+					job->state == JOB_RUNNING
+							? (int)job->pid
+							: 0,
+					(unsigned)job_domain_of(job));
+		}
+		free(plist);
+	}
+}
+
+static uid_t
+job_uid(const struct job *job)
+{
+	return job->root                       ? 0
+			: job->account != NULL ? job->account_uid
+					       : user_uid;
+}
+
+static void
+jobs_set_events(FILE *out, const char *stream, uint32_t domain)
+{
+	for (size_t i = 0; i != job_count; i++) {
+		const struct job *job = jobs[i];
+		if (job->label == NULL || job->state == JOB_UNLOADED
+				|| (domain != BROKER_DOMAIN_SYSTEM
+						&& job_domain_of(job)
+								!= domain)) {
+			continue;
+		}
+		for (size_t j = 0; j != job->set_event_count; j++) {
+			const struct set_event *event = &job->set_events[j];
+			if (strcmp(event->stream, stream) != 0) {
+				continue;
+			}
+			fprintf(out, "%s\t%u\t%d\t%u\t%s\t%s\n", job->label,
+					(unsigned)job_uid(job),
+					job->state == JOB_RUNNING
+							? (int)job->pid
+							: 0,
+					(unsigned)job_domain_of(job),
+					event->name, event->description);
+		}
+	}
+}
+
+static bool
+set_job_event(const char *label, const char *stream, const char *name,
+		const char *description)
+{
+	struct job *job = NULL;
+	for (size_t i = 0; i != job_count && job == NULL; i++) {
+		if (jobs[i]->label != NULL
+				&& strcmp(jobs[i]->label, label) == 0) {
+			job = jobs[i];
+		}
+	}
+	if (job == NULL) {
+		return false;
+	}
+	struct set_event *event = NULL;
+	for (size_t j = 0; j != job->set_event_count && event == NULL; j++) {
+		if (strcmp(job->set_events[j].stream, stream) == 0
+				&& strcmp(job->set_events[j].name, name) == 0) {
+			event = &job->set_events[j];
+		}
+	}
+	if (event == NULL) {
+		job->set_events = reallocarray(job->set_events,
+				job->set_event_count + 1,
+				sizeof(*job->set_events));
+		event = &job->set_events[job->set_event_count++];
+		event->stream = strdup(stream);
+		event->name = strdup(name);
+		event->description = NULL;
+	}
+	free(event->description);
+	event->description = strdup(description);
+	events_generation++;
+	return true;
 }
 
 bool
