@@ -27,6 +27,7 @@
 
 #pragma once
 
+#include <mach/message.h>
 #include <stddef.h>
 #include <sys/types.h>
 
@@ -34,3 +35,4 @@
 
 int launchd_main(int argc, char *argv[]);
 char *launchd_command(char **argv, size_t argc, uid_t uid, uint32_t *status);
+void launchd_answer(mach_msg_header_t *request);

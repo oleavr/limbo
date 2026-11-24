@@ -32,6 +32,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,7 +45,12 @@
 #include "launchd.h"
 #include "launchd_engine.h"
 #include "osfmk/broker_client.h"
+#include "osfmk/ipc.h"
+#include "thread.h"
 
+static void open_port(void);
+static void *receive_requests(void *unused);
+static void answer_requests(void);
 static void handle_broker(void);
 static void handle_commands(const struct pollfd *ready);
 static void answer_command(int fd);
@@ -57,6 +63,10 @@ static bool broker_gone;
 static int control_fd = -1;
 static int *commands;
 static size_t command_count;
+static mach_port_name_t port;
+static int requests[2] = {-1, -1};
+
+#define REQUEST_MAX (64 * 1024)
 
 int
 launchd_main(int argc, char *argv[])
@@ -89,15 +99,17 @@ launchd_main(int argc, char *argv[])
 		jobs_load(argv[3]);
 	}
 	send_frame(BROKER_JOBS_LOADED, NULL, 0, NULL, 0);
+	open_port();
 
 	for (;;) {
 		size_t job_fds = jobs_poll_count();
-		size_t own = 2 + command_count;
+		size_t own = 3 + command_count;
 		struct pollfd *fds = calloc(own + job_fds, sizeof(*fds));
 		fds[0] = (struct pollfd){.fd = broker_fd, .events = POLLIN};
-		fds[1] = (struct pollfd){.fd = control_fd, .events = POLLIN};
+		fds[1] = (struct pollfd){.fd = requests[0], .events = POLLIN};
+		fds[2] = (struct pollfd){.fd = control_fd, .events = POLLIN};
 		for (size_t i = 0; i != command_count; i++) {
-			fds[2 + i] = (struct pollfd){
+			fds[3 + i] = (struct pollfd){
 					.fd = commands[i], .events = POLLIN};
 		}
 		jobs_poll_fill(fds + own);
@@ -107,7 +119,10 @@ launchd_main(int argc, char *argv[])
 		if (fds[0].revents & (POLLIN | POLLHUP | POLLERR)) {
 			handle_broker();
 		}
-		handle_commands(fds + 1);
+		if (fds[1].revents & POLLIN) {
+			answer_requests();
+		}
+		handle_commands(fds + 2);
 		jobs_poll_handle(fds + own, job_fds);
 
 		free(fds);
@@ -119,6 +134,61 @@ launchd_main(int argc, char *argv[])
 		return 1;
 	}
 	return jobs_rebooting() ? BROKER_EXIT_REBOOT : 0;
+}
+
+static void
+open_port(void)
+{
+	broker_client_ensure();
+	if (!broker_client_available() || pipe2(requests, O_CLOEXEC) != 0
+			|| ipc_port_allocate(MACH_PORT_RIGHT_RECEIVE, &port)
+					!= KERN_SUCCESS) {
+		fprintf(stderr, "%s: no port of launchd's: %s\n", LIMBO_LAUNCHD,
+				strerror(errno));
+		requests[0] = -1;
+		struct broker_launchd_port none = {0};
+		send_frame(BROKER_LAUNCHD_PORT, &none, sizeof(none), NULL, 0);
+		return;
+	}
+	struct broker_launchd_port told = {.global_id = ipc_names_hold(port)};
+	send_frame(BROKER_LAUNCHD_PORT, &told, sizeof(told), NULL, 0);
+	pthread_t thread;
+	thread_create_own(&thread, NULL, receive_requests, NULL);
+}
+
+static void *
+receive_requests(void *unused)
+{
+	(void)unused;
+	for (;;) {
+		mach_msg_header_t *request = malloc(REQUEST_MAX);
+		mach_msg_return_t mr = ipc_mach_msg_kernel(request,
+				MACH_RCV_MSG
+						| MACH_RCV_TRAILER_TYPE(
+								MACH_MSG_TRAILER_FORMAT_0)
+						| MACH_RCV_TRAILER_ELEMENTS(
+								MACH_RCV_TRAILER_AUDIT),
+				0, REQUEST_MAX, port, MACH_MSG_TIMEOUT_NONE);
+		if (mr != MACH_MSG_SUCCESS
+				|| write(requests[1], &request, sizeof(request))
+						!= sizeof(request)) {
+			free(request);
+		}
+	}
+	return NULL;
+}
+
+static void
+answer_requests(void)
+{
+	mach_msg_header_t *request;
+	struct pollfd ready = {.fd = requests[0], .events = POLLIN};
+	while (poll(&ready, 1, 0) == 1
+			&& read(requests[0], &request, sizeof(request))
+					== sizeof(request)) {
+		launchd_answer(request);
+		free(request);
+	}
 }
 
 static void
