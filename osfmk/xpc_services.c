@@ -105,6 +105,7 @@ static char *bootstrap_variable(const char *name);
 static char *hex_variable(const char *name, const void *data, size_t size);
 static void remember_started(
 		const char *identifier, const char *instance, pid_t pid);
+static bool uuid_from_text(const char *text, uint8_t *out);
 static size_t from_hex(const char *hex, uint8_t *out, size_t size);
 static const char *encode_plist(struct xpc_encoder *encoder, const char *key,
 		const char *value, const char *end);
@@ -675,6 +676,82 @@ xpc_services_kill(const char *name, int signo)
 	return error;
 }
 
+bool
+xpc_services_of_pid(pid_t pid, struct xpc_service_of_pid *out)
+{
+	char path[64];
+	snprintf(path, sizeof(path), "/proc/%d/environ", (int)pid);
+	int fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd == -1) {
+		return false;
+	}
+	size_t capacity = 1 << 16, length = 0;
+	char *environment = malloc(capacity + 1);
+	ssize_t n;
+	while (environment != NULL && length < capacity
+			&& (n = read(fd, environment + length,
+					    capacity - length))
+					> 0) {
+		length += (size_t)n;
+	}
+	close(fd);
+	if (environment == NULL) {
+		return false;
+	}
+	environment[length] = '\0';
+	static const char *const keys[] = {
+			SERVICE_VARIABLE "=",
+			BUNDLE_VARIABLE "=",
+			XPC_SERVICES_HOST_PID_VARIABLE "=",
+			INSTANCE_VARIABLE "=",
+	};
+	const char *values[4] = {NULL};
+	for (const char *entry = environment; entry < environment + length;
+			entry += strlen(entry) + 1) {
+		for (size_t k = 0; k != 4; k++) {
+			if (strncmp(entry, keys[k], strlen(keys[k])) == 0) {
+				values[k] = entry + strlen(keys[k]);
+			}
+		}
+	}
+	bool found = values[0] != NULL && values[1] != NULL && values[2] != NULL
+			&& atoi(values[2]) > 0;
+	if (found) {
+		snprintf(out->name, sizeof(out->name), "%s", values[0]);
+		snprintf(out->bundle, sizeof(out->bundle), "%s", values[1]);
+		out->host = (pid_t)atoi(values[2]);
+		out->has_instance = values[3] != NULL
+				&& uuid_from_text(values[3], out->instance);
+	}
+	free(environment);
+	return found;
+}
+
+static bool
+uuid_from_text(const char *text, uint8_t *out)
+{
+	int count = 0;
+	for (const char *p = text; *p != '\0' && count != 32; p++) {
+		if (*p == '-') {
+			continue;
+		}
+		int digit = (*p >= '0' && *p <= '9')       ? *p - '0'
+				: (*p >= 'A' && *p <= 'F') ? *p - 'A' + 10
+				: (*p >= 'a' && *p <= 'f') ? *p - 'a' + 10
+							   : -1;
+		if (digit < 0) {
+			return false;
+		}
+		if (count % 2 == 0) {
+			out[count / 2] = (uint8_t)(digit << 4);
+		} else {
+			out[count / 2] |= (uint8_t)digit;
+		}
+		count++;
+	}
+	return count == 32;
+}
+
 void
 xpc_services_set_bootstrap(
 		const char *name, const void *dictionary, size_t size)
@@ -952,4 +1029,18 @@ xpc_services_job_events(const char *plist_path, const char *stream,
 	}
 	free(buffer);
 	free(plist);
+}
+
+bool
+xpc_services_bundle_identifier(
+		const char *bundle, char *identifier, size_t size)
+{
+	char *plist = read_info_plist(bundle);
+	if (plist == NULL) {
+		return false;
+	}
+	bool found = plist_string(plist, plist + strlen(plist),
+			"CFBundleIdentifier", identifier, size);
+	free(plist);
+	return found;
 }

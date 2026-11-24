@@ -51,8 +51,10 @@
 #include "handler.h"
 #include "kevent.h"
 #include "kmsg.h"
+#include "osfmk/broker_client.h"
 #include "osfmk/task.h"
 #include "process.h"
+#include "responsibility.h"
 #include "sysroot.h"
 #include "thread.h"
 #include "xnu-errno.h"
@@ -467,6 +469,7 @@ static int list_linux_threads(const struct process *process, user_addr_t buffer,
 static int threadinfo_of_linux(const struct process *process, uint64_t id,
 		user_addr_t buffer, int32_t buffersize);
 static bool same_user(const struct process *process);
+static int coalition_ids(int32_t pid, uint64_t ids[2]);
 static bool linux_thread_is_guest(int32_t pid, int32_t tid);
 static int threadinfo(uint64_t value, bool id, user_addr_t buffer,
 		int32_t buffersize);
@@ -710,6 +713,10 @@ pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, user_addr_t buffer,
 		uint64_t info[5] = {0};
 		if (buffersize < (int32_t)sizeof(info)) {
 			return _ENOMEM;
+		}
+		int error = coalition_ids(pid, info);
+		if (error != 0) {
+			return error;
 		}
 		memcpy(buffer, info, sizeof(info));
 		return sizeof(info);
@@ -1633,4 +1640,61 @@ fill_region_info(struct proc_regioninfo *region, unsigned long start,
 	region->pri_share_mode = perms[3] == 's' ? SM_SHARED : SM_PRIVATE;
 	region->pri_address = start;
 	region->pri_size = end - start;
+}
+
+#define COALITION_KERNEL_RESOURCE 1
+#define COALITION_KERNEL_JETSAM   3
+#define COALITION_PID_BITS        22
+
+static bool
+kernel_coalition_member(int32_t pid)
+{
+	return pid == 0 || pid == 1 || broker_client_is_launchd(pid)
+			|| !process_is_guest(pid);
+}
+
+static int
+coalition_ids(int32_t pid, uint64_t ids[2])
+{
+	if (kernel_coalition_member(pid)) {
+		ids[0] = COALITION_KERNEL_RESOURCE;
+		ids[1] = COALITION_KERNEL_JETSAM;
+		return 0;
+	}
+	struct process process;
+	if (process_lookup(pid, &process) != 0) {
+		return _ESRCH;
+	}
+	int32_t leader = responsibility_of(&process);
+	if (leader != pid && process_lookup(leader, &process) != 0) {
+		leader = pid;
+		if (process_lookup(leader, &process) != 0) {
+			return _ESRCH;
+		}
+	}
+	uint64_t id = ((process.start_ticks & 0xffffff) << COALITION_PID_BITS
+				      | (uint64_t)leader)
+			<< 1;
+	ids[0] = id;
+	ids[1] = id | 1;
+	return 0;
+}
+
+int
+proc_coalition_leader(uint64_t id, int32_t *leader)
+{
+	if (id == COALITION_KERNEL_RESOURCE || id == COALITION_KERNEL_JETSAM) {
+		*leader = 0;
+		return 0;
+	}
+	int32_t pid = (int32_t)((id >> 1) & ((1u << COALITION_PID_BITS) - 1));
+	struct process process;
+	if (kernel_coalition_member(pid) || process_lookup(pid, &process) != 0
+			|| (process.start_ticks & 0xffffff)
+					!= id >> (COALITION_PID_BITS + 1)
+			|| responsibility_of(&process) != pid) {
+		return _ESRCH;
+	}
+	*leader = pid;
+	return 0;
 }

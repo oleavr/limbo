@@ -54,6 +54,7 @@
 
 #include "broker.h"
 #include "launchd_engine.h"
+#include "osfmk/launchd_jobs.h"
 #include "plist.h"
 
 #define DEFAULT_THROTTLE   10
@@ -190,6 +191,7 @@ static uid_t job_uid(const struct job *job);
 static bool crashed(int status);
 static char *exit_reason(const char *log);
 static int open_log(struct job *job);
+static int open_log_at(const char *path, uid_t uid, gid_t gid);
 static bool kept_alive(const struct job *job, int status);
 static bool awaited(const struct job *job);
 static void demand(struct job *job, const char *why);
@@ -1718,6 +1720,7 @@ handle_signals(void)
 				process_exited(jobs[i], status);
 			}
 		}
+		launchd_jobs_exited(pid, status);
 	}
 }
 
@@ -2402,13 +2405,27 @@ log_path(const char *prefix, const char *program, char **arguments)
 static int
 open_log(struct job *job)
 {
+	return open_log_at(job->log, user_uid, user_gid);
+}
+
+int
+jobs_open_log(const char *program, char **arguments, uid_t uid, gid_t gid)
+{
+	char *path = log_path("", program, arguments);
+	int log = open_log_at(path, uid, gid);
+	free(path);
+	return log;
+}
+
+static int
+open_log_at(const char *path, uid_t uid, gid_t gid)
+{
 	char old[PATH_MAX];
-	snprintf(old, sizeof(old), "%s.old", job->log);
-	rename(job->log, old);
-	int log = open(job->log, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
-			0644);
+	snprintf(old, sizeof(old), "%s.old", path);
+	rename(path, old);
+	int log = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 	if (log != -1 && geteuid() == 0) {
-		(void)!fchown(log, user_uid, user_gid);
+		(void)!fchown(log, uid, gid);
 	}
 	return log;
 }
