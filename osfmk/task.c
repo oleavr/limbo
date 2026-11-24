@@ -150,6 +150,7 @@ static uint64_t nanoseconds_to_absolute(uint64_t nanoseconds);
 
 /* TASK_BASIC_INFO_64 on arm64, whichever the headers were built for */
 #define TASK_BASIC_INFO_64_ARM 18
+#define TASK_BASIC_INFO_64_X86 5
 #pragma pack(push, 4)
 struct task_basic_info_64_arm {
 	integer_t suspend_count;
@@ -203,6 +204,7 @@ task_info(task_name_t target_task, task_flavor_t flavor,
 	} break;
 	case MACH_TASK_BASIC_INFO:
 	case TASK_BASIC_INFO_64_ARM:
+	case TASK_BASIC_INFO_64_X86:
 	case TASK_VM_INFO:
 	case TASK_VM_INFO_PURGEABLE:
 	case TASK_THREAD_TIMES_INFO:
@@ -352,6 +354,7 @@ memory_and_time_info(pid_t pid, task_flavor_t flavor, task_info_t out,
 		size = MACH_TASK_BASIC_INFO_COUNT;
 		break;
 	case TASK_BASIC_INFO_64_ARM:
+	case TASK_BASIC_INFO_64_X86:
 		info.basic_64.virtual_size = usage.virtual_size;
 		info.basic_64.resident_size = usage.resident_size;
 		time_value(ended_user, &info.basic_64.user_time);
