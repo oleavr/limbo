@@ -82,6 +82,7 @@ union broker_request {
 	struct broker_register reg;
 	struct broker_lookup lookup;
 	struct broker_task_for_pid task_for_pid;
+	struct broker_hold hold;
 	struct broker_launchd_port launchd_port;
 };
 
@@ -864,6 +865,15 @@ handle_guest(int fd)
 	case BROKER_TASK_FOR_PID:
 		task_for_pid(conn, (const struct broker_task_for_pid *)payload);
 		break;
+	case BROKER_HOLD: {
+		const struct broker_hold *hold
+				= (const struct broker_hold *)payload;
+		char name[LIMBO_BROKER_SERVICE_NAME_MAX];
+		memcpy(name, hold->name, sizeof(name));
+		name[sizeof(name) - 1] = '\0';
+		hold_name(name);
+		break;
+	}
 	case BROKER_LAUNCHD_PORT:
 		launchd_port_told(conn, payload, length);
 		break;

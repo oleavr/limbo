@@ -57,6 +57,7 @@ pid_t broker_client_pid(void);
 pid_t broker_client_launchd_pid(void);
 bool broker_client_is_launchd(pid_t pid);
 uint64_t broker_client_launchd_port(void);
+void broker_client_hold(const char *name);
 uint64_t broker_client_task_for_pid(int32_t pid);
 mach_msg_return_t broker_client_send(uint64_t dest_global_id, const void *blob,
 		uint32_t length, const int *fds, size_t fd_count,
