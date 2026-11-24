@@ -82,11 +82,13 @@ union broker_request {
 	struct broker_register reg;
 	struct broker_lookup lookup;
 	struct broker_task_for_pid task_for_pid;
+	struct broker_launchd_port launchd_port;
 };
 
 struct held_send {
 	struct held_send *next;
 	struct broker_wire_frame *frame;
+	struct broker_sender asker;
 };
 
 struct route {
@@ -134,6 +136,9 @@ static void welcome_guest(struct connection *conn,
 		const struct broker_hello *hello, uint32_t length);
 static void read_held_names(const char *path);
 static void hold_name(const char *name);
+static void launchd_port_told(
+		struct connection *conn, const void *payload, uint32_t length);
+static void answer_port_askers(void);
 static void begin_hold(struct held_name *held, bool hides);
 static struct held_name *name_made(const char *name);
 static struct held_name *held_named(const char *name);
@@ -163,10 +168,10 @@ static bool has_job(const struct held_name *held, uint32_t domain);
 static struct held_name *held_of(uint64_t global_id, uint32_t *domain);
 static uint64_t held_port(const struct held_name *held, uint32_t domain);
 static void release_held_sends(struct held_name *held);
-static void pass_on_held(
-		struct broker_wire_frame *frame, struct broker_send *send);
+static void pass_on_held(struct broker_wire_frame *frame,
+		struct broker_send *send, struct broker_sender asker);
 static void pass_on(struct broker_wire_frame *frame, struct broker_send *send,
-		uint32_t mover_id);
+		struct broker_sender asker, uint32_t mover_id);
 static void set_route(uint64_t global_id, uint32_t guest_id, uint32_t mover_id);
 static void release_held(uint64_t global_id);
 static struct route *route_for(uint64_t global_id);
@@ -212,6 +217,10 @@ static size_t descriptor_room;
 static size_t queued_fds;
 static pid_t launchd_pid;
 static int launchd_fd = -1;
+static uint64_t launchd_port;
+static bool launchd_port_said;
+static int *port_askers;
+static size_t port_asker_count;
 static bool launchd_loaded;
 static int64_t launchd_deadline;
 static bool stopping;
@@ -329,6 +338,74 @@ hold_name(const char *name)
 		begin_hold(held, hides);
 	}
 	held->held_for_guest = true;
+}
+
+static void
+launchd_port_told(struct connection *conn, const void *payload, uint32_t length)
+{
+	if (conn->fd == launchd_fd) {
+		struct broker_launchd_port told;
+		if (length < sizeof(told)) {
+			return;
+		}
+		memcpy(&told, payload, sizeof(told));
+		const struct connection *owner = told.global_id != 0
+				? connection_for_guest(broker_guest_of(
+						  told.global_id))
+				: NULL;
+		if (told.global_id != 0
+				&& (owner == NULL || launchd_pid <= 0
+						|| owner->pid != launchd_pid)) {
+			fprintf(stderr,
+					"limbo-broker: %s said a port that is "
+					"not its own\n",
+					LIMBO_LAUNCHD);
+		}
+		launchd_port = owner != NULL && owner->pid == launchd_pid
+				? told.global_id
+				: 0;
+		launchd_port_said = true;
+		answer_port_askers();
+		return;
+	}
+	if (conn->guest_id == BROKER_GUEST_ID) {
+		return;
+	}
+	if (!launchd_port_said && launchd_fd != -1) {
+		int *grown = reallocarray(port_askers, port_asker_count + 1,
+				sizeof(*port_askers));
+		if (grown != NULL) {
+			port_askers = grown;
+			port_askers[port_asker_count++] = conn->fd;
+			return;
+		}
+	}
+	struct broker_lookup_reply reply = {
+			.found = launchd_port != 0,
+			.global_id = launchd_port,
+	};
+	send_frame(conn, BROKER_LOOKUP_REPLY, &reply, sizeof(reply));
+}
+
+static void
+answer_port_askers(void)
+{
+	struct broker_lookup_reply reply = {
+			.found = launchd_port != 0,
+			.global_id = launchd_port,
+	};
+	size_t count = port_asker_count;
+	int *askers = port_askers;
+	port_askers = NULL;
+	port_asker_count = 0;
+	for (size_t i = 0; i != count; i++) {
+		struct connection *conn = connection_for_fd(askers[i]);
+		if (conn != NULL) {
+			send_frame(conn, BROKER_LOOKUP_REPLY, &reply,
+					sizeof(reply));
+		}
+	}
+	free(askers);
 }
 
 static void
@@ -787,6 +864,9 @@ handle_guest(int fd)
 	case BROKER_TASK_FOR_PID:
 		task_for_pid(conn, (const struct broker_task_for_pid *)payload);
 		break;
+	case BROKER_LAUNCHD_PORT:
+		launchd_port_told(conn, payload, length);
+		break;
 	}
 	free(payload);
 	broker_wire_free(frame);
@@ -962,6 +1042,8 @@ route_send(struct connection *conn, struct broker_wire_frame *frame)
 		broker_wire_free(frame);
 		return;
 	}
+	struct broker_sender asker
+			= {conn->pid, conn->peer_uid, conn->peer_gid};
 	struct route *route = route_for(send.dest_global_id);
 	bool waits = route != NULL && route->mover_id != 0
 			&& route->mover_id != conn->guest_id;
@@ -971,10 +1053,10 @@ route_send(struct connection *conn, struct broker_wire_frame *frame)
 			tail = &(*tail)->next;
 		}
 		*tail = malloc(sizeof(**tail));
-		**tail = (struct held_send){.frame = frame};
+		**tail = (struct held_send){.frame = frame, .asker = asker};
 		return;
 	}
-	pass_on(frame, &send, conn->guest_id);
+	pass_on(frame, &send, asker, conn->guest_id);
 }
 
 static void
@@ -990,7 +1072,10 @@ send_held(struct connection *conn, struct broker_wire_frame *frame,
 	uint64_t target = held_target(held, domain);
 	if (target != 0) {
 		send->dest_global_id = target;
-		pass_on(frame, send, conn->guest_id);
+		pass_on(frame, send,
+				(struct broker_sender){conn->pid,
+						conn->peer_uid, conn->peer_gid},
+				conn->guest_id);
 		return;
 	}
 	struct held_send **tail = &held->queued;
@@ -998,7 +1083,10 @@ send_held(struct connection *conn, struct broker_wire_frame *frame,
 		tail = &(*tail)->next;
 	}
 	*tail = malloc(sizeof(**tail));
-	**tail = (struct held_send){.frame = frame};
+	**tail = (struct held_send){
+			.frame = frame,
+			.asker = {conn->pid, conn->peer_uid, conn->peer_gid},
+	};
 	uint32_t count;
 	uint64_t *moved = moved_ids(frame, send, &count);
 	for (uint32_t i = 0; i != count; i++) {
@@ -1095,7 +1183,7 @@ no_job(const struct broker_name_awaited *which)
 		}
 		*link = queued->next;
 		send.dest_global_id = service->global_id;
-		pass_on_held(queued->frame, &send);
+		pass_on_held(queued->frame, &send, queued->asker);
 		free(queued);
 		answered = true;
 	}
@@ -1177,7 +1265,7 @@ release_held_sends(struct held_name *held)
 		}
 		*link = queued->next;
 		send.dest_global_id = service->global_id;
-		pass_on_held(queued->frame, &send);
+		pass_on_held(queued->frame, &send, queued->asker);
 		free(queued);
 		released = true;
 	}
@@ -1187,11 +1275,12 @@ release_held_sends(struct held_name *held)
 }
 
 static void
-pass_on_held(struct broker_wire_frame *frame, struct broker_send *send)
+pass_on_held(struct broker_wire_frame *frame, struct broker_send *send,
+		struct broker_sender asker)
 {
 	uint32_t count;
 	uint64_t *moved = moved_ids(frame, send, &count);
-	pass_on(frame, send, 0);
+	pass_on(frame, send, asker, 0);
 	for (uint32_t i = 0; i != count; i++) {
 		release_held(moved[i]);
 	}
@@ -1200,7 +1289,7 @@ pass_on_held(struct broker_wire_frame *frame, struct broker_send *send)
 
 static void
 pass_on(struct broker_wire_frame *frame, struct broker_send *send,
-		uint32_t mover_id)
+		struct broker_sender asker, uint32_t mover_id)
 {
 	struct connection *owner
 			= connection_for_guest(route_of(send->dest_global_id));
@@ -1211,7 +1300,9 @@ pass_on(struct broker_wire_frame *frame, struct broker_send *send,
 	uint32_t moved_count;
 	uint64_t *moved = moved_ids(frame, send, &moved_count);
 
-	send->sender = (struct broker_sender){0};
+	send->sender = owner->pid == launchd_pid && launchd_pid > 0
+			? asker
+			: (struct broker_sender){0};
 	memcpy(frame->payload, send, sizeof(*send));
 	frame->type = BROKER_DELIVER | (frame->type & BROKER_FRAME_OOL);
 	uint32_t guest_id = owner->guest_id;
@@ -1319,7 +1410,7 @@ release_held(uint64_t global_id)
 		struct held_send *next = held->next;
 		struct broker_send send;
 		broker_wire_read(held->frame, 0, &send, sizeof(send));
-		pass_on(held->frame, &send, 0);
+		pass_on(held->frame, &send, held->asker, 0);
 		free(held);
 		held = next;
 	}
@@ -1495,8 +1586,19 @@ add_connection(int fd)
 static void
 remove_connection(size_t index)
 {
+	uint32_t guest_id = connections[index].guest_id;
 	if (connections[index].fd == launchd_fd) {
 		launchd_fd = -1;
+		answer_port_askers();
+	}
+	if (launchd_port != 0 && guest_id != BROKER_GUEST_ID
+			&& broker_guest_of(launchd_port) == guest_id) {
+		launchd_port = 0;
+	}
+	for (size_t i = 0; i != port_asker_count; i++) {
+		if (port_askers[i] == connections[index].fd) {
+			port_askers[i--] = port_askers[--port_asker_count];
+		}
 	}
 	while (connections[index].pending != NULL) {
 		struct broker_wire_frame *frame = connections[index].pending;

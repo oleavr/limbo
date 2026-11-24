@@ -74,6 +74,7 @@ enum broker_frame_type {
 	BROKER_JOBS_STOPPING,
 	BROKER_CONTROL,
 	BROKER_CONTROL_REPLY,
+	BROKER_LAUNCHD_PORT,
 };
 
 #define BROKER_EXIT_REBOOT       3
@@ -181,6 +182,10 @@ struct broker_task_for_pid {
 struct broker_lookup_reply {
 	uint32_t found;
 	uint32_t hidden;
+	uint64_t global_id;
+};
+
+struct broker_launchd_port {
 	uint64_t global_id;
 };
 
