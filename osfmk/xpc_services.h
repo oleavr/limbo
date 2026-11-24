@@ -53,3 +53,10 @@ struct xpc_encoder;
 void xpc_services_set_bootstrap(
 		const char *name, const void *dictionary, size_t size);
 bool xpc_services_copy_bootstrap(struct xpc_encoder *encoder, size_t *size);
+
+bool xpc_services_job_event(const char *plist_path, const char *stream,
+		const char *name, struct xpc_encoder *encoder);
+void xpc_services_job_events(const char *plist_path, const char *stream,
+		void (*each)(void *context, const char *name,
+				const uint8_t *descriptor, size_t size),
+		void *context);
