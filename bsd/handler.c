@@ -2656,6 +2656,8 @@ map_page_aligned(size_t len, int prot, int tflags, int fd, off_t pos)
 #endif
 
 #ifndef __x86_64__
+static void *map_near(void *addr, size_t len, int prot, int tflags, int fd,
+		off_t pos);
 static void *map_code(void *addr, size_t len, int prot, int tflags, int fd,
 		off_t pos);
 static uint64_t patch_mapped_thread_self_reads(
@@ -2700,7 +2702,7 @@ sys_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t pos)
 	} else if (tflags & MAP_FIXED) {
 		r = mmap(addr, len, prot, tflags, fd, pos);
 	} else {
-		r = map_page_aligned(len, prot, tflags, fd, pos);
+		r = map_near(addr, len, prot, tflags, fd, pos);
 	}
 #endif
 	if (anonymous != -1) {
@@ -2715,6 +2717,23 @@ sys_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t pos)
 }
 
 #ifndef __x86_64__
+static void *
+map_near(void *addr, size_t len, int prot, int tflags, int fd, off_t pos)
+{
+	uintptr_t hint = ((uintptr_t)addr + PAGE_MASK) & ~(uintptr_t)PAGE_MASK;
+	if (hint != 0) {
+		void *r = mmap((void *)hint, len, prot,
+				tflags | MAP_FIXED_NOREPLACE, fd, pos);
+		if (r == (void *)hint) {
+			return r;
+		}
+		if (r != MAP_FAILED) {
+			munmap(r, len);
+		}
+	}
+	return map_page_aligned(len, prot, tflags, fd, pos);
+}
+
 static void *
 map_code(void *addr, size_t len, int prot, int tflags, int fd, off_t pos)
 {
