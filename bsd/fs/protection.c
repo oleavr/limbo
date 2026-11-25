@@ -37,6 +37,8 @@
 #include <sys/stat.h>
 #include <sys/xattr.h>
 
+#include "bsd/codesign.h"
+
 static void fd_path(int fd, char *buffer, size_t size);
 static uint32_t default_class(const struct stat *s);
 static int class_taken(const struct stat *s, int dpclass);
@@ -113,6 +115,9 @@ class_taken(const struct stat *s, int dpclass)
 	if (!known) {
 		errno = EINVAL;
 		return -1;
+	}
+	if (codesign_embedded()) {
+		return dpclass;
 	}
 	if (!folder
 			&& (dpclass == PROTECTION_CLASS_F
