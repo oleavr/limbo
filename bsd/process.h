@@ -64,6 +64,7 @@ int process_lookup(int32_t pid, struct process *process);
 bool process_exited(const struct process *process);
 int process_thread_lookup(
 		int32_t pid, int32_t tid, struct process_thread *thread);
+int32_t process_guest_parent(int32_t ppid);
 int32_t process_terminal(const struct process *process);
 void process_start_time(
 		const struct process *process, uint64_t *sec, uint64_t *usec);

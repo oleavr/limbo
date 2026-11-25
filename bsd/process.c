@@ -36,6 +36,7 @@
 
 #include "broker.h"
 #include "gid.h"
+#include "osfmk/broker_client.h"
 #include "process.h"
 
 #define STAT_VIRTUAL_SIZE 23
@@ -91,6 +92,7 @@ process_lookup(int32_t pid, struct process *process)
 	if (process->state == 'Z') {
 		live_thread_memory(pid, process);
 	}
+	process->ppid = process_guest_parent(process->ppid);
 
 	snprintf(path, sizeof(path), "/proc/%d/status", pid);
 	FILE *status = fopen(path, "r");
@@ -178,6 +180,12 @@ process_thread_lookup(int32_t pid, int32_t tid, struct process_thread *thread)
 			&thread->state, &thread->user_ticks,
 			&thread->system_ticks);
 	return 0;
+}
+
+int32_t
+process_guest_parent(int32_t ppid)
+{
+	return broker_client_is_launchd(ppid) ? 1 : ppid;
 }
 
 int32_t
