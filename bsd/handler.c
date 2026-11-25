@@ -4285,7 +4285,7 @@ sys_lchown(user_addr_t path, void *owner, void *group)
 int
 sys_ledger(int cmd, void *arg1, void *arg2, void *arg3)
 {
-	unimplemented();
+	return _ENOTSUP;
 }
 
 int
