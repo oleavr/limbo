@@ -2987,6 +2987,7 @@ poll_events_from_linux(short events)
 	return result;
 }
 
+#define APFS_GRAFT_INFO     0xc0104a66
 #define APFS_MARK_PURGEABLE 0xc0084a44
 #define FSOPT_NOFOLLOW      0x1
 
@@ -3025,6 +3026,10 @@ sys_ffsctl(int fd, uint64_t cmd, void *data, uint32_t options)
 static int
 fsctl_command(int fd, uint64_t cmd, void *data)
 {
+	if (cmd == APFS_GRAFT_INFO) {
+		memset(data, 0, 16);
+		return 0;
+	}
 	if (cmd == APFS_MARK_PURGEABLE) {
 		uint64_t flags;
 		memcpy(&flags, data, sizeof(flags));
