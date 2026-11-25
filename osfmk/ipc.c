@@ -2975,6 +2975,11 @@ register_name(const char *name, uint64_t global_id)
 {
 	struct broker_register request = {.global_id = global_id};
 	strncpy(request.name, name, sizeof(request.name) - 1);
+	const char *instance = getenv(BROKER_INSTANCE_VARIABLE);
+	if (instance != NULL && instance[0] != '\0') {
+		snprintf(request.name, sizeof(request.name), "%s#%s", name,
+				instance);
+	}
 	struct broker_registered reply = {.holder = BROKER_NAME_FREE};
 	pthread_mutex_lock(&own_lock);
 	if (own_name(name) != 0) {
