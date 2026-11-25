@@ -77,6 +77,10 @@ enum broker_frame_type {
 	BROKER_LAUNCHD_PORT,
 	BROKER_HOLD,
 	BROKER_JETSAM_PRIORITY,
+	BROKER_SETID_EXEC,
+	BROKER_SETID_STARTED,
+	BROKER_SETID_EXITED,
+	BROKER_SETID_STOPPED,
 };
 
 #define BROKER_EXIT_REBOOT       3
@@ -199,6 +203,28 @@ struct broker_hold {
 struct broker_jetsam_priority {
 	int32_t pid;
 	int32_t priority;
+};
+
+struct broker_setid_exec {
+	uint32_t fd_count;
+	int32_t terminal;
+	uint32_t job;
+	uint32_t argc;
+	uint32_t envc;
+	int32_t fd_numbers[BROKER_DATAGRAM_FDS];
+};
+
+struct broker_setid_started {
+	int32_t error;
+	int32_t pid;
+};
+
+struct broker_setid_exited {
+	int32_t status;
+};
+
+struct broker_setid_stopped {
+	int32_t signal;
 };
 
 struct broker_submit_service {
