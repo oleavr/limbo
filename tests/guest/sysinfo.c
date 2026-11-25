@@ -285,6 +285,16 @@ main(void)
 	CHECK(pthread_setname_np("main-thread") == 0);
 	CHECK(proc_name(getpid(), name, sizeof(name)) > 0);
 	CHECK(strcmp(name, "sysinfo") == 0);
+	struct proc_threadinfo thread;
+	thread_identifier_info_data_t identifier;
+	mach_msg_type_number_t identifier_count = THREAD_IDENTIFIER_INFO_COUNT;
+	CHECK(thread_info(mach_thread_self(), THREAD_IDENTIFIER_INFO,
+			      (thread_info_t)&identifier, &identifier_count)
+			== KERN_SUCCESS);
+	CHECK(proc_pidinfo(getpid(), PROC_PIDTHREADINFO,
+			      identifier.thread_handle, &thread, sizeof(thread))
+			== sizeof(thread));
+	CHECK(strcmp(thread.pth_name, "main-thread") == 0);
 
 	struct utsname uts;
 	CHECK(uname(&uts) == 0 && strcmp(uts.sysname, "Darwin") == 0);
