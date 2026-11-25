@@ -93,6 +93,7 @@ struct ipc_kobject_ops {
 	void *(*adopt)(const void *record, const int *fds, size_t fd_count);
 	void (*destroy)(void *kobject);
 	bool (*serve)(void *kobject, mach_msg_header_t *request, bool remote);
+	void (*guest_gone)(uint32_t guest_id);
 };
 
 #define IPC_KOBJECT_OPS(name)                                                  \

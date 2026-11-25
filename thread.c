@@ -47,6 +47,7 @@
 #include <unistd.h>
 
 #include "bsd/credentials.h"
+#include "osfmk/eventlink.h"
 #include "osfmk/ipc.h"
 #include "syscall.h"
 #include "thread.h"
@@ -304,6 +305,7 @@ thread_destroy(struct thread *thread)
 		munmap(thread->stack, thread->stack_size);
 	}
 	release_exception_actions(thread);
+	eventlink_thread_gone((uint64_t)thread->tid);
 	ipc_kobject_destroy(thread->port);
 	ipc_port_deallocate(thread->port);
 	current = NULL;

@@ -57,10 +57,12 @@
 #define EVENTLINK_SIGNAL_COUNT_MASK   0xffffffffffffffull
 #define EVENTLINK_SIGNAL_ERROR_SHIFT  56
 #define THREAD_ASSOCIATE_WILD         UINT64_MAX
+#define THREAD_ENDED                  (UINT64_MAX - 1)
 #define NO_WAITER                     UINT64_MAX
 #define NO_THREAD                     0
 #define PAIR_SIZE                     4096
 #define WAITER_COUNT                  8
+#define HOLDER_GUESTS                 8
 
 struct eventlink_waiter {
 	_Atomic uint32_t woken;
@@ -74,6 +76,11 @@ struct eventlink_end {
 	uint64_t wait_count;
 	uint32_t waiter;
 	uint32_t holders;
+	uint32_t thread_guest;
+	struct {
+		uint32_t guest;
+		uint32_t count;
+	} holding[HOLDER_GUESTS];
 };
 
 struct eventlink {
@@ -81,6 +88,7 @@ struct eventlink {
 	struct eventlink_end *end;
 	int fd;
 	_Atomic uint32_t references;
+	struct eventlink *next;
 };
 
 struct eventlink_pair {
@@ -149,6 +157,12 @@ static bool create_pair(struct eventlink *ends[2]);
 static struct eventlink *map_end(int fd, uint64_t side);
 static void end_pair(struct eventlink_pair *pair);
 static void lock_pair(struct eventlink_pair *pair);
+static void count_holder(struct eventlink_end *end, uint32_t guest, int change);
+static void eventlink_guest_gone(uint32_t guest);
+static void end_association(struct eventlink_end *end);
+
+static pthread_mutex_t ends_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct eventlink *mapped_ends;
 static void release_end(struct eventlink *end);
 
 const struct mach_eventlink_subsystem {
@@ -224,6 +238,7 @@ create_pair(struct eventlink *ends[2])
 	for (int i = 0; i < 2; i++) {
 		pair->ends[i].wait_count = NO_WAITER;
 		pair->ends[i].holders = 1;
+		count_holder(&pair->ends[i], broker_client_guest_id(), 1);
 	}
 
 	int second = limbo_fd_copy(fd);
@@ -251,6 +266,10 @@ map_end(int fd, uint64_t side)
 			.fd = fd,
 			.references = 1,
 	};
+	pthread_mutex_lock(&ends_lock);
+	end->next = mapped_ends;
+	mapped_ends = end;
+	pthread_mutex_unlock(&ends_lock);
 	return end;
 }
 
@@ -302,6 +321,7 @@ associate(struct eventlink *end, uint64_t thread,
 		kr = KERN_NAME_EXISTS;
 	} else {
 		end->end->thread = on_wait ? THREAD_ASSOCIATE_WILD : thread;
+		end->end->thread_guest = broker_client_guest_id();
 	}
 	pthread_mutex_unlock(&end->pair->lock);
 	release_end(end);
@@ -450,6 +470,7 @@ eventlink_port_gone(void *kobject)
 {
 	struct eventlink *end = kobject;
 	lock_pair(end->pair);
+	count_holder(end->end, broker_client_guest_id(), -1);
 	if (--end->end->holders == 0) {
 		end_pair(end->pair);
 	}
@@ -460,6 +481,8 @@ eventlink_port_gone(void *kobject)
 void
 eventlink_fork_child(void)
 {
+	pthread_mutex_init(&ends_lock, NULL);
+	mapped_ends = NULL;
 	ipc_kobject_fork_child(IPC_KOBJECT_EVENTLINK);
 }
 
@@ -570,6 +593,15 @@ static void
 release_end(struct eventlink *end)
 {
 	if (atomic_fetch_sub(&end->references, 1) == 1) {
+		pthread_mutex_lock(&ends_lock);
+		struct eventlink **link = &mapped_ends;
+		while (*link != NULL && *link != end) {
+			link = &(*link)->next;
+		}
+		if (*link != NULL) {
+			*link = end->next;
+		}
+		pthread_mutex_unlock(&ends_lock);
 		munmap(end->pair, PAIR_SIZE);
 		close(end->fd);
 		free(end);
@@ -581,6 +613,84 @@ encode(uint64_t count, kern_return_t kr)
 {
 	return (count & EVENTLINK_SIGNAL_COUNT_MASK)
 			| (uint64_t)kr << EVENTLINK_SIGNAL_ERROR_SHIFT;
+}
+
+static void
+count_holder(struct eventlink_end *end, uint32_t guest, int change)
+{
+	int free_slot = -1;
+	for (int i = 0; i < HOLDER_GUESTS; i++) {
+		if (end->holding[i].count != 0
+				&& end->holding[i].guest == guest) {
+			end->holding[i].count += change;
+			return;
+		}
+		if (end->holding[i].count == 0 && free_slot == -1) {
+			free_slot = i;
+		}
+	}
+	if (change > 0 && free_slot != -1) {
+		end->holding[free_slot].guest = guest;
+		end->holding[free_slot].count = (uint32_t)change;
+	}
+}
+
+static void
+eventlink_guest_gone(uint32_t guest)
+{
+	pthread_mutex_lock(&ends_lock);
+	for (struct eventlink *end = mapped_ends; end != NULL;
+			end = end->next) {
+		lock_pair(end->pair);
+		for (int side = 0; side < 2; side++) {
+			struct eventlink_end *held = &end->pair->ends[side];
+			if (held->thread_guest == guest) {
+				end_association(held);
+			}
+			for (int i = 0; i < HOLDER_GUESTS; i++) {
+				if (held->holding[i].count == 0
+						|| held->holding[i].guest
+								!= guest) {
+					continue;
+				}
+				uint32_t count = held->holding[i].count;
+				held->holders -= count < held->holders
+						? count
+						: held->holders;
+				held->holding[i].count = 0;
+				if (held->holders == 0) {
+					end_pair(end->pair);
+				}
+			}
+		}
+		pthread_mutex_unlock(&end->pair->lock);
+	}
+	pthread_mutex_unlock(&ends_lock);
+}
+
+void
+eventlink_thread_gone(uint64_t thread)
+{
+	pthread_mutex_lock(&ends_lock);
+	for (struct eventlink *end = mapped_ends; end != NULL;
+			end = end->next) {
+		lock_pair(end->pair);
+		for (int side = 0; side < 2; side++) {
+			if (end->pair->ends[side].thread == thread) {
+				end_association(&end->pair->ends[side]);
+			}
+		}
+		pthread_mutex_unlock(&end->pair->lock);
+	}
+	pthread_mutex_unlock(&ends_lock);
+}
+
+static void
+end_association(struct eventlink_end *end)
+{
+	if (end->thread != NO_THREAD && end->thread != THREAD_ASSOCIATE_WILD) {
+		end->thread = THREAD_ENDED;
+	}
 }
 
 static bool
@@ -608,6 +718,9 @@ adopt_end(const void *record, const int *fds, size_t fd_count)
 		fprintf(stderr, "ipc: eventlink without its memfd\n");
 		return NULL;
 	}
+	lock_pair(end->pair);
+	count_holder(end->end, broker_client_guest_id(), 1);
+	pthread_mutex_unlock(&end->pair->lock);
 	return end;
 }
 
@@ -619,6 +732,7 @@ static const struct ipc_kobject_ops eventlink_ops = {
 		.describe = describe_end,
 		.adopt = adopt_end,
 		.destroy = eventlink_port_gone,
+		.guest_gone = eventlink_guest_gone,
 };
 
 IPC_KOBJECT_OPS(eventlink_ops);
