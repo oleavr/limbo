@@ -45,6 +45,7 @@
 #include <sys/sysmacros.h>
 #include <unistd.h>
 
+#include "bsd/fs/fileid.h"
 #include "sysroot.h"
 #include "trace.h"
 
@@ -238,6 +239,27 @@ host_path(const char *path, int flags, char *buffer)
 {
 	if (path == NULL || root_length == 0 || path[0] != '/') {
 		return path;
+	}
+
+	char volfs[PATH_MAX];
+	if (strncmp(path, "/.vol/", 6) == 0) {
+		const char *at = path + 6;
+		char *end;
+		strtoll(at, &end, 10);
+		if (end != at && *end == '/') {
+			at = end + 1;
+			uint64_t id = strtoull(at, &end, 10);
+			char base[PATH_MAX];
+			if (end != at && (*end == '/' || *end == '\0')
+					&& fileid_path(id, base, sizeof(base))
+							> 0) {
+				bool top = strcmp(base, "/") == 0
+						&& *end == '/';
+				snprintf(volfs, sizeof(volfs), "%s%s",
+						top ? "" : base, end);
+				path = volfs[0] != '\0' ? volfs : "/";
+			}
+		}
 	}
 
 	uint64_t resolve = 0;
