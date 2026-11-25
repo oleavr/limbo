@@ -42,6 +42,8 @@ kern_return_t _kernelrpc_mach_vm_protect(vm_task_entry_t target_task,
 		mach_vm_address_t address, mach_vm_size_t size,
 		boolean_t set_maximum, vm_prot_t new_protection);
 mach_port_name_t memory_entry_create(mach_vm_size_t size, void **contents);
+mach_port_name_t mach_vm_remap_request_prepare(
+		mach_msg_header_t *msg, mach_msg_size_t size);
 bool mach_vm_read_request_answer(
 		mach_msg_header_t *msg, mach_msg_size_t size, int32_t pid);
 bool mach_vm_read_overwrite_request_answer(

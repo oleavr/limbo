@@ -105,6 +105,7 @@ mach_port_name_t ipc_task_self(void);
 mach_port_name_t ipc_task_for_pid(int32_t pid);
 bool ipc_task_pid(mach_port_name_t name, int32_t *pid);
 bool ipc_port_is_remote(mach_port_name_t name);
+void ipc_port_release_if_unused(mach_port_name_t name);
 mach_port_name_t ipc_fileport_alloc(int fd);
 int ipc_fileport_fd(mach_port_name_t name);
 mach_port_name_t ipc_host_self(void);
