@@ -107,6 +107,42 @@ static void shared_ranges_prune(void);
 static bool shared_range_mapped(const struct shared_range *range, bool mapped,
 		dev_t device, ino_t inode);
 static int held_fd(mach_vm_address_t start);
+struct vma_query {
+	uint64_t size;
+	uint64_t query_flags;
+	uint64_t query_addr;
+	uint64_t vma_start;
+	uint64_t vma_end;
+	uint64_t vma_flags;
+	uint64_t vma_page_size;
+	uint64_t vma_offset;
+	uint64_t inode;
+	uint32_t dev_major;
+	uint32_t dev_minor;
+	uint32_t vma_name_size;
+	uint32_t build_id_size;
+	uint64_t vma_name_addr;
+	uint64_t build_id_addr;
+};
+
+#define VMA_QUERY            _IOWR('f', 17, struct vma_query)
+#define VMA_READABLE         0x01
+#define VMA_WRITABLE         0x02
+#define VMA_EXECUTABLE       0x04
+#define VMA_SHARED           0x08
+#define VMA_COVERING_OR_NEXT 0x10
+
+static pthread_mutex_t vma_lock = PTHREAD_MUTEX_INITIALIZER;
+static int vma_fd = -1;
+static pid_t vma_pid;
+static bool vma_unsupported;
+
+static int vma_lookup(mach_vm_address_t address, bool or_next,
+		struct vma_query *query);
+static vm_prot_t vma_protection(const struct vma_query *query);
+static bool region_from_maps(mach_vm_address_t address,
+		mach_vm_address_t *start, mach_vm_size_t *size,
+		vm_prot_t *protection, bool *shared, uint64_t *offset);
 static bool region_inode(mach_vm_address_t start, dev_t *device, ino_t *inode);
 static int copy_range(mach_vm_address_t address, mach_vm_size_t size);
 static kern_return_t remap_copy(mach_vm_address_t *target_address,
@@ -1056,13 +1092,36 @@ copy_readable(int fd, mach_vm_address_t address, mach_vm_size_t size,
 		bool *shared)
 {
 	*shared = false;
+	mach_vm_address_t end = address + size;
+	struct vma_query query;
+	mach_vm_address_t at = address;
+	int asked = 0;
+	while (at < end && (asked = vma_lookup(at, true, &query)) == 1
+			&& query.vma_start < end) {
+		*shared |= (query.vma_flags & VMA_SHARED) != 0;
+		mach_vm_address_t first = query.vma_start > address
+				? query.vma_start
+				: address;
+		mach_vm_address_t last
+				= query.vma_end < end ? query.vma_end : end;
+		if ((query.vma_flags & VMA_READABLE)
+				&& pwrite(fd, (void *)first, last - first,
+						   (off_t)(first - address))
+						!= (ssize_t)(last - first)) {
+			return false;
+		}
+		at = query.vma_end;
+	}
+	if (asked != -1) {
+		return true;
+	}
+	*shared = false;
 	FILE *maps = fopen("/proc/thread-self/maps", "r");
 	if (maps == NULL) {
 		return false;
 	}
 	char line[512];
 	bool ok = true;
-	mach_vm_address_t end = address + size;
 	while (ok && fgets(line, sizeof(line), maps) != NULL) {
 		unsigned long from, to;
 		char perms[5];
@@ -1286,6 +1345,16 @@ held_fd(mach_vm_address_t start)
 static bool
 region_inode(mach_vm_address_t start, dev_t *device, ino_t *inode)
 {
+	struct vma_query query;
+	int asked = vma_lookup(start, false, &query);
+	if (asked >= 0) {
+		if (asked == 0) {
+			return false;
+		}
+		*device = makedev(query.dev_major, query.dev_minor);
+		*inode = (ino_t)query.inode;
+		return true;
+	}
 	FILE *maps = fopen("/proc/thread-self/maps", "r");
 	char line[512];
 	bool found = false;
@@ -1575,8 +1644,80 @@ mach_vm_zero_check(mach_vm_address_t address, mach_vm_size_t size)
 
 static uint64_t guest_limit = UINT64_MAX;
 
+static int
+vma_lookup(mach_vm_address_t address, bool or_next, struct vma_query *query)
+{
+	pthread_mutex_lock(&vma_lock);
+	if (!vma_unsupported && (vma_fd == -1 || vma_pid != getpid())) {
+		if (vma_fd != -1) {
+			close(vma_fd);
+		}
+		vma_fd = limbo_fd_high(
+				open("/proc/self/maps", O_RDONLY | O_CLOEXEC));
+		vma_pid = getpid();
+	}
+	int fd = vma_unsupported ? -1 : vma_fd;
+	pthread_mutex_unlock(&vma_lock);
+	if (fd == -1) {
+		return -1;
+	}
+	memset(query, 0, sizeof(*query));
+	query->size = sizeof(*query);
+	query->query_flags = or_next ? VMA_COVERING_OR_NEXT : 0;
+	query->query_addr = address;
+	if (ioctl(fd, VMA_QUERY, query) == 0) {
+		return 1;
+	}
+	if (errno == ENOENT) {
+		return 0;
+	}
+	if (errno == ENOTTY || errno == EINVAL) {
+		pthread_mutex_lock(&vma_lock);
+		vma_unsupported = true;
+		pthread_mutex_unlock(&vma_lock);
+	}
+	return -1;
+}
+
+static vm_prot_t
+vma_protection(const struct vma_query *query)
+{
+	return ((query->vma_flags & VMA_READABLE) ? VM_PROT_READ : 0)
+			| ((query->vma_flags & VMA_WRITABLE) ? VM_PROT_WRITE
+							     : 0)
+			| ((query->vma_flags & VMA_EXECUTABLE) ? VM_PROT_EXECUTE
+							       : 0);
+}
+
 static bool
 region_find(mach_vm_address_t address, mach_vm_address_t *start,
+		mach_vm_size_t *size, vm_prot_t *protection, bool *shared,
+		uint64_t *offset)
+{
+	struct vma_query query;
+	int asked = vma_lookup(address, true, &query);
+	bool found = false;
+	if (asked == 1 && query.vma_start < guest_limit) {
+		*start = query.vma_start;
+		*size = (query.vma_end < guest_limit ? query.vma_end
+						     : guest_limit)
+				- query.vma_start;
+		*protection = vma_protection(&query);
+		*shared = (query.vma_flags & VMA_SHARED) != 0;
+		*offset = query.vma_offset;
+		found = true;
+	} else if (asked == -1) {
+		found = region_from_maps(address, start, size, protection,
+				shared, offset);
+	}
+	if (found && *protection != VM_PROT_NONE) {
+		split_at_guards(address, start, size, protection, offset);
+	}
+	return found;
+}
+
+static bool
+region_from_maps(mach_vm_address_t address, mach_vm_address_t *start,
 		mach_vm_size_t *size, vm_prot_t *protection, bool *shared,
 		uint64_t *offset)
 {
@@ -1604,9 +1745,6 @@ region_find(mach_vm_address_t address, mach_vm_address_t *start,
 		}
 	}
 	fclose(maps);
-	if (found && *protection != VM_PROT_NONE) {
-		split_at_guards(address, start, size, protection, offset);
-	}
 	return found;
 }
 
