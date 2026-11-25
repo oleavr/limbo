@@ -5278,7 +5278,7 @@ sys_log_data(void *tag, void *flags, void *buffer, void *size)
 uint64_t
 sys_memorystatus_available_memory(void)
 {
-	unimplemented();
+	return 0;
 }
 
 int
