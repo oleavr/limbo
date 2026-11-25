@@ -73,10 +73,14 @@ static size_t device_count;
 static char **firmlinks;
 static size_t firmlink_count;
 static bool ios_layout;
+static bool device_on_ios_data[DEVICES_MAX];
+static dev_t ios_data_dev;
+static ino_t ios_data_root_ino;
 
 static void note_devices(void);
 static const char *unescaped(char *field);
 static void load_firmlinks(void);
+static void note_ios_data_volume(void);
 static bool leads_on(
 		int dirfd, const char *path, const char *host, char *target);
 static const char *host_path(const char *path, int flags, char *buffer);
@@ -109,6 +113,7 @@ sysroot_open(void)
 	}
 	note_devices();
 	load_firmlinks();
+	note_ios_data_volume();
 
 	return 0;
 }
@@ -139,6 +144,8 @@ note_devices(void)
 			i++;
 		}
 		if (i == device_count && device_count < DEVICES_MAX) {
+			device_on_ios_data[device_count] = under(
+					point + root_length, IOS_DATA_VOLUME);
 			devices[device_count++] = dev;
 		}
 	}
@@ -195,6 +202,19 @@ load_firmlinks(void)
 		firmlinks[firmlink_count++] = strdup(line);
 	}
 	fclose(file);
+}
+
+static void
+note_ios_data_volume(void)
+{
+	char var[PATH_MAX + sizeof(IOS_DATA_VOLUME)];
+	struct stat s;
+	snprintf(var, sizeof(var), "%s" IOS_DATA_VOLUME, root);
+	if (!ios_layout || stat(var, &s) != 0 || s.st_dev == root_dev) {
+		return;
+	}
+	ios_data_dev = s.st_dev;
+	ios_data_root_ino = s.st_ino;
 }
 
 const char *
@@ -465,6 +485,10 @@ sysroot_file_id(dev_t dev, uint64_t ino)
 	if (root_length != 0 && dev == root_dev && ino == root_ino) {
 		return 2;
 	}
+	if (ios_data_dev != 0 && dev == ios_data_dev
+			&& ino == ios_data_root_ino) {
+		return 2;
+	}
 	for (size_t i = 1; i < device_count; i++) {
 		if (devices[i] == dev) {
 			return ino | ((uint64_t)i << DEVICE_ID_SHIFT);
@@ -476,6 +500,20 @@ sysroot_file_id(dev_t dev, uint64_t ino)
 dev_t
 sysroot_device(dev_t dev)
 {
+	if (ios_data_dev != 0) {
+		for (size_t i = 1; i < device_count; i++) {
+			if (devices[i] == dev && device_on_ios_data[i]) {
+				return root_dev;
+			}
+		}
+		for (size_t i = 0; i < device_count; i++) {
+			if (devices[i] == dev) {
+				return makedev(major(root_dev),
+						minor(root_dev) + 2);
+			}
+		}
+		return dev;
+	}
 	for (size_t i = 1; i < device_count; i++) {
 		if (devices[i] == dev) {
 			return root_dev;
@@ -488,6 +526,12 @@ dev_t
 sysroot_root_device(void)
 {
 	return root_dev;
+}
+
+bool
+sysroot_ios_data_volume(void)
+{
+	return ios_data_dev != 0;
 }
 
 bool
