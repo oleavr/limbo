@@ -2347,6 +2347,9 @@ int
 sys_csops_audittoken(uint64_t pid, uint32_t ops, user_addr_t useraddr,
 		user_size_t usersize, user_addr_t uaudittoken)
 {
+	if (pid == 0 && uaudittoken != NULL) {
+		pid = ((const uint32_t *)uaudittoken)[5];
+	}
 	return codesign_ops((int32_t)pid, ops, useraddr, usersize);
 }
 
