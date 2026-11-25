@@ -173,6 +173,10 @@ shared_cache_mmap(void)
 	const char *host_path
 			= find_cache("dyld_shared_cache_arm64e", path, buffer);
 	shared_cache_cpu_subtype = CPU_SUBTYPE_ARM64E;
+	if (host_path == NULL) {
+		host_path = find_cache("dyld_shared_cache_arm64", path, buffer);
+		shared_cache_cpu_subtype = CPU_SUBTYPE_ARM64_ALL;
+	}
 #endif
 	if (host_path == NULL) {
 		fprintf(stderr,
