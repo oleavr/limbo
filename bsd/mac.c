@@ -402,6 +402,7 @@ quarantine_handle_syscall(int call, void *arg)
 #define SANDBOX_CHECK                2
 #define SANDBOX_CONTAINER_PATH       4
 #define SANDBOX_EXTENSION_ISSUE      5
+#define SANDBOX_EXTENSION_CONSUME    6
 #define SANDBOX_EXTENSION_FILE       0
 #define SANDBOX_EXTENSION_TOKEN_SIZE 0x3ff0
 #define SANDBOX_FILTER_PATH          1
@@ -410,6 +411,23 @@ quarantine_handle_syscall(int call, void *arg)
 #define SANDBOX_PROFILE_MODE         0644
 #define SANDBOX_PROFILE_SIZE_MAX     (1 << 24)
 #define SANDBOX_DIGEST_HEX_LENGTH    (2 * SHA256_DIGEST_LENGTH)
+#define CONTAINER_EXTENSION_CLASS    ";com.apple.sandbox.container;"
+
+struct sandbox_extension_consume_args {
+	const char *token;
+	uint64_t length;
+	int64_t *handle;
+};
+
+struct sandbox_container_path_args {
+	int64_t pid;
+	uint64_t reserved;
+	char *buffer;
+	uint64_t size;
+	uint64_t reserved2;
+};
+
+static char container[PATH_MAX];
 
 struct sandbox_check_args {
 	uint64_t *result;
@@ -533,6 +551,12 @@ void
 mac_sandbox_enter(void)
 {
 	entered = true;
+}
+
+void
+mac_sandbox_set_container(const char *path)
+{
+	snprintf(container, sizeof(container), "%s", path);
 }
 
 static int
@@ -754,6 +778,37 @@ sandbox_extension_issue(struct sandbox_extension_issue_args *args)
 }
 
 static int
+sandbox_extension_consume(struct sandbox_extension_consume_args *args)
+{
+	const char *token = args->token;
+	if (token != NULL && strstr(token, CONTAINER_EXTENSION_CLASS) != NULL) {
+		const char *path = strrchr(token, ';');
+		if (path != NULL && path[1] == '/') {
+			mac_sandbox_set_container(path + 1);
+		}
+	}
+	if (args->handle != NULL) {
+		*args->handle = 1;
+	}
+	return 0;
+}
+
+static int
+sandbox_container_path(struct sandbox_container_path_args *args)
+{
+	bool self = args->pid == 0 || args->pid == getpid();
+	size_t length = strlen(container);
+	if (!self || length == 0) {
+		return _ENOTSUP;
+	}
+	if (args->buffer == NULL || args->size <= length) {
+		return _ERANGE;
+	}
+	memcpy(args->buffer, container, length + 1);
+	return 0;
+}
+
+static int
 sandbox_handle_syscall(int call, void *arg)
 {
 	switch (call) {
@@ -765,9 +820,11 @@ sandbox_handle_syscall(int call, void *arg)
 	case SANDBOX_CHECK:
 		return sandbox_check(arg);
 	case SANDBOX_CONTAINER_PATH:
-		return _ENOTSUP;
+		return sandbox_container_path(arg);
 	case SANDBOX_EXTENSION_ISSUE:
 		return sandbox_extension_issue(arg);
+	case SANDBOX_EXTENSION_CONSUME:
+		return sandbox_extension_consume(arg);
 	default:
 		return 0;
 	}
