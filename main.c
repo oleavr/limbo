@@ -51,6 +51,7 @@
 #include "bsd/mac.h"
 #include "bsd/persona.h"
 #include "bsd/responsibility.h"
+#include "bsd/setid.h"
 #include "commpage.h"
 #include "launchd.h"
 #include "linker.h"
@@ -222,6 +223,7 @@ run(int argc, char *argv[], char *envp[])
 #ifdef __arm64__
 	reserve_high_address_space(GUEST_ADDRESS_LIMIT);
 #endif
+	setid_exec_as_owner(argv);
 	if (sysroot_open() || syscall_handler_install() || mac_sandbox_init()) {
 		goto error;
 	}

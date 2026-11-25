@@ -265,6 +265,7 @@ main(int argc, char *argv[])
 		perror("bind");
 		return 1;
 	}
+	chmod(path, 0666);
 	listen(listen_fd, 64);
 
 	raise_file_limit();
