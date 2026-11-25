@@ -46,6 +46,7 @@
 #include <unistd.h>
 
 #include "broker.h"
+#include "bsd/codesign.h"
 #include "bsd/handler.h"
 #include "bsd/mac.h"
 #include "bsd/persona.h"
@@ -73,7 +74,7 @@ static void apply_job_environment(void);
 static void join_job_persona(void);
 static void apply_environment(const char *name, bool overwrite);
 #ifdef __arm64__
-static void reserve_high_address_space(void);
+static void reserve_high_address_space(uint64_t limit);
 #endif
 static uintptr_t build_stack(uint8_t *exe_base, const char *path, int argc,
 		char *argv[], char *envp[]);
@@ -115,13 +116,14 @@ raise_file_limit(void)
 }
 
 #ifdef __arm64__
-#define GUEST_ADDRESS_LIMIT (1ULL << 45)
-#define STACK_HEADROOM      (256ULL << 20)
+#define GUEST_ADDRESS_LIMIT     (1ULL << 45)
+#define IOS_GUEST_ADDRESS_LIMIT (1ULL << 39)
+#define STACK_HEADROOM          (256ULL << 20)
 
 static void
-reserve_high_address_space(void)
+reserve_high_address_space(uint64_t limit)
 {
-	static char maps[0x4000];
+	static char maps[0x10000];
 	int f = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
 	if (f == -1) {
 		return;
@@ -136,8 +138,8 @@ reserve_high_address_space(void)
 	close(f);
 	maps[length] = '\0';
 
-	mach_vm_set_guest_limit(GUEST_ADDRESS_LIMIT);
-	uint64_t cursor = GUEST_ADDRESS_LIMIT;
+	mach_vm_set_guest_limit(limit);
+	uint64_t cursor = limit;
 	for (char *line = maps; *line != '\0';) {
 		char *next = strchrnul(line, '\n');
 		unsigned long start, end;
@@ -191,7 +193,7 @@ run(int argc, char *argv[], char *envp[])
 	}
 
 #ifdef __arm64__
-	reserve_high_address_space();
+	reserve_high_address_space(GUEST_ADDRESS_LIMIT);
 #endif
 	if (sysroot_open() || syscall_handler_install() || mac_sandbox_init()) {
 		goto error;
@@ -220,6 +222,9 @@ run(int argc, char *argv[], char *envp[])
 		return 1;
 	}
 #ifdef __arm64__
+	if (codesign_embedded()) {
+		reserve_high_address_space(IOS_GUEST_ADDRESS_LIMIT);
+	}
 	/* Leave pointer authentication off, as XNU does for an arm64 process,
 	 * and for an arm64e one too. Linux gives each exec keys of its own, so
 	 * with them on, the shared cache's signed pointers differ in every
