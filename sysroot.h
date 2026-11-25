@@ -43,6 +43,7 @@ const char *sysroot_guest_path(const char *path);
 uint64_t sysroot_file_id(dev_t dev, uint64_t ino);
 dev_t sysroot_device(dev_t dev);
 dev_t sysroot_root_device(void);
+bool sysroot_ios_data_volume(void);
 bool sysroot_space(dev_t dev, struct statvfs *space);
 bool sysroot_fd_on_data_volume(int fd);
 bool sysroot_at_on_data_volume(

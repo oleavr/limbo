@@ -93,6 +93,7 @@
 #include "fs/acl.h"
 #include "fs/at.h"
 #include "fs/bsd_flags.h"
+#include "fs/device.h"
 #include "fs/fileid.h"
 #include "fs/protection.h"
 #include "fs/purgeable.h"
@@ -2925,11 +2926,14 @@ open_protected(int dirfd, const char *host_path, int flags, int mode,
 	return fd;
 }
 
+static int volume_object_path(
+		const void *fsid, uint64_t objid, char *buffer, size_t size);
+
 user_ssize_t
 sys_fsgetpath_ext(user_addr_t buf, size_t bufsize, user_addr_t fsid,
 		uint64_t objid, uint32_t options)
 {
-	return fileid_path(objid, buf, bufsize);
+	return volume_object_path(fsid, objid, buf, bufsize);
 }
 
 int
@@ -4431,7 +4435,7 @@ sys___mac_getfsstat(user_addr_t buf, int bufsize, user_addr_t mac, int macsize,
 user_ssize_t
 sys_fsgetpath(user_addr_t buf, size_t bufsize, user_addr_t fsid, uint64_t objid)
 {
-	return fileid_path(objid, buf, bufsize);
+	return volume_object_path(fsid, objid, buf, bufsize);
 }
 
 mach_port_name_t
@@ -4927,10 +4931,30 @@ sys_openbyid_np(user_addr_t fsid, user_addr_t objid, int oflags)
 	uint64_t id;
 	memcpy(&id, objid, sizeof(id));
 	char path[PATH_MAX];
-	if (fileid_path(id, path, sizeof(path)) <= 0) {
+	if (volume_object_path(fsid, id, path, sizeof(path)) <= 0) {
 		return _ENOENT;
 	}
 	return sys_open(path, oflags, 0);
+}
+
+static int
+volume_object_path(const void *fsid, uint64_t objid, char *buffer, size_t size)
+{
+	int32_t volume = 0;
+	if (fsid != NULL) {
+		memcpy(&volume, fsid, sizeof(volume));
+	}
+	if (objid == 2 && sysroot_ios_data_volume()
+			&& volume == darwin_device(sysroot_root_device())) {
+		const char *path = sysroot_data_mount_point();
+		size_t length = strlen(path) + 1;
+		if (length > size) {
+			return _ENOSPC;
+		}
+		memcpy(buffer, path, length);
+		return (int)length;
+	}
+	return fileid_path(objid, buffer, size);
 }
 
 user_ssize_t
