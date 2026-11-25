@@ -810,6 +810,7 @@ kobject_port(ipc_kobject_type_t type)
 	return *slot;
 }
 
+#define MACH_VM_READ_ID             4804
 #define MACH_VM_READ_OVERWRITE_ID 4808
 #define MACH_VM_PAGE_RANGE_QUERY_ID 4820
 
@@ -821,6 +822,19 @@ ipc_mach_msg(mach_msg_header_t *msg, mach_msg_option64_t options,
 	if (options & MACH64_SEND_MSG) {
 		trace_message(TRACE_MESSAGE_SENT, msg, send_size);
 		int32_t read_pid;
+		if (msg->msgh_id == MACH_VM_READ_ID
+				&& ipc_port_is_remote(msg->msgh_remote_port)
+				&& ipc_task_pid(msg->msgh_remote_port,
+						&read_pid)
+				&& mach_vm_read_request_answer(
+						msg, send_size, read_pid)) {
+			flush_notices();
+			if (options & MACH64_RCV_MSG) {
+				return receive(msg, options, rcv_size, rcv_name,
+						timeout);
+			}
+			return MACH_MSG_SUCCESS;
+		}
 		if (msg->msgh_id == MACH_VM_PAGE_RANGE_QUERY_ID
 				&& ipc_port_is_remote(msg->msgh_remote_port)
 				&& ipc_task_pid(msg->msgh_remote_port,
