@@ -1,5 +1,6 @@
 sysroot_test = executable('sysroot_test',
-  sources: ['sysroot_test.c', '../sysroot.c', '../trace.c'],
+  sources: ['sysroot_test.c', '../sysroot.c', '../trace.c',
+    '../bsd/fs/fileid.c'],
   include_directories: include_dir,
   dependencies: [thread_dep],
   c_args: ['-Wno-unused-parameter'],
