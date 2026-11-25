@@ -87,6 +87,10 @@ thread_fork_child(void)
 	pthread_mutex_init(&current->suspend_lock, NULL);
 	pthread_cond_init(&current->resumed, NULL);
 	pthread_mutex_init(&all_threads_lock, NULL);
+	for (struct thread *thread = all_threads; thread != NULL;
+			thread = thread->all_next) {
+		thread_breakpoints_release(thread);
+	}
 	current->all_next = NULL;
 	all_threads = current;
 }
@@ -305,6 +309,7 @@ thread_destroy(struct thread *thread)
 		munmap(thread->stack, thread->stack_size);
 	}
 	release_exception_actions(thread);
+	thread_breakpoints_release(thread);
 	eventlink_thread_gone((uint64_t)thread->tid);
 	ipc_kobject_destroy(thread->port);
 	ipc_port_deallocate(thread->port);

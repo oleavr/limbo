@@ -551,6 +551,12 @@ task_set_special_port(task_t task, int which_port, mach_port_t special_port)
 	return KERN_SUCCESS;
 }
 
+bool
+task_exception_action(exception_type_t type, struct exception_action *out)
+{
+	return exception_action_take(&task_exception_actions, type, out);
+}
+
 kern_return_t
 task_set_exception_ports(task_t task, exception_mask_t exception_mask,
 		mach_port_t new_port, exception_behavior_t behavior,

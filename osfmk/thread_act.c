@@ -32,20 +32,31 @@
 
 #ifndef __x86_64__
 #include <asm/sigcontext.h>
+#include <errno.h>
+#include <linux/hw_breakpoint.h>
+#include <linux/perf_event.h>
 #endif
 #include <mach/mach.h>
+#pragma pack(push, 4)
+#include <mach/exc.h>
+#include <mach/mach_exc.h>
+#pragma pack(pop)
+#include <pthread.h>
 #include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
+#include <sys/syscall.h>
 #include <ucontext.h>
 #include <unistd.h>
 
 #include "bsd/handler.h"
 #include "bsd/process.h"
-#include "ipc.h"
 #include "commpage.h"
+#include "ipc.h"
+#include "task.h"
 #include "thread.h"
 
 #define DARWIN_ARM_THREAD_STATE64 6
@@ -79,6 +90,18 @@ struct darwin_arm_neon_state64 {
 #define DARWIN_ARM_NEON_STATE64_COUNT                                          \
 	(sizeof(struct darwin_arm_neon_state64) / sizeof(uint32_t))
 
+#define DARWIN_ARM_DEBUG_STATE64 15
+#define DARWIN_ARM_DEBUG_STATE64_COUNT                                         \
+	(sizeof(struct thread_debug_state) / sizeof(uint32_t))
+#define DEBUG_BCR_E        0x1
+#define DEBUG_BCR_PMC      0x6
+#define DEBUG_BCR_BAS      0x1e0
+#define DEBUG_WCR_E        0x1
+#define DEBUG_MDSCR_SS     0x1
+#define DEBUG_USER_LIMIT   (1ull << 48)
+#define EXC_ARM_BREAKPOINT 1
+#define EXCEPTION_REPLY_ID 100
+
 #define DARWIN_X86_THREAD_STATE64 4
 struct darwin_x86_thread_state64 {
 	uint64_t rax, rbx, rcx, rdx, rdi, rsi, rbp, rsp;
@@ -87,6 +110,24 @@ struct darwin_x86_thread_state64 {
 };
 #define DARWIN_X86_THREAD_STATE64_COUNT                                        \
 	(sizeof(struct darwin_x86_thread_state64) / sizeof(uint32_t))
+
+union exception_request {
+	mach_msg_header_t header;
+	__Request__exception_raise_t raise;
+	__Request__exception_raise_state_t state;
+	__Request__exception_raise_state_identity_t identity;
+	__Request__mach_exception_raise_t raise64;
+	__Request__mach_exception_raise_state_t state64;
+	__Request__mach_exception_raise_state_identity_t identity64;
+};
+
+union exception_reply {
+	mach_msg_header_t header;
+	mig_reply_error_t error;
+	__Reply__mach_exception_raise_state_t state;
+	uint8_t space[sizeof(__Reply__mach_exception_raise_state_t)
+			+ MAX_TRAILER_SIZE];
+};
 
 struct thread_times {
 	uint64_t user;
@@ -103,6 +144,26 @@ static void get_arm_thread_state64(
 		const mcontext_t *mc, struct darwin_arm_thread_state64 *state);
 #endif
 static void release_guest_context(struct thread *thread);
+#ifndef __x86_64__
+static kern_return_t set_debug_state(struct thread *thread, const natural_t *in,
+		mach_msg_type_number_t count);
+static int open_breakpoint(pid_t tid, uint64_t address);
+static void close_breakpoints(int *fds, uint32_t armed);
+static bool raise_exception(struct thread *thread, ucontext_t *context,
+		exception_type_t exception, const int64_t code[2]);
+static kern_return_t deliver(struct thread *thread, ucontext_t *context,
+		const struct exception_action *action,
+		exception_type_t exception, const int64_t code[2]);
+static mach_msg_size_t fill_request(union exception_request *request,
+		exception_behavior_t behavior, bool codes64,
+		struct thread *thread, const ucontext_t *context,
+		const struct exception_action *action,
+		exception_type_t exception, const int64_t code[2]);
+static kern_return_t take_reply(union exception_reply *reply,
+		mach_msg_return_t received, mach_msg_id_t request_id,
+		exception_behavior_t behavior, ucontext_t *context);
+static void destroy_reply(mach_msg_header_t *header);
+#endif
 #ifndef __x86_64__
 static kern_return_t set_state(ucontext_t *context,
 		thread_state_flavor_t flavor, thread_state_t new_state,
@@ -156,6 +217,17 @@ thread_get_state(thread_read_t target_act, thread_state_flavor_t flavor,
 			= ipc_kobject_lookup(target_act, IPC_KOBJECT_THREAD);
 	if (thread == NULL) {
 		return KERN_INVALID_ARGUMENT;
+	}
+	if (flavor == DARWIN_ARM_DEBUG_STATE64) {
+		if (*old_stateCnt < DARWIN_ARM_DEBUG_STATE64_COUNT) {
+			return KERN_INVALID_ARGUMENT;
+		}
+		pthread_mutex_lock(&thread->suspend_lock);
+		memcpy(old_state, &thread->debug_state,
+				sizeof(thread->debug_state));
+		pthread_mutex_unlock(&thread->suspend_lock);
+		*old_stateCnt = DARWIN_ARM_DEBUG_STATE64_COUNT;
+		return KERN_SUCCESS;
 	}
 	const ucontext_t *context = hold_guest_context(thread);
 	kern_return_t kr = context != NULL
@@ -294,12 +366,139 @@ thread_set_state(thread_act_t target_act, thread_state_flavor_t flavor,
 	if (thread == NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
+	if (flavor == DARWIN_ARM_DEBUG_STATE64) {
+		return set_debug_state(thread, new_state, new_stateCnt);
+	}
 	ucontext_t *context = (ucontext_t *)hold_guest_context(thread);
 	kern_return_t kr = context != NULL
 			? set_state(context, flavor, new_state, new_stateCnt)
 			: KERN_FAILURE;
 	release_guest_context(thread);
 	return kr;
+#endif
+}
+
+#ifndef __x86_64__
+static kern_return_t
+set_debug_state(struct thread *thread, const natural_t *in,
+		mach_msg_type_number_t count)
+{
+	if (count < DARWIN_ARM_DEBUG_STATE64_COUNT) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	struct thread_debug_state state;
+	memcpy(&state, in, sizeof(state));
+	if (state.mdscr_el1 & DEBUG_MDSCR_SS) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	uint32_t wanted = 0;
+	for (int i = 0; i < THREAD_DEBUG_PAIRS; i++) {
+		if (state.wcr[i] & DEBUG_WCR_E) {
+			return KERN_INVALID_ARGUMENT;
+		}
+		if (!(state.bcr[i] & DEBUG_BCR_E)) {
+			continue;
+		}
+		if ((state.bcr[i]
+				    & ~(uint64_t)(DEBUG_BCR_E | DEBUG_BCR_PMC
+						    | DEBUG_BCR_BAS))
+				|| (state.bcr[i] & DEBUG_BCR_BAS)
+						!= DEBUG_BCR_BAS) {
+			return KERN_INVALID_ARGUMENT;
+		}
+		if (state.bvr[i] >= DEBUG_USER_LIMIT) {
+			return KERN_PROTECTION_FAILURE;
+		}
+		wanted |= 1u << i;
+	}
+	pid_t tid = __atomic_load_n(&thread->tid, __ATOMIC_ACQUIRE);
+	if (wanted != 0 && tid == 0) {
+		return KERN_FAILURE;
+	}
+	int fds[THREAD_DEBUG_PAIRS];
+	uint32_t armed = 0;
+	for (int i = 0; i < THREAD_DEBUG_PAIRS; i++) {
+		if (!(wanted & (1u << i))) {
+			continue;
+		}
+		fds[i] = open_breakpoint(tid, state.bvr[i] & ~3ull);
+		if (fds[i] == -1) {
+			kern_return_t kr = errno == ENOSPC
+					? KERN_RESOURCE_SHORTAGE
+					: KERN_FAILURE;
+			close_breakpoints(fds, armed);
+			return kr;
+		}
+		armed |= 1u << i;
+	}
+	pthread_mutex_lock(&thread->suspend_lock);
+	close_breakpoints(thread->breakpoint_fds, thread->breakpoints_armed);
+	memcpy(thread->breakpoint_fds, fds, sizeof(fds));
+	thread->breakpoints_armed = armed;
+	thread->debug_state = state;
+	pthread_mutex_unlock(&thread->suspend_lock);
+	return KERN_SUCCESS;
+}
+
+static int
+open_breakpoint(pid_t tid, uint64_t address)
+{
+	struct perf_event_attr attr = {
+			.type = PERF_TYPE_BREAKPOINT,
+			.size = sizeof(attr),
+			.bp_type = HW_BREAKPOINT_X,
+			.bp_addr = address,
+			.bp_len = HW_BREAKPOINT_LEN_4,
+			.sample_period = 1,
+			.exclude_kernel = 1,
+			.exclude_hv = 1,
+			.sigtrap = 1,
+			.remove_on_exec = 1,
+	};
+	return limbo_fd_high((int)syscall(SYS_perf_event_open, &attr, tid, -1,
+			-1, PERF_FLAG_FD_CLOEXEC));
+}
+
+static void
+close_breakpoints(int *fds, uint32_t armed)
+{
+	for (int i = 0; i < THREAD_DEBUG_PAIRS; i++) {
+		if (armed & (1u << i)) {
+			close(fds[i]);
+		}
+	}
+}
+#endif
+
+void
+thread_breakpoints_release(struct thread *thread)
+{
+#ifndef __x86_64__
+	close_breakpoints(thread->breakpoint_fds, thread->breakpoints_armed);
+#endif
+	thread->breakpoints_armed = 0;
+	memset(&thread->debug_state, 0, sizeof(thread->debug_state));
+}
+
+bool
+thread_breakpoint_hit(void *context)
+{
+#ifdef __x86_64__
+	(void)context;
+	return false;
+#else
+	struct thread *thread = thread_current();
+	ucontext_t *uc = context;
+	uint64_t pc = uc->uc_mcontext.pc;
+	bool armed = false;
+	pthread_mutex_lock(&thread->suspend_lock);
+	for (int i = 0; i < THREAD_DEBUG_PAIRS; i++) {
+		armed |= (thread->breakpoints_armed & (1u << i))
+				&& (thread->debug_state.bvr[i] & ~3ull) == pc;
+	}
+	pthread_mutex_unlock(&thread->suspend_lock);
+	const int64_t code[2] = {EXC_ARM_BREAKPOINT, (int64_t)pc};
+	return armed && raise_exception(thread, uc, EXC_BREAKPOINT, code);
 #endif
 }
 
@@ -761,6 +960,255 @@ exception_actions_set(struct exception_action **actions, exception_mask_t mask,
 	}
 	pthread_mutex_unlock(&exception_lock);
 }
+
+bool
+exception_action_take(struct exception_action **actions, exception_type_t type,
+		struct exception_action *out)
+{
+	pthread_mutex_lock(&exception_lock);
+	bool found = *actions != NULL && MACH_PORT_VALID((*actions)[type].port);
+	if (found) {
+		*out = (*actions)[type];
+		ipc_port_mod_refs(out->port, MACH_PORT_RIGHT_SEND, 1);
+	}
+	pthread_mutex_unlock(&exception_lock);
+	return found;
+}
+
+#ifndef __x86_64__
+static bool
+raise_exception(struct thread *thread, ucontext_t *context,
+		exception_type_t exception, const int64_t code[2])
+{
+	void *outer;
+	thread_enter_trap(context, &outer);
+	kern_return_t kr = KERN_FAILURE;
+	struct exception_action action;
+	if (exception_action_take(
+			    &thread->exception_actions, exception, &action)) {
+		kr = deliver(thread, context, &action, exception, code);
+		ipc_port_mod_refs(action.port, MACH_PORT_RIGHT_SEND, -1);
+	}
+	if (kr != KERN_SUCCESS && task_exception_action(exception, &action)) {
+		kr = deliver(thread, context, &action, exception, code);
+		ipc_port_mod_refs(action.port, MACH_PORT_RIGHT_SEND, -1);
+	}
+	thread_leave_trap(context, outer);
+	return kr == KERN_SUCCESS;
+}
+
+static kern_return_t
+deliver(struct thread *thread, ucontext_t *context,
+		const struct exception_action *action,
+		exception_type_t exception, const int64_t code[2])
+{
+	exception_behavior_t behavior = action->behavior & ~MACH_EXCEPTION_MASK;
+	if (behavior != EXCEPTION_DEFAULT && behavior != EXCEPTION_STATE
+			&& behavior != EXCEPTION_STATE_IDENTITY) {
+		return KERN_FAILURE;
+	}
+	bool codes64 = (action->behavior & MACH_EXCEPTION_CODES) != 0;
+	mach_port_name_t reply_port;
+	if (ipc_port_allocate(MACH_PORT_RIGHT_RECEIVE, &reply_port)
+			!= KERN_SUCCESS) {
+		return KERN_FAILURE;
+	}
+	union {
+		union exception_request request;
+		union exception_reply reply;
+	} message;
+	memset(&message, 0, sizeof(message));
+	mach_msg_size_t size = fill_request(&message.request, behavior, codes64,
+			thread, context, action, exception, code);
+	if (size == 0) {
+		ipc_port_mod_refs(reply_port, MACH_PORT_RIGHT_RECEIVE, -1);
+		return KERN_FAILURE;
+	}
+	message.request.header.msgh_local_port = reply_port;
+	mach_msg_id_t id = message.request.header.msgh_id;
+	mach_port_name_t moved[2] = {
+			message.request.identity.thread.name,
+			message.request.identity.task.name,
+	};
+	mach_msg_return_t mr = ipc_mach_msg_kernel(&message.request.header,
+			MACH64_SEND_MSG | MACH64_RCV_MSG, size, sizeof(message),
+			reply_port, 0);
+	if (mr == MACH_SEND_INVALID_DEST && behavior != EXCEPTION_STATE) {
+		ipc_port_mod_refs(moved[0], MACH_PORT_RIGHT_SEND, -1);
+		ipc_port_mod_refs(moved[1], MACH_PORT_RIGHT_SEND, -1);
+	}
+	kern_return_t kr
+			= take_reply(&message.reply, mr, id, behavior, context);
+	ipc_port_mod_refs(reply_port, MACH_PORT_RIGHT_RECEIVE, -1);
+	return kr;
+}
+
+static mach_msg_size_t
+fill_request(union exception_request *request, exception_behavior_t behavior,
+		bool codes64, struct thread *thread, const ucontext_t *context,
+		const struct exception_action *action,
+		exception_type_t exception, const int64_t code[2])
+{
+	bool identity = behavior != EXCEPTION_STATE;
+	request->header = (mach_msg_header_t){
+			.msgh_bits = MACH_MSGH_BITS_SET(MACH_MSG_TYPE_COPY_SEND,
+					MACH_MSG_TYPE_MAKE_SEND_ONCE, 0,
+					identity ? MACH_MSGH_BITS_COMPLEX : 0),
+			.msgh_remote_port = action->port,
+			.msgh_id = (codes64 ? 2405 : 2401)
+					+ (behavior == EXCEPTION_DEFAULT ? 0
+									: behavior == EXCEPTION_STATE
+									? 1
+									: 2),
+	};
+	if (identity) {
+		request->identity64.msgh_body.msgh_descriptor_count = 2;
+		request->identity64.thread = (mach_msg_port_descriptor_t){
+				.name = ipc_kobject_copy_send(thread->port),
+				.disposition = MACH_MSG_TYPE_MOVE_SEND,
+				.type = MACH_MSG_PORT_DESCRIPTOR,
+		};
+		request->identity64.task = (mach_msg_port_descriptor_t){
+				.name = ipc_task_self(),
+				.disposition = MACH_MSG_TYPE_MOVE_SEND,
+				.type = MACH_MSG_PORT_DESCRIPTOR,
+		};
+	}
+	if (identity) {
+		request->identity64.NDR = NDR_record;
+		request->identity64.exception = exception;
+		request->identity64.codeCnt = 2;
+	} else {
+		request->state64.NDR = NDR_record;
+		request->state64.exception = exception;
+		request->state64.codeCnt = 2;
+	}
+	int *flavor;
+	mach_msg_type_number_t *state_count;
+	natural_t *state;
+	mach_msg_type_number_t capacity;
+	if (codes64) {
+		int64_t *codes = identity ? request->identity64.code
+					  : request->state64.code;
+		codes[0] = code[0];
+		codes[1] = code[1];
+		flavor = identity ? &request->identity64.flavor
+				  : &request->state64.flavor;
+		state_count = identity ? &request->identity64.old_stateCnt
+				       : &request->state64.old_stateCnt;
+		state = identity ? request->identity64.old_state
+				 : request->state64.old_state;
+		capacity = sizeof(request->state64.old_state)
+				/ sizeof(natural_t);
+	} else {
+		integer_t *codes = identity ? request->identity.code
+					    : request->state.code;
+		codes[0] = (integer_t)code[0];
+		codes[1] = (integer_t)code[1];
+		flavor = identity ? &request->identity.flavor
+				  : &request->state.flavor;
+		state_count = identity ? &request->identity.old_stateCnt
+				       : &request->state.old_stateCnt;
+		state = identity ? request->identity.old_state
+				 : request->state.old_state;
+		capacity = sizeof(request->state.old_state) / sizeof(natural_t);
+	}
+	if (behavior == EXCEPTION_DEFAULT) {
+		request->header.msgh_size = codes64 ? sizeof(request->raise64)
+						    : sizeof(request->raise);
+		return request->header.msgh_size;
+	}
+	*flavor = action->flavor;
+	*state_count = capacity;
+	if (get_state(context, action->flavor, state, state_count)
+			!= KERN_SUCCESS) {
+		if (identity) {
+			ipc_port_mod_refs(request->identity64.thread.name,
+					MACH_PORT_RIGHT_SEND, -1);
+			ipc_port_mod_refs(request->identity64.task.name,
+					MACH_PORT_RIGHT_SEND, -1);
+		}
+		return 0;
+	}
+	request->header.msgh_size = (mach_msg_size_t)((uint8_t *)state
+			- (uint8_t *)request
+			+ *state_count * sizeof(natural_t));
+	return request->header.msgh_size;
+}
+
+static kern_return_t
+take_reply(union exception_reply *reply, mach_msg_return_t received,
+		mach_msg_id_t request_id, exception_behavior_t behavior,
+		ucontext_t *context)
+{
+	if (received != MACH_MSG_SUCCESS) {
+		return KERN_FAILURE;
+	}
+	mach_msg_header_t *header = &reply->header;
+	if ((header->msgh_bits & MACH_MSGH_BITS_COMPLEX)
+			|| header->msgh_id != request_id + EXCEPTION_REPLY_ID
+			|| header->msgh_size < sizeof(mig_reply_error_t)) {
+		destroy_reply(header);
+		return KERN_FAILURE;
+	}
+	if (reply->error.RetCode != KERN_SUCCESS
+			|| behavior == EXCEPTION_DEFAULT) {
+		return header->msgh_size == sizeof(mig_reply_error_t)
+				? reply->error.RetCode
+				: KERN_FAILURE;
+	}
+	mach_msg_size_t fixed = offsetof(
+			__Reply__mach_exception_raise_state_t, new_state);
+	mach_msg_type_number_t count = reply->state.new_stateCnt;
+	if (header->msgh_size < fixed
+			|| count > sizeof(reply->state.new_state)
+							/ sizeof(natural_t)
+			|| header->msgh_size
+					!= fixed + count * sizeof(natural_t)) {
+		return KERN_FAILURE;
+	}
+	return set_state(context, reply->state.flavor, reply->state.new_state,
+			count);
+}
+
+static void
+destroy_reply(mach_msg_header_t *header)
+{
+	if (MACH_MSGH_BITS_REMOTE(header->msgh_bits) != 0) {
+		ipc_port_mod_refs(header->msgh_remote_port,
+				MACH_MSGH_BITS_REMOTE(header->msgh_bits)
+								== MACH_MSG_TYPE_PORT_SEND_ONCE
+						? MACH_PORT_RIGHT_SEND_ONCE
+						: MACH_PORT_RIGHT_SEND,
+				-1);
+	}
+	if (!(header->msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
+		return;
+	}
+	mach_msg_body_t *body = (mach_msg_body_t *)(header + 1);
+	mach_msg_descriptor_t *descriptor = (mach_msg_descriptor_t *)(body + 1);
+	uint8_t *end = (uint8_t *)header + header->msgh_size;
+	for (mach_msg_size_t i = 0; i < body->msgh_descriptor_count
+			&& (uint8_t *)(descriptor + 1) <= end;
+			i++, descriptor++) {
+		if (descriptor->type.type == MACH_MSG_PORT_DESCRIPTOR) {
+			mach_msg_type_name_t right
+					= descriptor->port.disposition;
+			ipc_port_mod_refs(descriptor->port.name,
+					right == MACH_MSG_TYPE_PORT_RECEIVE
+							? MACH_PORT_RIGHT_RECEIVE
+							: right == MACH_MSG_TYPE_PORT_SEND_ONCE
+							? MACH_PORT_RIGHT_SEND_ONCE
+							: MACH_PORT_RIGHT_SEND,
+					-1);
+		} else if (descriptor->type.type == MACH_MSG_OOL_DESCRIPTOR
+				&& descriptor->out_of_line.size != 0) {
+			munmap(descriptor->out_of_line.address,
+					descriptor->out_of_line.size);
+		}
+	}
+}
+#endif
 
 kern_return_t
 _kernelrpc_thread_policy(thread_act_t thr_act, policy_t policy,
