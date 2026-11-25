@@ -1262,7 +1262,12 @@ int
 sys_mprotect(void *addr, size_t len, int prot)
 {
 	/* TODO: Be responsible and convert the protection properly */
-	return errno_map(mprotect(addr, len, prot));
+	int result = mprotect(addr, len, prot);
+	if (result == 0) {
+		mach_vm_rewrite_thread_self_reads(
+				(mach_vm_address_t)addr, len, prot);
+	}
+	return errno_map(result);
 }
 
 #define _MADV_NORMAL     0

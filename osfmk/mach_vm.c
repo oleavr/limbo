@@ -34,6 +34,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/fs.h>
+#include <mach-o/loader.h>
 #include <mach/mach_types.h>
 #include <mach/ndr.h>
 #include <pthread.h>
@@ -225,7 +226,142 @@ _kernelrpc_mach_vm_protect(vm_task_entry_t target_task,
 			== -1) {
 		return KERN_PROTECTION_FAILURE;
 	}
+	mach_vm_rewrite_thread_self_reads(
+			start, end - start, new_protection & VM_PROT_ALL);
 	return KERN_SUCCESS;
+}
+
+#ifndef __x86_64__
+#define MRS_TPIDRRO_EL0 0xd53bd060u
+#define MRS_TPIDR_EL0   0xd53bd040u
+#define MRS_REGISTER    0x1fu
+
+static void
+rewrite_range(uint32_t *from, uint32_t *to, int protection)
+{
+	for (uint32_t *word = from; word < to; word++) {
+		if ((*word & ~MRS_REGISTER) != MRS_TPIDRRO_EL0) {
+			continue;
+		}
+		uint32_t *page = (uint32_t *)((uintptr_t)word
+				& ~(uintptr_t)PAGE_MASK);
+		uint32_t *page_end = page + (PAGE_MASK + 1) / sizeof(uint32_t);
+		if (mprotect(page, PAGE_MASK + 1, protection | PROT_WRITE)
+				== -1) {
+			return;
+		}
+		for (; word < to && word < page_end; word++) {
+			if ((*word & ~MRS_REGISTER) == MRS_TPIDRRO_EL0) {
+				*word = MRS_TPIDR_EL0 | (*word & MRS_REGISTER);
+			}
+		}
+		mprotect(page, PAGE_MASK + 1, protection);
+		__builtin___clear_cache((char *)page, (char *)page_end);
+		word--;
+	}
+}
+
+#endif
+
+void
+mach_vm_rewrite_thread_self_reads(
+		mach_vm_address_t address, mach_vm_size_t size, int protection)
+{
+#ifdef __x86_64__
+	(void)address;
+	(void)size;
+	(void)protection;
+#else
+	if (!(protection & PROT_EXEC) || !(protection & PROT_READ)) {
+		return;
+	}
+	mach_vm_address_t region_start;
+	mach_vm_size_t region_size;
+	vm_prot_t region_protection_now;
+	bool shared;
+	uint64_t offset;
+	if (!region_find(address, &region_start, &region_size,
+			    &region_protection_now, &shared, &offset)
+			|| shared) {
+		return;
+	}
+	mach_vm_address_t end = address + size;
+	const struct mach_header_64 *header = (const void *)address;
+	if (size >= sizeof(*header) && header->magic == MH_MAGIC_64
+			&& sizeof(*header) + header->sizeofcmds <= size) {
+		const uint8_t *commands = (const uint8_t *)(header + 1);
+		uint64_t base = 0;
+		bool based = false;
+		for (uint32_t pass = 0; pass < 2; pass++) {
+			uint32_t at = 0;
+			for (uint32_t i = 0; i < header->ncmds; i++) {
+				const struct load_command *command
+						= (const void *)(commands + at);
+				if (header->sizeofcmds - at < sizeof(*command)
+						|| command->cmdsize < sizeof(
+								   *command)
+						|| command->cmdsize
+								> header->sizeofcmds
+										- at) {
+					break;
+				}
+				at += command->cmdsize;
+				if (command->cmd != LC_SEGMENT_64
+						|| command->cmdsize < sizeof(
+								   struct
+								   segment_command_64)) {
+					continue;
+				}
+				const struct segment_command_64 *segment
+						= (const void *)command;
+				if (pass == 0) {
+					if (segment->fileoff == 0
+							&& segment->filesize
+									!= 0) {
+						base = segment->vmaddr;
+						based = true;
+					}
+					continue;
+				}
+				const struct section_64 *sections
+						= (const void *)(segment + 1);
+				uint32_t room = (command->cmdsize
+								- sizeof(*segment))
+						/ sizeof(*sections);
+				for (uint32_t s = 0;
+						s < segment->nsects && s < room;
+						s++) {
+					if (!(sections[s].flags
+							    & (S_ATTR_PURE_INSTRUCTIONS
+									    | S_ATTR_SOME_INSTRUCTIONS))
+							|| sections[s].addr
+									< base) {
+						continue;
+					}
+					mach_vm_address_t from = address
+							+ (sections[s].addr
+									- base);
+					mach_vm_address_t to = from
+							+ sections[s].size;
+					from = from < address ? address : from;
+					to = to > end ? end : to;
+					if (from < to) {
+						rewrite_range((uint32_t *)((from + 3)
+									      & ~3ull),
+								(uint32_t *)(to & ~3ull),
+								protection);
+					}
+				}
+			}
+			if (!based) {
+				break;
+			}
+		}
+		return;
+	}
+	rewrite_range((uint32_t *)address, (uint32_t *)(end & ~3ull),
+			protection);
+#endif
 }
 
 kern_return_t

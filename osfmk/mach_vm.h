@@ -30,6 +30,7 @@
 
 #include <mach/mach_types.h>
 #include <stdbool.h>
+#include <stdint.h>
 kern_return_t mach_vm_reclaim_update_kernel_accounting(
 		uint64_t *bytes_reclaimed, uint64_t *next_deadline);
 
@@ -47,6 +48,8 @@ bool mach_vm_read_overwrite_request_answer(
 		mach_msg_header_t *msg, mach_msg_size_t size, int32_t pid);
 bool mach_vm_page_range_query_request_answer(
 		mach_msg_header_t *msg, mach_msg_size_t size, int32_t pid);
+void mach_vm_rewrite_thread_self_reads(
+		mach_vm_address_t address, mach_vm_size_t size, int protection);
 mach_port_name_t memory_entry_share(int fd, mach_vm_size_t size);
 bool memory_entry_describe(const void *kobject, int *fd, mach_vm_size_t *size,
 		mach_vm_offset_t *data_offset);
