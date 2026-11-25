@@ -125,6 +125,8 @@ struct vma_query {
 	uint64_t build_id_addr;
 };
 
+#define FILE_OBJECT_ID 0x80000000u
+
 #define VMA_QUERY            _IOWR('f', 17, struct vma_query)
 #define VMA_READABLE         0x01
 #define VMA_WRITABLE         0x02
@@ -1606,9 +1608,18 @@ region_top_info(mach_vm_address_t address, mach_vm_size_t size, bool shared,
 		}
 	}
 	unsigned pages = (unsigned)(resident * host_page / (PAGE_MASK + 1));
+	unsigned obj_id = (unsigned)(address / (PAGE_MASK + 1));
+	dev_t device;
+	ino_t inode;
+	bool file = shared && region_inode(address, &device, &inode);
+	if (file) {
+		obj_id = (unsigned)(inode ^ ((uint64_t)device << 24)
+					 ^ (inode >> 32))
+				| FILE_OBJECT_ID;
+	}
 	*info = (vm_region_top_info_data_t){
-			.obj_id = (unsigned)(address / (PAGE_MASK + 1)),
-			.ref_count = 1,
+			.obj_id = obj_id,
+			.ref_count = file ? 2 : 1,
 			.private_pages_resident = shared ? 0 : pages,
 			.shared_pages_resident = shared ? pages : 0,
 			.share_mode = shared    ? SM_SHARED
