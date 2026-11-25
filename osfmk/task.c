@@ -638,6 +638,8 @@ task_policy_get(task_policy_get_t task, task_policy_flavor_t flavor,
 		return KERN_PROTECTION_FAILURE;
 	}
 	memset(policy_info, 0, count * sizeof(integer_t));
+	*policy_infoCnt = count;
+	*get_default = FALSE;
 	return KERN_SUCCESS;
 }
 
