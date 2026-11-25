@@ -3961,6 +3961,9 @@ sys_process_policy(int scope, int action, int policy, int policy_subtype,
 					&& errno == ESRCH) {
 				return _ESRCH;
 			}
+			if (attrp == 0) {
+				return _EINVAL;
+			}
 			struct {
 				uint32_t attr, percentage;
 				uint64_t interval, deadline;
