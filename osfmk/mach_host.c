@@ -459,12 +459,18 @@ wired_pages(const struct linux_vm *vm)
 			- vm->compressor_pages;
 }
 
+static kern_return_t
+zones_refused(void)
+{
+	return geteuid() == 0 ? KERN_FAILURE : KERN_INVALID_HOST;
+}
+
 kern_return_t
 mach_zone_info(mach_port_t host, mach_zone_name_array_t *names,
 		mach_msg_type_number_t *namesCnt, mach_zone_info_array_t *info,
 		mach_msg_type_number_t *infoCnt)
 {
-	unimplemented();
+	return zones_refused();
 }
 
 kern_return_t
@@ -508,7 +514,7 @@ mach_memory_info(mach_port_t host, mach_zone_name_array_t *names,
 		mach_memory_info_array_t *memory_info,
 		mach_msg_type_number_t *memory_infoCnt)
 {
-	unimplemented();
+	return zones_refused();
 }
 
 kern_return_t
@@ -521,7 +527,7 @@ kern_return_t
 mach_zone_info_for_zone(
 		host_priv_t host, mach_zone_name_t name, mach_zone_info_t *info)
 {
-	unimplemented();
+	return zones_refused();
 }
 
 kern_return_t
@@ -531,5 +537,5 @@ mach_memory_info_redacted(mach_port_t host, mach_zone_name_array_t *names,
 		mach_memory_info_array_t *memory_info,
 		mach_msg_type_number_t *memory_infoCnt)
 {
-	unimplemented();
+	return zones_refused();
 }
