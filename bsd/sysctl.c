@@ -46,6 +46,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "codesign.h"
 #include "commpage.h"
 #include "cpuinfo.h"
 #include "handler.h"
@@ -235,6 +236,7 @@ static int read_udp_stats(void *old, size_t *oldlenp);
 static int read_ip_stats(void *old, size_t *oldlenp);
 static int read_ip_ttl(void *old, size_t *oldlenp);
 static int read_pressure_level(void *old, size_t *oldlenp);
+static int read_osvariant_status(void *old, size_t *oldlenp);
 static int query_grade_cputype(
 		const void *new, size_t newlen, void *old, size_t *oldlenp);
 
@@ -284,8 +286,8 @@ static const struct sysctl_node nodes[] = {
 		{"kern.iossupportversion", {0, 0}, SYSCTL_STRING,
 				.string = "27.0"},
 
-		{"kern.osvariant_status", {0, 0}, SYSCTL_QUAD,
-				.number = (int64_t)8070732011310449290ULL},
+		{"kern.osvariant_status", {0, 0}, SYSCTL_READER,
+				.reader = read_osvariant_status},
 		{"kern.willshutdown", {0, 0}, SYSCTL_INT, .number = 0},
 
 		{"kern.exclaves_status", {0, 0}, SYSCTL_INT,
@@ -782,7 +784,8 @@ oid_format(const int *oid, void *old, size_t *oldlenp)
 				|| node->reader == read_osproductversion) {
 			kind = CTLTYPE_STRING;
 			format = "A";
-		} else if (node->reader == read_memsize) {
+		} else if (node->reader == read_memsize
+				|| node->reader == read_osvariant_status) {
 			kind = CTLTYPE_QUAD;
 			format = "Q";
 		} else {
@@ -908,6 +911,13 @@ query_grade_cputype(const void *new, size_t newlen, void *old, size_t *oldlenp)
 	memcpy(old, &grade, sizeof(grade));
 	*oldlenp = sizeof(grade);
 	return 0;
+}
+
+static int
+read_osvariant_status(void *old, size_t *oldlenp)
+{
+	uint64_t status = codesign_embedded() ? 0 : 8070732011310449290ULL;
+	return read_bytes(&status, sizeof(status), old, oldlenp);
 }
 
 static int
