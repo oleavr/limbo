@@ -143,6 +143,8 @@ find_cache(const char *name, char path[PATH_MAX], char *buffer)
 {
 	static const char *const folders[] = {
 			"/System/Cryptexes/OS/System/Library/dyld",
+			("/System/Cryptexes/OS/System/Library/Caches/"
+			 "com.apple.dyld"),
 			"/System/Library/dyld",
 	};
 	for (size_t i = 0; i < sizeof(folders) / sizeof(folders[0]); i++) {
@@ -175,8 +177,9 @@ shared_cache_mmap(void)
 	if (host_path == NULL) {
 		fprintf(stderr,
 				"limbo: no shared cache in the sysroot's "
-				"System/Cryptexes/OS/System/Library/dyld or "
-				"System/Library/dyld\n");
+				"System/Cryptexes/OS/System/Library/dyld, "
+				"System/Cryptexes/OS/System/Library/Caches/"
+				"com.apple.dyld or System/Library/dyld\n");
 		return 1;
 	}
 
