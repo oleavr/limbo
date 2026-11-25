@@ -709,7 +709,8 @@ sys_osfmk(unsigned long syscall, uint64_t arg1, uint64_t arg2, uint64_t arg3,
 	case 0xc:
 		return sys__kernelrpc_mach_vm_deallocate_trap(arg1, arg2, arg3);
 	case 0xd:
-		return sys_kern_invalid();
+		return sys_task_dyld_process_info_notify_get(
+				(void *)arg1, (void *)arg2);
 	case 0xe:
 		return sys__kernelrpc_mach_vm_protect_trap(
 				arg1, arg2, arg3, arg4, arg5);

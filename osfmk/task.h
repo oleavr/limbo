@@ -35,3 +35,5 @@
 bool task_audit_token_of_pid(pid_t pid, audit_token_t *token);
 void task_audit_token_self(audit_token_t *token);
 void task_set_dyld_all_image_info(mach_vm_address_t addr, mach_vm_size_t size);
+int sys_task_dyld_process_info_notify_get(
+		mach_port_name_t *names, natural_t *count);

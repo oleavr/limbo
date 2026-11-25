@@ -173,6 +173,7 @@ kern_return_t ipc_port_extract_right(mach_port_name_t name,
 		mach_msg_type_name_t msgt_name, mach_port_name_t *poly,
 		mach_msg_type_name_t *poly_poly);
 kern_return_t ipc_port_type(mach_port_name_t name, mach_port_type_t *type);
+bool ipc_serving_remote(void);
 void ipc_space_counts(uint32_t *size, uint32_t *in_use);
 kern_return_t ipc_port_names(mach_port_name_t **names,
 		mach_port_type_t **types, uint32_t *count);
