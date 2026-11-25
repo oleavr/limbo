@@ -65,6 +65,8 @@ struct identity {
 	gid_t real_gid, effective_gid;
 	gid_t groups[GROUPS_MAX];
 	int group_count;
+	int session;
+	unsigned int terminal;
 };
 static bool identity_of(int fd, struct identity *identity);
 static int check_program(const char *path, const struct identity *identity,
@@ -125,6 +127,22 @@ setid_exec(int fd, const void *payload, uint32_t length, const int *fds,
 	started.error = identity_of(fd, &identity)
 			? check_program(path, &identity, &st)
 			: EPERM;
+	char caller[64];
+	size_t kept = 0;
+	for (size_t i = 0; i < request->envc; i++) {
+		if (strncmp(envp[i], LIMBO_SETID_CALLER_ENV "=",
+				    strlen(LIMBO_SETID_CALLER_ENV "="))
+				!= 0) {
+			envp[kept++] = envp[i];
+		}
+	}
+	if (started.error == 0) {
+		snprintf(caller, sizeof(caller), "%s=%d:%u",
+				LIMBO_SETID_CALLER_ENV, identity.session,
+				identity.terminal);
+		envp[kept++] = caller;
+	}
+	envp[kept] = NULL;
 	if (started.error == 0) {
 		char self[PATH_MAX], limbo[PATH_MAX];
 		ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
@@ -237,6 +255,22 @@ identity_of(int fd, struct identity *identity)
 		}
 	}
 	fclose(status);
+	snprintf(path, sizeof(path), "/proc/%d/stat", (int)peer.pid);
+	FILE *stat = fopen(path, "re");
+	char *fields = NULL;
+	if (stat != NULL && fgets(line, sizeof(line), stat) != NULL) {
+		fields = strrchr(line, ')');
+	}
+	if (stat != NULL) {
+		fclose(stat);
+	}
+	if (fields == NULL
+			|| sscanf(fields + 2, "%*c %*d %*d %d %u",
+					   &identity->session,
+					   &identity->terminal)
+					!= 2) {
+		return false;
+	}
 	return users && groups && identity->effective_uid == peer.uid
 			&& identity->effective_gid == peer.gid;
 }

@@ -3662,7 +3662,13 @@ sys_vm_pressure_monitor(int wait_for_pressure, int nsecs_monitored,
 int
 sys_getsid(uint64_t pid)
 {
-	unimplemented();
+	int32_t session;
+	uint32_t terminal;
+	if ((pid == 0 || (pid_t)pid == getpid())
+			&& process_setid_caller(&session, &terminal)) {
+		return session;
+	}
+	return errno_map(getsid(pid));
 }
 
 int

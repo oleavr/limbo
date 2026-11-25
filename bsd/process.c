@@ -93,6 +93,9 @@ process_lookup(int32_t pid, struct process *process)
 		live_thread_memory(pid, process);
 	}
 	process->ppid = process_guest_parent(process->ppid);
+	if (pid == getpid()) {
+		process_setid_caller(&process->session, &process->tty);
+	}
 
 	snprintf(path, sizeof(path), "/proc/%d/status", pid);
 	FILE *status = fopen(path, "r");
@@ -186,6 +189,20 @@ int32_t
 process_guest_parent(int32_t ppid)
 {
 	return broker_client_is_launchd(ppid) ? 1 : ppid;
+}
+
+bool
+process_setid_caller(int32_t *session, uint32_t *tty)
+{
+	const char *caller = getenv(LIMBO_SETID_CALLER_ENV);
+	int32_t s;
+	uint32_t t;
+	if (caller == NULL || sscanf(caller, "%d:%u", &s, &t) != 2) {
+		return false;
+	}
+	*session = s;
+	*tty = t;
+	return true;
 }
 
 int32_t

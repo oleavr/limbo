@@ -35,6 +35,7 @@
 #include <sys/uio.h>
 
 #define LIMBO_BROKER_SOCKET_ENV "LIMBO_BROKER"
+#define LIMBO_SETID_CALLER_ENV         "LIMBO_SETID_CALLER"
 #define LIMBO_LAUNCHD_CONTROL_SUFFIX   ".launchd"
 #define LIMBO_LAUNCHD_SESSION_TYPE_ENV "LIMBO_LAUNCHD_SESSION_TYPE"
 #define LIMBO_LAUNCHD                 "limbo-launchd"
