@@ -35,6 +35,7 @@
 #include <fcntl.h>
 #include <linux/fs.h>
 #include <mach/mach_types.h>
+#include <mach/ndr.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -80,6 +81,8 @@ static int move_to_memfd(mach_vm_address_t address, mach_vm_size_t size,
 static void *map_aligned(mach_vm_size_t size, mach_vm_offset_t mask,
 		vm_prot_t protection);
 static kern_return_t copy_checked(void *to, void *from, mach_vm_size_t size);
+static kern_return_t read_remote(mach_port_name_t task,
+		mach_vm_address_t address, mach_vm_size_t size, void *data);
 static kern_return_t remap_share(mach_vm_address_t *target_address,
 		mach_vm_size_t size, mach_vm_offset_t mask, int flags,
 		mach_vm_address_t src_address);
@@ -294,6 +297,9 @@ mach_vm_read_overwrite(vm_map_read_t target_task, mach_vm_address_t address,
 		mach_vm_size_t size, mach_vm_address_t data,
 		mach_vm_size_t *outsize)
 {
+	if (ipc_serving_remote()) {
+		return KERN_FAILURE;
+	}
 	*outsize = size;
 	return copy_checked((void *)data, (void *)address, size);
 }
@@ -514,6 +520,142 @@ _kernelrpc_mach_vm_remap(vm_map_t target_task,
 	}
 	return remap_copy(target_address, size, mask, flags, src_address,
 			cur_protection);
+}
+
+#define MACH_VM_READ_ID 4804
+
+#pragma pack(push, 4)
+
+struct read_request {
+	mach_msg_header_t header;
+	NDR_record_t ndr;
+	mach_vm_address_t address;
+	mach_vm_size_t size;
+};
+
+struct read_reply {
+	mach_msg_header_t header;
+	mach_msg_body_t body;
+	mach_msg_ool_descriptor_t data;
+	NDR_record_t ndr;
+	mach_msg_type_number_t data_count;
+};
+
+struct read_overwrite_request {
+	mach_msg_header_t header;
+	NDR_record_t ndr;
+	mach_vm_address_t address;
+	mach_vm_size_t size;
+	mach_vm_address_t data;
+};
+
+struct read_overwrite_reply {
+	mach_msg_header_t header;
+	NDR_record_t ndr;
+	kern_return_t ret_code;
+	mach_vm_size_t outsize;
+};
+
+#pragma pack(pop)
+
+bool
+mach_vm_read_overwrite_request_answer(
+		mach_msg_header_t *msg, mach_msg_size_t size, int32_t pid)
+{
+	struct read_overwrite_request *request = (void *)msg;
+	if (size < sizeof(*request)
+			|| request->header.msgh_local_port == MACH_PORT_NULL) {
+		return false;
+	}
+	kern_return_t kr = KERN_SUCCESS;
+	struct iovec local = {.iov_base = (void *)(uintptr_t)request->data,
+			.iov_len = request->size};
+	struct iovec remote = {.iov_base = (void *)(uintptr_t)request->address,
+			.iov_len = request->size};
+	if (request->size != 0
+			&& process_vm_readv(pid, &local, 1, &remote, 1, 0)
+					!= (ssize_t)request->size) {
+		kr = errno == EFAULT && request->size != 0
+				? KERN_INVALID_ADDRESS
+				: KERN_FAILURE;
+		if (errno == EPERM || errno == ESRCH || errno == EFAULT) {
+			kr = read_remote(request->header.msgh_remote_port,
+					request->address, request->size,
+					(void *)(uintptr_t)request->data);
+		}
+	}
+	struct read_overwrite_reply reply = {
+			.header = {
+					.msgh_bits = MACH_MSGH_BITS_SET(
+							MACH_MSGH_BITS_LOCAL(
+									request->header.msgh_bits),
+							0, 0, 0),
+					.msgh_size = sizeof(reply),
+					.msgh_remote_port
+					= request->header.msgh_local_port,
+					.msgh_id = request->header.msgh_id + 100,
+			},
+			.ndr = NDR_record,
+			.ret_code = kr,
+			.outsize = kr == KERN_SUCCESS ? request->size : 0,
+	};
+	return ipc_kernel_send(&reply.header) == MACH_MSG_SUCCESS;
+}
+
+static kern_return_t
+read_remote(mach_port_name_t task, mach_vm_address_t address,
+		mach_vm_size_t size, void *data)
+{
+	mach_port_name_t reply;
+	if (ipc_port_allocate(MACH_PORT_RIGHT_RECEIVE, &reply)
+			!= KERN_SUCCESS) {
+		return KERN_RESOURCE_SHORTAGE;
+	}
+	union {
+		struct read_request request;
+		struct {
+			struct read_reply reply;
+			mach_msg_max_trailer_t trailer;
+		} answer;
+		struct {
+			mach_msg_header_t header;
+			NDR_record_t ndr;
+			kern_return_t ret_code;
+		} error;
+	} message = {.request = {
+			.header = {
+					.msgh_bits = MACH_MSGH_BITS_SET(
+							MACH_MSG_TYPE_COPY_SEND,
+							MACH_MSG_TYPE_MAKE_SEND_ONCE,
+							0, 0),
+					.msgh_size = sizeof(struct read_request),
+					.msgh_remote_port = task,
+					.msgh_local_port = reply,
+					.msgh_id = MACH_VM_READ_ID,
+			},
+			.ndr = NDR_record,
+			.address = address,
+			.size = size,
+	}};
+	mach_msg_return_t mr = ipc_mach_msg_kernel(&message.request.header,
+			MACH64_SEND_MSG | MACH64_RCV_MSG,
+			sizeof(message.request), sizeof(message), reply, 0);
+	ipc_port_mod_refs(reply, MACH_PORT_RIGHT_RECEIVE, -1);
+	if (mr != MACH_MSG_SUCCESS) {
+		return mr;
+	}
+	if (!(message.answer.reply.header.msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
+		return message.error.ret_code != KERN_SUCCESS
+				? message.error.ret_code
+				: KERN_FAILURE;
+	}
+	void *got = message.answer.reply.data.address;
+	mach_vm_size_t got_size = message.answer.reply.data.size;
+	kern_return_t kr = got_size == size ? copy_checked(data, got, size)
+					    : KERN_FAILURE;
+	_kernelrpc_mach_vm_deallocate(
+			MACH_PORT_NULL, (mach_vm_address_t)got, got_size);
+	return kr;
 }
 
 static kern_return_t
