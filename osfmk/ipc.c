@@ -607,6 +607,14 @@ ipc_task_pid(mach_port_name_t name, int32_t *pid)
 	return found;
 }
 
+void
+ipc_port_release_if_unused(mach_port_name_t name)
+{
+	pthread_mutex_lock(&lock);
+	release_unused_entry(name);
+	pthread_mutex_unlock(&lock);
+}
+
 bool
 ipc_port_is_remote(mach_port_name_t name)
 {
@@ -813,6 +821,7 @@ kobject_port(ipc_kobject_type_t type)
 #define MACH_VM_READ_ID             4804
 #define MACH_VM_READ_OVERWRITE_ID 4808
 #define MACH_VM_PAGE_RANGE_QUERY_ID 4820
+#define MACH_VM_REMAP_ID            4813
 
 mach_msg_return_t
 ipc_mach_msg(mach_msg_header_t *msg, mach_msg_option64_t options,
@@ -861,8 +870,17 @@ ipc_mach_msg(mach_msg_header_t *msg, mach_msg_option64_t options,
 			}
 			return MACH_MSG_SUCCESS;
 		}
+		mach_port_name_t remap_entry = MACH_PORT_NULL;
+		if (msg->msgh_id == MACH_VM_REMAP_ID
+				&& ipc_port_is_remote(msg->msgh_remote_port)) {
+			remap_entry = mach_vm_remap_request_prepare(
+					msg, send_size);
+		}
 		mach_msg_return_t mr = send(msg, send_size, IPC_USER,
 				getpid());
+		if (remap_entry != MACH_PORT_NULL) {
+			ipc_port_release_if_unused(remap_entry);
+		}
 		flush_notices();
 		if (mr != MACH_MSG_SUCCESS) {
 			return mr;

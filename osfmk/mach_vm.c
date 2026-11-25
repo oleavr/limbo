@@ -82,6 +82,10 @@ static int move_to_memfd(mach_vm_address_t address, mach_vm_size_t size,
 static void *map_aligned(mach_vm_size_t size, mach_vm_offset_t mask,
 		vm_prot_t protection);
 static kern_return_t copy_checked(void *to, void *from, mach_vm_size_t size);
+kern_return_t mach_make_memory_entry(vm_map_t target_task,
+		memory_object_size_t *size, memory_object_offset_t offset,
+		vm_prot_t permission, mach_port_t *object_handle,
+		mem_entry_name_port_t parent_handle);
 static kern_return_t read_remote(mach_port_name_t task,
 		mach_vm_address_t address, mach_vm_size_t size, void *data);
 static kern_return_t remap_remote_copy(mach_vm_address_t *target_address,
@@ -652,6 +656,14 @@ _kernelrpc_mach_vm_remap(vm_map_t target_task,
 		vm_prot_t *cur_protection, vm_prot_t *max_protection,
 		vm_inherit_t inheritance)
 {
+	struct memory_entry *source = ipc_kobject_lookup(
+			src_task, IPC_KOBJECT_MEMORY_ENTRY);
+	if (source != NULL) {
+		*cur_protection = VM_PROT_READ | VM_PROT_WRITE;
+		*max_protection = VM_PROT_ALL;
+		return map_entry(target_address, size, mask, flags, source,
+				src_address, copy, *cur_protection);
+	}
 	if (ipc_port_is_remote(src_task)) {
 		return remap_remote_copy(target_address, size, mask, flags,
 				src_task, src_address, cur_protection,
@@ -670,6 +682,20 @@ _kernelrpc_mach_vm_remap(vm_map_t target_task,
 #define MACH_VM_READ_ID 4804
 
 #pragma pack(push, 4)
+
+struct remap_request {
+	mach_msg_header_t header;
+	mach_msg_body_t body;
+	mach_msg_port_descriptor_t src_task;
+	NDR_record_t ndr;
+	mach_vm_address_t target_address;
+	mach_vm_size_t size;
+	mach_vm_offset_t mask;
+	int flags;
+	mach_vm_address_t src_address;
+	boolean_t copy;
+	vm_inherit_t inheritance;
+};
 
 struct read_request {
 	mach_msg_header_t header;
@@ -702,6 +728,37 @@ struct read_overwrite_reply {
 };
 
 #pragma pack(pop)
+
+mach_port_name_t
+mach_vm_remap_request_prepare(mach_msg_header_t *msg, mach_msg_size_t size)
+{
+	struct remap_request *request = (void *)msg;
+	if (size < sizeof(*request)
+			|| !(msg->msgh_bits & MACH_MSGH_BITS_COMPLEX)
+			|| request->body.msgh_descriptor_count != 1
+			|| request->src_task.name
+					!= ipc_kobject_name(IPC_KOBJECT_TASK)) {
+		return MACH_PORT_NULL;
+	}
+	mach_vm_address_t start
+			= request->src_address & ~(mach_vm_address_t)PAGE_MASK;
+	mach_vm_address_t end
+			= (request->src_address + request->size + PAGE_MASK)
+			& ~(mach_vm_address_t)PAGE_MASK;
+	memory_object_size_t entry_size = end - start;
+	mach_port_t entry = MACH_PORT_NULL;
+	vm_prot_t permission = VM_PROT_READ | VM_PROT_WRITE
+			| (request->copy ? MAP_MEM_VM_COPY : MAP_MEM_VM_SHARE);
+	if (mach_make_memory_entry(MACH_PORT_NULL, &entry_size, start,
+			    permission, &entry, MACH_PORT_NULL)
+			!= KERN_SUCCESS) {
+		return MACH_PORT_NULL;
+	}
+	request->src_task.name = ipc_kobject_copy_send(entry);
+	request->src_task.disposition = MACH_MSG_TYPE_MOVE_SEND;
+	request->src_address -= start;
+	return entry;
+}
 
 bool
 mach_vm_read_request_answer(
