@@ -559,7 +559,8 @@ thread_stop_if_suspended(void *context)
 	}
 	pthread_mutex_lock(&thread->suspend_lock);
 	exit_if_terminated(thread);
-	if (thread->suspend_count != 0) {
+	bool waited = thread->suspend_count != 0;
+	if (waited) {
 		thread->stopped_context = context;
 		while (thread->suspend_count != 0) {
 			pthread_cond_wait(&thread->resumed, &thread->suspend_lock);
@@ -568,6 +569,9 @@ thread_stop_if_suspended(void *context)
 	}
 	exit_if_terminated(thread);
 	pthread_mutex_unlock(&thread->suspend_lock);
+	if (waited) {
+		thread_step_arm(thread, context);
+	}
 }
 
 void
@@ -593,7 +597,8 @@ thread_leave_trap(void *context, void *outer)
 {
 	struct thread *thread = thread_current();
 	pthread_mutex_lock(&thread->suspend_lock);
-	if (thread->suspend_count != 0) {
+	bool waited = thread->suspend_count != 0;
+	if (waited) {
 		thread->stopped_context = context;
 		while (thread->suspend_count != 0) {
 			pthread_cond_wait(&thread->resumed, &thread->suspend_lock);
@@ -603,6 +608,9 @@ thread_leave_trap(void *context, void *outer)
 	exit_if_terminated(thread);
 	thread->trap_context = outer;
 	pthread_mutex_unlock(&thread->suspend_lock);
+	if (waited) {
+		thread_step_arm(thread, context);
+	}
 	if (thread->workqueue && thread->trap_depth > 0
 			&& --thread->trap_depth == 0) {
 		atomic_store_explicit(
