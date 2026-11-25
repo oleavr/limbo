@@ -139,6 +139,15 @@ check_hidden(void)
 			name += strlen(name) + 1) {
 		CHECK(strstr(name, "purgeable") == NULL);
 	}
+	uint64_t value = 0;
+	errno = 0;
+	CHECK(getxattr("file", "limbo.purgeable", &value, sizeof(value), 0, 0)
+					== -1
+			&& errno == ENOATTR);
+	if (removexattr("file", "limbo.purgeable", 0) == -1) {
+		CHECK(errno == EPERM || errno == ENOATTR);
+	}
+	CHECK(ext_purgeable("file", 0));
 	CHECK(mark("file", 0) == 0);
 }
 
