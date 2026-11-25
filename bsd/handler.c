@@ -1304,8 +1304,14 @@ sys_mincore(user_addr_t addr, user_size_t len, user_addr_t vec)
 	uintptr_t start = (uintptr_t)addr & ~(MINCORE_GUEST_PAGE - 1);
 	size_t count = ((uintptr_t)addr + len - start + MINCORE_GUEST_PAGE - 1)
 			/ MINCORE_GUEST_PAGE;
+	if (count == 0) {
+		return 0;
+	}
 	size_t per_guest = MINCORE_GUEST_PAGE / (size_t)sysconf(_SC_PAGESIZE);
 	unsigned char *host = malloc(count * per_guest);
+	if (host == NULL) {
+		return _ENOMEM;
+	}
 	if (mincore((void *)start, count * MINCORE_GUEST_PAGE, host) == -1) {
 		int error = errno;
 		free(host);
