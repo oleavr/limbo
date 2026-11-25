@@ -47,6 +47,7 @@ enum signal_context {
 void signals_init(void);
 void signals_handle(int sig, siginfo_t *info, ucontext_t *uc,
 		enum signal_context context);
+bool signals_thread_pending(void);
 int signals_futex_wait(_Atomic uint32_t *word, pthread_mutex_t *mutex,
 		const struct timespec *deadline);
 void signals_futex_wake(_Atomic uint32_t *word);
