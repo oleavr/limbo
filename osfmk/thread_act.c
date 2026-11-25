@@ -49,6 +49,7 @@
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <ucontext.h>
 #include <unistd.h>
 
@@ -149,6 +150,9 @@ static kern_return_t set_debug_state(struct thread *thread, const natural_t *in,
 		mach_msg_type_number_t count);
 static int open_breakpoint(pid_t tid, uint64_t address);
 static void close_breakpoints(int *fds, uint32_t armed);
+static void step_disarm(struct thread *thread);
+static int step_targets(const mcontext_t *mc, uint64_t next[2]);
+static int64_t sign_extend(uint64_t value, unsigned bits);
 static bool raise_exception(struct thread *thread, ucontext_t *context,
 		exception_type_t exception, const int64_t code[2]);
 static kern_return_t deliver(struct thread *thread, ucontext_t *context,
@@ -388,9 +392,6 @@ set_debug_state(struct thread *thread, const natural_t *in,
 	}
 	struct thread_debug_state state;
 	memcpy(&state, in, sizeof(state));
-	if (state.mdscr_el1 & DEBUG_MDSCR_SS) {
-		return KERN_INVALID_ARGUMENT;
-	}
 	uint32_t wanted = 0;
 	for (int i = 0; i < THREAD_DEBUG_PAIRS; i++) {
 		if (state.wcr[i] & DEBUG_WCR_E) {
@@ -468,6 +469,62 @@ close_breakpoints(int *fds, uint32_t armed)
 		}
 	}
 }
+
+static void
+step_disarm(struct thread *thread)
+{
+	pthread_mutex_lock(&thread->suspend_lock);
+	close_breakpoints(thread->step_fds, thread->steps_armed);
+	thread->steps_armed = 0;
+	thread->debug_state.mdscr_el1 &= ~(uint64_t)DEBUG_MDSCR_SS;
+	pthread_mutex_unlock(&thread->suspend_lock);
+}
+
+static int
+step_targets(const mcontext_t *mc, uint64_t next[2])
+{
+	uint64_t pc = mc->pc;
+	uint32_t insn;
+	struct iovec local = {&insn, sizeof(insn)};
+	struct iovec remote = {(void *)(uintptr_t)pc, sizeof(insn)};
+	next[0] = pc + 4;
+	if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0)
+			!= sizeof(insn)) {
+		return 1;
+	}
+	if ((insn & 0x7c000000) == 0x14000000) {
+		next[0] = pc + sign_extend((insn & 0x3ffffff) << 2, 28);
+		return 1;
+	}
+	if ((insn & 0xff000000) == 0x54000000
+			|| (insn & 0x7e000000) == 0x34000000) {
+		next[1] = pc + sign_extend(((insn >> 5) & 0x7ffff) << 2, 21);
+		return 2;
+	}
+	if ((insn & 0x7e000000) == 0x36000000) {
+		next[1] = pc + sign_extend(((insn >> 5) & 0x3fff) << 2, 16);
+		return 2;
+	}
+	if ((insn & 0xfe000000) == 0xd6000000) {
+		unsigned opc = (insn >> 21) & 0xf;
+		unsigned rn = (insn >> 5) & 0x1f;
+		bool authenticated_return = opc == 2 && (insn & 0x800);
+		bool branches = opc == 0 || opc == 1 || opc == 2 || opc == 8
+				|| opc == 9;
+		if (branches && (rn != 31 || authenticated_return)) {
+			uint64_t target = mc->regs[authenticated_return ? 30
+									: rn];
+			next[0] = target & (DEBUG_USER_LIMIT - 1);
+		}
+	}
+	return 1;
+}
+
+static int64_t
+sign_extend(uint64_t value, unsigned bits)
+{
+	return (int64_t)(value << (64 - bits)) >> (64 - bits);
+}
 #endif
 
 void
@@ -475,9 +532,48 @@ thread_breakpoints_release(struct thread *thread)
 {
 #ifndef __x86_64__
 	close_breakpoints(thread->breakpoint_fds, thread->breakpoints_armed);
+	close_breakpoints(thread->step_fds, thread->steps_armed);
 #endif
 	thread->breakpoints_armed = 0;
+	thread->steps_armed = 0;
 	memset(&thread->debug_state, 0, sizeof(thread->debug_state));
+}
+
+void
+thread_step_arm(struct thread *thread, const void *context)
+{
+#ifdef __x86_64__
+	(void)thread;
+	(void)context;
+#else
+	if (!(thread->debug_state.mdscr_el1 & DEBUG_MDSCR_SS)
+			|| thread->steps_armed != 0) {
+		return;
+	}
+	const mcontext_t *mc = &((const ucontext_t *)context)->uc_mcontext;
+	uint64_t next[2];
+	int count = step_targets(mc, next);
+	uint32_t armed = 0;
+	int fds[2];
+	for (int i = 0; i < count; i++) {
+		fds[i] = open_breakpoint(thread->tid, next[i]);
+		if (fds[i] == -1) {
+			close_breakpoints(fds, armed);
+			fprintf(stderr,
+					"limbo: a single step at %#llx could "
+					"not "
+					"be armed\n",
+					(unsigned long long)mc->pc);
+			return;
+		}
+		armed |= 1u << i;
+	}
+	pthread_mutex_lock(&thread->suspend_lock);
+	memcpy(thread->step_fds, fds, sizeof(fds));
+	memcpy(thread->step_at, next, sizeof(next));
+	thread->steps_armed = armed;
+	pthread_mutex_unlock(&thread->suspend_lock);
+#endif
 }
 
 bool
@@ -490,15 +586,27 @@ thread_breakpoint_hit(void *context)
 	struct thread *thread = thread_current();
 	ucontext_t *uc = context;
 	uint64_t pc = uc->uc_mcontext.pc;
-	bool armed = false;
+	bool armed = false, stepped = false;
 	pthread_mutex_lock(&thread->suspend_lock);
 	for (int i = 0; i < THREAD_DEBUG_PAIRS; i++) {
 		armed |= (thread->breakpoints_armed & (1u << i))
 				&& (thread->debug_state.bvr[i] & ~3ull) == pc;
 	}
+	for (int i = 0; i < 2; i++) {
+		stepped |= (thread->steps_armed & (1u << i))
+				&& thread->step_at[i] == pc;
+	}
 	pthread_mutex_unlock(&thread->suspend_lock);
-	const int64_t code[2] = {EXC_ARM_BREAKPOINT, (int64_t)pc};
-	return armed && raise_exception(thread, uc, EXC_BREAKPOINT, code);
+	if (stepped) {
+		step_disarm(thread);
+	}
+	const int64_t code[2] = {EXC_ARM_BREAKPOINT, stepped ? 0 : (int64_t)pc};
+	bool raised = (armed || stepped)
+			&& raise_exception(thread, uc, EXC_BREAKPOINT, code);
+	if (raised) {
+		thread_step_arm(thread, uc);
+	}
+	return raised;
 #endif
 }
 

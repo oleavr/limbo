@@ -109,6 +109,9 @@ struct thread {
 	struct thread_debug_state debug_state;
 	uint32_t breakpoints_armed;
 	int breakpoint_fds[THREAD_DEBUG_PAIRS];
+	uint32_t steps_armed;
+	int step_fds[2];
+	uint64_t step_at[2];
 	void *stack;
 	size_t stack_size;
 	pthread_mutex_t suspend_lock;
@@ -150,6 +153,7 @@ void thread_prepare_suspended_start(const struct thread_state *state);
 void thread_wait_suspended_start(struct thread_state *state);
 uint32_t thread_task_suspend_count(void);
 bool thread_breakpoint_hit(void *context);
+void thread_step_arm(struct thread *thread, const void *context);
 void thread_breakpoints_release(struct thread *thread);
 kern_return_t thread_task_suspend(void);
 kern_return_t thread_task_resume(void);
