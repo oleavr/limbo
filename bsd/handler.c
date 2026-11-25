@@ -5164,16 +5164,10 @@ sys_os_fault_with_payload(uint32_t reason_namespace, uint64_t reason_code,
 		void *payload, uint32_t payload_size, const char *reason_string,
 		uint64_t reason_flags)
 {
-	fprintf(stderr, "limbo: abort, namespace %u, code %#llx: %s\n",
+	fprintf(stderr, "limbo: fault, namespace %u, code %#llx: %s\n",
 			reason_namespace, (unsigned long long)reason_code,
 			reason_string != NULL ? reason_string : "");
-	signal(SIGABRT, SIG_DFL);
-	sigset_t abort_set;
-	sigemptyset(&abort_set);
-	sigaddset(&abort_set, SIGABRT);
-	pthread_sigmask(SIG_UNBLOCK, &abort_set, NULL);
-	raise(SIGABRT);
-	_exit(134);
+	return 0;
 }
 
 uint64_t
