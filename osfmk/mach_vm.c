@@ -45,6 +45,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/uio.h>
@@ -126,6 +127,7 @@ struct vma_query {
 };
 
 #define FILE_OBJECT_ID 0x80000000u
+#define TAG_NAME       "VM tag "
 
 #define VMA_QUERY            _IOWR('f', 17, struct vma_query)
 #define VMA_READABLE         0x01
@@ -141,6 +143,9 @@ static bool vma_unsupported;
 
 static int vma_lookup(mach_vm_address_t address, bool or_next,
 		struct vma_query *query);
+static int vma_lookup_named(mach_vm_address_t address, bool or_next,
+		struct vma_query *query, char *name, size_t name_size);
+static unsigned region_tag(mach_vm_address_t address);
 static vm_prot_t vma_protection(const struct vma_query *query);
 static bool region_from_maps(mach_vm_address_t address,
 		mach_vm_address_t *start, mach_vm_size_t *size,
@@ -197,6 +202,9 @@ map_anonymous(mach_vm_address_t *address, mach_vm_size_t size,
 		return KERN_NO_SPACE;
 	}
 
+	unsigned tag;
+	VM_GET_FLAGS_ALIAS(flags, tag);
+	mach_vm_name_tag(base, size, tag);
 	*address = (mach_vm_address_t)base;
 	return KERN_SUCCESS;
 }
@@ -1445,7 +1453,7 @@ mach_vm_region_recurse(vm_map_read_t target_task, mach_vm_address_t *address,
 				.inheritance = VM_INHERIT_COPY,
 				.offset = offset,
 				.share_mode = share_mode,
-				.user_tag = 0,
+				.user_tag = region_tag(*address),
 		};
 		*infoCnt = VM_REGION_SUBMAP_SHORT_INFO_COUNT_64;
 		return KERN_SUCCESS;
@@ -1456,7 +1464,7 @@ mach_vm_region_recurse(vm_map_read_t target_task, mach_vm_address_t *address,
 			.inheritance = VM_INHERIT_COPY,
 			.offset = offset,
 			.share_mode = share_mode,
-			.user_tag = 0,
+			.user_tag = region_tag(*address),
 	};
 	*infoCnt = *infoCnt >= VM_REGION_SUBMAP_INFO_V2_COUNT_64
 			? VM_REGION_SUBMAP_INFO_V2_COUNT_64
@@ -1658,6 +1666,13 @@ static uint64_t guest_limit = UINT64_MAX;
 static int
 vma_lookup(mach_vm_address_t address, bool or_next, struct vma_query *query)
 {
+	return vma_lookup_named(address, or_next, query, NULL, 0);
+}
+
+static int
+vma_lookup_named(mach_vm_address_t address, bool or_next,
+		struct vma_query *query, char *name, size_t name_size)
+{
 	pthread_mutex_lock(&vma_lock);
 	if (!vma_unsupported && (vma_fd == -1 || vma_pid != getpid())) {
 		if (vma_fd != -1) {
@@ -1676,6 +1691,8 @@ vma_lookup(mach_vm_address_t address, bool or_next, struct vma_query *query)
 	query->size = sizeof(*query);
 	query->query_flags = or_next ? VMA_COVERING_OR_NEXT : 0;
 	query->query_addr = address;
+	query->vma_name_addr = (uint64_t)(uintptr_t)name;
+	query->vma_name_size = (uint32_t)name_size;
 	if (ioctl(fd, VMA_QUERY, query) == 0) {
 		return 1;
 	}
@@ -1725,6 +1742,54 @@ region_find(mach_vm_address_t address, mach_vm_address_t *start,
 		split_at_guards(address, start, size, protection, offset);
 	}
 	return found;
+}
+
+void
+mach_vm_name_tag(void *base, size_t size, uint8_t tag)
+{
+	if (tag == 0) {
+		return;
+	}
+	char name[sizeof(TAG_NAME) + 3];
+	snprintf(name, sizeof(name), TAG_NAME "%u", tag);
+	prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, (unsigned long)(uintptr_t)base,
+			(unsigned long)size, name);
+}
+
+static unsigned
+region_tag(mach_vm_address_t address)
+{
+	char name[64] = "";
+	struct vma_query query;
+	int asked = vma_lookup_named(
+			address, false, &query, name, sizeof(name));
+	if (asked == 0) {
+		return 0;
+	}
+	if (asked == -1) {
+		FILE *maps = fopen("/proc/thread-self/maps", "r");
+		char line[512];
+		while (maps != NULL
+				&& fgets(line, sizeof(line), maps) != NULL) {
+			unsigned long low, high;
+			if (sscanf(line, "%lx-%lx", &low, &high) == 2
+					&& low <= address && address < high) {
+				char *named = strstr(line, "[anon:");
+				if (named != NULL) {
+					snprintf(name, sizeof(name), "%s",
+							named);
+				}
+				break;
+			}
+		}
+		if (maps != NULL) {
+			fclose(maps);
+		}
+	}
+	unsigned tag;
+	return sscanf(name, "[anon:" TAG_NAME "%u]", &tag) == 1 && tag <= 0xff
+			? tag
+			: 0;
 }
 
 static bool

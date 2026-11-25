@@ -67,6 +67,7 @@ int mach_vm_shared_anonymous_fd(size_t length);
 void mach_vm_shared_anonymous_mapped(void *address, int fd);
 int mach_vm_zero_check(mach_vm_address_t address, mach_vm_size_t size);
 void mach_vm_set_guest_limit(uint64_t limit);
+void mach_vm_name_tag(void *base, size_t size, uint8_t tag);
 kern_return_t _kernelrpc_mach_vm_purgable_control(vm_map_t target_task,
 		mach_vm_address_t address, vm_purgable_t control, int *state);
 kern_return_t _kernelrpc_mach_vm_map(vm_task_entry_t target_task,

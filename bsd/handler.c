@@ -2779,6 +2779,11 @@ sys_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t pos)
 	if (r == MAP_FAILED) {
 		return (void *)err_map(errno);
 	}
+	if ((tflags & MAP_ANON) && fd != -1) {
+		unsigned tag;
+		VM_GET_FLAGS_ALIAS(fd, tag);
+		mach_vm_name_tag(r, len, tag);
+	}
 	return r;
 }
 
