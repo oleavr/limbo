@@ -49,6 +49,7 @@
 #include "bsd/signo.h"
 #include "bsd/xnu-errno.h"
 #include "syscall.h"
+#include "thread.h"
 
 #define DARWIN_NSIG 32
 
@@ -62,6 +63,10 @@
 
 #ifndef SA_RESTORER
 #define SA_RESTORER 0x04000000
+#endif
+
+#ifndef TRAP_PERF
+#define TRAP_PERF 6
 #endif
 
 #define _SIG_DFL 0
@@ -385,7 +390,10 @@ install_host_action(int sig)
 							&& default_ignores(sig)));
 
 	bool report = is_fault(host) && (REPORTS_SIGFPE || host != SIGFPE)
-			&& action->handler == _SIG_DFL;
+			&& (action->handler == _SIG_DFL
+					|| (host == SIGTRAP
+							&& action->handler
+									== _SIG_IGN));
 	struct sigaction act;
 	memset(&act, 0, sizeof(act));
 	if (action->handler > _SIG_HOLD || watched || report) {
@@ -485,6 +493,11 @@ void
 signals_handle(int sig, siginfo_t *info, ucontext_t *uc,
 		enum signal_context context)
 {
+	if (sig == SIGTRAP && context == SIGNAL_IN_GUEST && info != NULL
+			&& info->si_code == TRAP_PERF
+			&& thread_breakpoint_hit(uc)) {
+		return;
+	}
 	int darwin = signo_from_linux(sig);
 	if (darwin <= 0 || darwin >= DARWIN_NSIG) {
 		return;
@@ -497,6 +510,10 @@ signals_handle(int sig, siginfo_t *info, ucontext_t *uc,
 	bool caught = action->handler > _SIG_HOLD;
 
 	if (is_fault(sig) && info->si_code > 0) {
+		if (sig == SIGTRAP && context == SIGNAL_IN_GUEST
+				&& action->handler == _SIG_IGN) {
+			return;
+		}
 		if (!caught || context != SIGNAL_IN_GUEST) {
 #ifdef __x86_64__
 			syscall_report_fault(sig, info, uc);
