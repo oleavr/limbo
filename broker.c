@@ -57,6 +57,7 @@
 
 #include "broker.h"
 #include "broker_jetsam.h"
+#include "broker_setid.h"
 #include "osfmk/ipc_remote.h"
 
 #define CONNECTION_FDS  (2 * BROKER_FDS_MAX)
@@ -86,6 +87,7 @@ union broker_request {
 	struct broker_hold hold;
 	struct broker_launchd_port launchd_port;
 	struct broker_jetsam_priority jetsam;
+	struct broker_setid_exec setid;
 };
 
 struct held_send {
@@ -634,6 +636,8 @@ handle_signals(void)
 	while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
 		if (pid == launchd_pid) {
 			launchd_exited(status);
+		} else {
+			setid_exited(pid, status);
 		}
 	}
 }
@@ -891,6 +895,12 @@ handle_guest(int fd)
 			jetsam_set_priority(jetsam->pid, jetsam->priority);
 		}
 		break;
+	case BROKER_SETID_EXEC: {
+		bool ool = frame->type & BROKER_FRAME_OOL;
+		setid_exec(conn->fd, payload, length, frame->fds,
+				frame->fd_count - ool);
+		break;
+	}
 	}
 	free(payload);
 	broker_wire_free(frame);
@@ -1632,6 +1642,7 @@ remove_connection(size_t index)
 	}
 	release_queued(&connections[index], connections[index].queued_fds);
 	broker_wire_forget(&connections[index].ahead);
+	setid_connection_gone(connections[index].fd);
 	close(connections[index].fd);
 	struct broker_guest_gone gone = {
 			.guest_id = connections[index].guest_id,
