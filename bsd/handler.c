@@ -3096,9 +3096,11 @@ static sem_t *semaphores[SEMAPHORE_MAX];
 user_addr_t
 sys_sem_open(const char *name, int oflag, int mode, int value)
 {
+	mode_t readers = (mode_t)mode & 0444;
+	mode_t host_mode = readers | readers >> 1 | 0600;
 	trace_string(name);
 	sem_t *sem = sem_open(name, open_flags(oflag) & (O_CREAT | O_EXCL),
-			(mode_t)mode, (unsigned int)value);
+			host_mode, (unsigned int)value);
 	if (sem == SEM_FAILED) {
 		return (user_addr_t)(intptr_t)err_map(errno);
 	}
