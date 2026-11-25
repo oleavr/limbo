@@ -5283,7 +5283,11 @@ sys_task_read_for_pid(
 		*t = ipc_task_self();
 		return KERN_SUCCESS;
 	}
-	return KERN_FAILURE;
+	if (pid <= 0) {
+		return KERN_FAILURE;
+	}
+	*t = ipc_task_for_pid(pid);
+	return *t != MACH_PORT_NULL ? KERN_SUCCESS : KERN_FAILURE;
 }
 
 user_ssize_t
