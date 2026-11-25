@@ -28,6 +28,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <sys/stat.h>
 
@@ -38,6 +39,28 @@
 #define KAUTH_ACL_MAX_ENTRIES 128
 
 #define KAUTH_ACL_NO_INHERIT (1 << 17)
+
+#define KAUTH_ACE_KINDMASK 0xf
+#define KAUTH_ACE_PERMIT   1
+#define KAUTH_ACE_DENY     2
+
+#define KAUTH_VNODE_READ_DATA           (1U << 1)
+#define KAUTH_VNODE_WRITE_DATA          (1U << 2)
+#define KAUTH_VNODE_EXECUTE             (1U << 3)
+#define KAUTH_VNODE_DELETE              (1U << 4)
+#define KAUTH_VNODE_APPEND_DATA         (1U << 5)
+#define KAUTH_VNODE_DELETE_CHILD        (1U << 6)
+#define KAUTH_VNODE_READ_ATTRIBUTES     (1U << 7)
+#define KAUTH_VNODE_WRITE_ATTRIBUTES    (1U << 8)
+#define KAUTH_VNODE_READ_EXTATTRIBUTES  (1U << 9)
+#define KAUTH_VNODE_WRITE_EXTATTRIBUTES (1U << 10)
+#define KAUTH_VNODE_READ_SECURITY       (1U << 11)
+#define KAUTH_VNODE_WRITE_SECURITY      (1U << 12)
+#define KAUTH_VNODE_TAKE_OWNERSHIP      (1U << 13)
+#define KAUTH_ACE_GENERIC_ALL           (1U << 21)
+#define KAUTH_ACE_GENERIC_EXECUTE       (1U << 22)
+#define KAUTH_ACE_GENERIC_WRITE         (1U << 23)
+#define KAUTH_ACE_GENERIC_READ          (1U << 24)
 
 #define KAUTH_ACE_INHERITED         (1 << 4)
 #define KAUTH_ACE_FILE_INHERIT      (1 << 5)
@@ -65,3 +88,12 @@ int acl_store(const char *path, const struct acl_list *list);
 bool acl_inheritable(const struct acl_list *list);
 bool acl_inherit(const struct acl_list *parent, const struct acl_list *initial,
 		bool directory, struct acl_list *list);
+
+enum acl_result {
+	ACL_UNDECIDED,
+	ACL_ALLOW,
+	ACL_DENY,
+};
+
+enum acl_result acl_evaluate(const struct acl_list *list, uid_t uid, gid_t gid,
+		const gid_t *groups, size_t group_count, uint32_t rights);

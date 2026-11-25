@@ -40,6 +40,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "bsd/gid.h"
 #include "protection.h"
 
 struct filesec_header {
@@ -54,6 +55,8 @@ _Static_assert(sizeof(struct filesec_header) == ACL_FILESEC_HEADER_SIZE,
 		"kauth_filesec");
 
 static int object_open(int dirfd, const char *host_path, int at_flags);
+static enum acl_result evaluate(const char *path, uint32_t rights);
+static uint32_t open_rights(int flags);
 static void object_path(int fd, char *buffer, size_t size);
 static bool may_set(const struct stat *s);
 static bool parent_gives(
@@ -139,6 +142,87 @@ object_path(int fd, char *buffer, size_t size)
 	snprintf(buffer, size, "/proc/thread-self/fd/%d", fd);
 }
 
+int
+acl_check_at(int dirfd, const char *host_path, int at_flags, uint32_t rights)
+{
+	int fd = object_open(dirfd, host_path, at_flags);
+	if (fd == -1) {
+		return 0;
+	}
+	char path[48];
+	object_path(fd, path, sizeof(path));
+	enum acl_result result = evaluate(path, rights);
+	close(fd);
+	if (result == ACL_DENY) {
+		errno = EACCES;
+		return -1;
+	}
+	return 0;
+}
+
+int
+acl_check_delete_at(int dirfd, const char *host_path)
+{
+	int fd = object_open(dirfd, host_path, AT_SYMLINK_NOFOLLOW);
+	if (fd == -1) {
+		return 0;
+	}
+	char path[48];
+	object_path(fd, path, sizeof(path));
+	enum acl_result result = evaluate(path, KAUTH_VNODE_DELETE);
+	close(fd);
+	if (result == ACL_UNDECIDED) {
+		char parent[PATH_MAX];
+		parent_path(dirfd, host_path, parent, sizeof(parent));
+		result = evaluate(parent, KAUTH_VNODE_DELETE_CHILD);
+	}
+	if (result == ACL_DENY) {
+		errno = EACCES;
+		return -1;
+	}
+	return 0;
+}
+
+static enum acl_result
+evaluate(const char *path, uint32_t rights)
+{
+	uid_t uid = (uid_t)setfsuid((uid_t)-1);
+	if (uid == 0 || rights == 0) {
+		return ACL_UNDECIDED;
+	}
+	struct acl_list list;
+	acl_record_read(path, &list);
+	if (list.count == KAUTH_FILESEC_NOACL) {
+		return ACL_UNDECIDED;
+	}
+	gid_t groups[NGROUPS_MAX];
+	int count = getgroups(NGROUPS_MAX, groups);
+	for (int i = 0; i < count; i++) {
+		groups[i] = gid_from_linux(groups[i]);
+	}
+	gid_t gid = gid_from_linux((gid_t)setfsgid((gid_t)-1));
+	return acl_evaluate(
+			&list, uid, gid, groups, count > 0 ? count : 0, rights);
+}
+
+static uint32_t
+open_rights(int flags)
+{
+	int access = flags & O_ACCMODE;
+	uint32_t rights = 0;
+	if (access == O_RDONLY || access == O_RDWR) {
+		rights |= KAUTH_VNODE_READ_DATA;
+	}
+	if (access == O_WRONLY || access == O_RDWR) {
+		rights |= (flags & O_APPEND) ? KAUTH_VNODE_APPEND_DATA
+					     : KAUTH_VNODE_WRITE_DATA;
+	}
+	if (flags & O_TRUNC) {
+		rights |= KAUTH_VNODE_WRITE_DATA;
+	}
+	return rights;
+}
+
 static bool
 may_set(const struct stat *s)
 {
@@ -153,6 +237,10 @@ acl_openat(int dirfd, const char *host_path, int flags, mode_t mode,
 	bool unasked;
 	bool *made = created != NULL ? created : &unasked;
 	*made = false;
+	int follow = (flags & O_NOFOLLOW) ? AT_SYMLINK_NOFOLLOW : 0;
+	if (acl_check_at(dirfd, host_path, follow, open_rights(flags)) == -1) {
+		return -1;
+	}
 	if (!(flags & O_CREAT)) {
 		return openat(dirfd, host_path, flags, mode);
 	}

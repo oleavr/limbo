@@ -106,6 +106,13 @@ sys_setxattr(user_addr_t path, user_addr_t attrname, user_addr_t value,
 	if (is_record(n)) {
 		return _EPERM;
 	}
+	if (acl_check_at(AT_FDCWD, p,
+			    (options & _XATTR_NOFOLLOW) ? AT_SYMLINK_NOFOLLOW
+							: 0,
+			    KAUTH_VNODE_WRITE_EXTATTRIBUTES)
+			== -1) {
+		return _EACCES;
+	}
 	return xattr_result((options & _XATTR_NOFOLLOW)
 					? lsetxattr(p, n, value, size, 0)
 					: setxattr(p, n, value, size, 0));
@@ -122,6 +129,10 @@ sys_fsetxattr(int fd, user_addr_t attrname, user_addr_t value, size_t size,
 	const char *n = host_name(attrname, name);
 	if (is_record(n)) {
 		return _EPERM;
+	}
+	if (acl_check_at(fd, "", AT_EMPTY_PATH, KAUTH_VNODE_WRITE_EXTATTRIBUTES)
+			== -1) {
+		return _EACCES;
 	}
 	return xattr_result(fsetxattr(fd, n, value, size, 0));
 }
@@ -140,6 +151,13 @@ sys_removexattr(user_addr_t path, user_addr_t attrname, int options)
 	if (is_record(n)) {
 		return _EPERM;
 	}
+	if (acl_check_at(AT_FDCWD, p,
+			    (options & _XATTR_NOFOLLOW) ? AT_SYMLINK_NOFOLLOW
+							: 0,
+			    KAUTH_VNODE_WRITE_EXTATTRIBUTES)
+			== -1) {
+		return _EACCES;
+	}
 	return xattr_result((options & _XATTR_NOFOLLOW) ? lremovexattr(p, n)
 							: removexattr(p, n));
 }
@@ -154,6 +172,10 @@ sys_fremovexattr(int fd, user_addr_t attrname, int options)
 	const char *n = host_name(attrname, name);
 	if (is_record(n)) {
 		return _EPERM;
+	}
+	if (acl_check_at(fd, "", AT_EMPTY_PATH, KAUTH_VNODE_WRITE_EXTATTRIBUTES)
+			== -1) {
+		return _EACCES;
 	}
 	return xattr_result(fremovexattr(fd, n));
 }
