@@ -643,7 +643,8 @@ static uint64_t
 started_thread_id(struct thread *thread)
 {
 	pid_t tid;
-	while ((tid = __atomic_load_n(&thread->tid, __ATOMIC_ACQUIRE)) == 0) {
+	while ((tid = __atomic_load_n(&thread->tid, __ATOMIC_ACQUIRE)) == 0
+			&& thread->spawned && !thread->terminating) {
 		sched_yield();
 	}
 	return (uint64_t)tid;
