@@ -101,8 +101,17 @@ static __thread bool guest_thread;
 #define PSTATE_C (1u << 29)
 #define MRS_OPCODE 0xd53
 static void emulate_system_register(int sig, siginfo_t *info, void *ucontext);
-static void dispatch_syscall(mcontext_t *mc);
+__attribute__((noinline)) static void dispatch_syscall(mcontext_t *mc);
 static void set_bsd_result(mcontext_t *mc, int64_t result);
+struct trap_outer {
+	uint64_t thread_pointer;
+	ucontext_t *context;
+};
+__attribute__((noinline, no_stack_protector)) static void trap_state_enter(
+		struct trap_outer *outer, ucontext_t *context,
+		uint64_t entry_pointer);
+__attribute__((noinline, no_stack_protector)) static uint64_t trap_state_leave(
+		const struct trap_outer *outer);
 static __thread uint64_t guest_thread_pointer;
 static __thread bool x1_pending;
 static __thread uint64_t x1_value;
@@ -583,11 +592,10 @@ handle_syscall(int sig, siginfo_t *info, void *ucontext)
 	asm volatile("mov %0, sp" : "=r"(stack_pointer));
 	const struct signal_stack *stack = (const void *)(stack_pointer
 			& ~(SIGNAL_STACK_SIZE - 1));
-	asm volatile("msr tpidr_el0, %0" ::"r"(stack->thread_pointer));
-	uint64_t outer_pointer = guest_thread_pointer;
-	guest_thread_pointer = entry_pointer;
-	ucontext_t *outer_context = trap_context;
-	trap_context = ucontext;
+	asm volatile("msr tpidr_el0, %0" ::"r"(stack->thread_pointer)
+			: "memory");
+	struct trap_outer outer;
+	trap_state_enter(&outer, ucontext, entry_pointer);
 	asm volatile("limbo_syscall_entered:" ::: "memory");
 	void *outer_trap;
 	thread_enter_trap(ucontext, &outer_trap);
@@ -600,10 +608,27 @@ handle_syscall(int sig, siginfo_t *info, void *ucontext)
 	signals_trap_exit(ucontext);
 	thread_leave_trap(ucontext, outer_trap);
 
-	trap_context = outer_context;
+	uint64_t resume_pointer = trap_state_leave(&outer);
+	asm volatile("msr tpidr_el0, %0" ::"r"(resume_pointer) : "memory");
+}
+
+static void
+trap_state_enter(struct trap_outer *outer, ucontext_t *context,
+		uint64_t entry_pointer)
+{
+	outer->thread_pointer = guest_thread_pointer;
+	guest_thread_pointer = entry_pointer;
+	outer->context = trap_context;
+	trap_context = context;
+}
+
+static uint64_t
+trap_state_leave(const struct trap_outer *outer)
+{
+	trap_context = outer->context;
 	uint64_t resume_pointer = guest_thread_pointer;
-	guest_thread_pointer = outer_pointer;
-	asm volatile("msr tpidr_el0, %0" ::"r"(resume_pointer));
+	guest_thread_pointer = outer->thread_pointer;
+	return resume_pointer;
 }
 
 void
