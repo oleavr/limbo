@@ -405,6 +405,7 @@ spawn_exec(const char *path, const struct darwin_spawnattr *attrp,
 static const char *script_path(const char *path, const char *host,
 		char **argv, char *buffer, char ***script_argv);
 static const char *limbo_path(const char *host, char ***argv);
+static bool execute_only_set_id(const char *host);
 static bool passes_on(
 		const char *own, char **envp, enum responsibility_told told);
 static bool is_own(const char *variable);
@@ -519,18 +520,21 @@ static const char *
 limbo_path(const char *host, char ***argv)
 {
 	int fd = open(host, O_RDONLY | O_CLOEXEC);
-	if (fd == -1) {
+	if (fd == -1 && (errno != EACCES || !execute_only_set_id(host))) {
 		return host;
 	}
-	uint8_t magic[4];
-	ssize_t length = read(fd, magic, sizeof(magic));
-	close(fd);
-	static const uint8_t macho[4] = {0xcf, 0xfa, 0xed, 0xfe};
-	static const uint8_t fat[4] = {0xca, 0xfe, 0xba, 0xbe};
-	if (length != sizeof(magic)
-			|| (memcmp(magic, macho, 4) != 0
-					&& memcmp(magic, fat, 4) != 0)) {
-		return host;
+	if (fd != -1) {
+		uint8_t magic[4];
+		ssize_t length = read(fd, magic, sizeof(magic));
+		close(fd);
+		static const uint8_t macho[4] = {0xcf, 0xfa, 0xed, 0xfe};
+		static const uint8_t fat[4] = {0xca, 0xfe, 0xba, 0xbe};
+		if (length != sizeof(magic)
+				|| (memcmp(magic, macho, 4) != 0
+						&& memcmp(magic, fat, 4)
+								!= 0)) {
+			return host;
+		}
 	}
 
 	size_t argc = 0;
@@ -555,6 +559,15 @@ limbo_path(const char *host, char ***argv)
 	result[argc + 2] = NULL;
 	*argv = result;
 	return "/proc/self/exe";
+}
+
+static bool
+execute_only_set_id(const char *host)
+{
+	struct stat st;
+	return stat(host, &st) == 0 && S_ISREG(st.st_mode)
+			&& (st.st_mode & (S_ISUID | S_ISGID))
+			&& faccessat(AT_FDCWD, host, X_OK, AT_EACCESS) == 0;
 }
 
 static const char *
