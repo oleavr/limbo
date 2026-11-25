@@ -63,6 +63,14 @@ static __thread bool assumed;
 static __thread uid_t assumed_uid;
 static __thread gid_t assumed_gid;
 
+#define ASSUMED_MAX 256
+
+static struct assumed_thread {
+	pid_t tid;
+	uid_t uid;
+	gid_t gid;
+} assumed_threads[ASSUMED_MAX];
+
 #ifndef __x86_64__
 #ifndef SA_RESTORER
 #define SA_RESTORER 0x04000000
@@ -86,6 +94,8 @@ static void know_process(void);
 static int assume(uid_t uid, gid_t gid);
 static bool take_assumed_identity(void);
 static void take_process_identity(void);
+static bool take_identity(uid_t uid, const gid_t *gid);
+static struct assumed_thread *assumed_thread(pid_t tid);
 
 int
 credentials_signal(void)
@@ -114,14 +124,18 @@ handle_change(int sig, siginfo_t *info, void *context)
 	(void)sig;
 	(void)info;
 	(void)context;
-	if (assumed) {
+	struct assumed_thread *own = NULL;
+	if (__atomic_load_n(&assuming, __ATOMIC_ACQUIRE) != 0) {
+		own = assumed_thread((pid_t)raw_syscall(SYS_gettid, 0, 0, 0));
+	}
+	if (own != NULL) {
 		raw_syscall(SYS_setresuid, -1, 0, -1);
 	}
 	raw_syscall(__atomic_load_n(&change_number, __ATOMIC_ACQUIRE),
 			change_arguments[0], change_arguments[1],
 			change_arguments[2]);
-	if (assumed) {
-		take_assumed_identity();
+	if (own != NULL) {
+		take_identity(own->uid, &own->gid);
 	}
 	__atomic_add_fetch(&changed, 1, __ATOMIC_RELEASE);
 }
@@ -394,6 +408,7 @@ credentials_fork_child(void)
 {
 	pthread_mutex_init(&lock, NULL);
 	__atomic_store_n(&assuming, 0, __ATOMIC_RELEASE);
+	memset(assumed_threads, 0, sizeof(assumed_threads));
 	if (assumed) {
 		take_process_identity();
 		assumed = false;
@@ -428,11 +443,17 @@ assume(uid_t uid, gid_t gid)
 		}
 		take_process_identity();
 		assumed = false;
+		__atomic_store_n(&assumed_thread(gettid())->tid, 0,
+				__ATOMIC_RELEASE);
 		__atomic_sub_fetch(&assuming, 1, __ATOMIC_RELEASE);
 		return 0;
 	}
 	if (assumed) {
 		return _EPERM;
+	}
+	struct assumed_thread *slot = assumed_thread(0);
+	if (slot == NULL) {
+		return _EAGAIN;
 	}
 
 	assumed_uid = uid;
@@ -441,6 +462,9 @@ assume(uid_t uid, gid_t gid)
 		take_process_identity();
 		return _EPERM;
 	}
+	slot->uid = assumed_uid;
+	slot->gid = assumed_gid;
+	__atomic_store_n(&slot->tid, gettid(), __ATOMIC_RELEASE);
 	assumed = true;
 	__atomic_add_fetch(&assuming, 1, __ATOMIC_RELEASE);
 	return 0;
@@ -449,14 +473,28 @@ assume(uid_t uid, gid_t gid)
 static bool
 take_assumed_identity(void)
 {
+	return take_identity(assumed_uid, &assumed_gid);
+}
+
+static bool
+take_identity(uid_t uid, const gid_t *gid)
+{
 	raw_syscall(SYS_setresuid, -1, 0, -1);
-	return raw_syscall(SYS_setgroups, 1, (long)&assumed_gid, 0) == 0
-			&& raw_syscall(SYS_setresgid, assumed_gid, assumed_gid,
-					   assumed_gid)
-			== 0
-			&& raw_syscall(SYS_setresuid, assumed_uid, assumed_uid,
-					   0)
-			== 0;
+	return raw_syscall(SYS_setgroups, 1, (long)gid, 0) == 0
+			&& raw_syscall(SYS_setresgid, *gid, *gid, *gid) == 0
+			&& raw_syscall(SYS_setresuid, uid, uid, 0) == 0;
+}
+
+static struct assumed_thread *
+assumed_thread(pid_t tid)
+{
+	for (size_t i = 0; i != ASSUMED_MAX; i++) {
+		if (__atomic_load_n(&assumed_threads[i].tid, __ATOMIC_ACQUIRE)
+				== tid) {
+			return &assumed_threads[i];
+		}
+	}
+	return NULL;
 }
 
 static void
