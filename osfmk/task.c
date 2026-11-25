@@ -30,6 +30,7 @@
 #include <dirent.h>
 #include <limits.h>
 #include <mach/mach.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -874,11 +875,72 @@ _kernelrpc_mach_task_is_self(task_name_t task, boolean_t *is_self)
 	return KERN_SUCCESS;
 }
 
+#define DYLD_NOTIFY_MAX 8
+static pthread_mutex_t dyld_notify_lock = PTHREAD_MUTEX_INITIALIZER;
+static mach_port_name_t dyld_notify[DYLD_NOTIFY_MAX];
+
+static void
+dyld_notify_prune(void)
+{
+	for (int i = 0; i < DYLD_NOTIFY_MAX; i++) {
+		mach_port_type_t type;
+		if (dyld_notify[i] != MACH_PORT_NULL
+				&& (ipc_port_type(dyld_notify[i], &type)
+								!= KERN_SUCCESS
+						|| (type & MACH_PORT_TYPE_DEAD_NAME))) {
+			(void)ipc_port_deallocate(dyld_notify[i]);
+			dyld_notify[i] = MACH_PORT_NULL;
+		}
+	}
+}
+
 kern_return_t
 task_dyld_process_info_notify_register(
 		task_read_t target_task, mach_port_t notify)
 {
-	unimplemented();
+	(void)target_task;
+	if (!MACH_PORT_VALID(notify)) {
+		return KERN_INVALID_RIGHT;
+	}
+	pthread_mutex_lock(&dyld_notify_lock);
+	dyld_notify_prune();
+	int free_slot = -1;
+	for (int i = 0; i < DYLD_NOTIFY_MAX; i++) {
+		if (dyld_notify[i] == notify) {
+			pthread_mutex_unlock(&dyld_notify_lock);
+			(void)ipc_port_deallocate(notify);
+			return KERN_SUCCESS;
+		}
+		if (dyld_notify[i] == MACH_PORT_NULL && free_slot == -1) {
+			free_slot = i;
+		}
+	}
+	if (free_slot == -1) {
+		pthread_mutex_unlock(&dyld_notify_lock);
+		return KERN_NO_SPACE;
+	}
+	dyld_notify[free_slot] = notify;
+	pthread_mutex_unlock(&dyld_notify_lock);
+	return KERN_SUCCESS;
+}
+
+int
+sys_task_dyld_process_info_notify_get(mach_port_name_t *names, natural_t *count)
+{
+	natural_t given = 0;
+	pthread_mutex_lock(&dyld_notify_lock);
+	dyld_notify_prune();
+	for (int i = 0; i < DYLD_NOTIFY_MAX; i++) {
+		if (dyld_notify[i] != MACH_PORT_NULL
+				&& ipc_port_mod_refs(dyld_notify[i],
+						   MACH_PORT_RIGHT_SEND, 1)
+						== KERN_SUCCESS) {
+			names[given++] = dyld_notify[i];
+		}
+	}
+	pthread_mutex_unlock(&dyld_notify_lock);
+	*count = given;
+	return KERN_SUCCESS;
 }
 
 kern_return_t
@@ -903,7 +965,17 @@ kern_return_t
 task_dyld_process_info_notify_deregister(
 		task_read_t target_task, mach_port_name_t notify)
 {
-	unimplemented();
+	(void)target_task;
+	pthread_mutex_lock(&dyld_notify_lock);
+	for (int i = 0; i < DYLD_NOTIFY_MAX && !ipc_serving_remote(); i++) {
+		if (dyld_notify[i] == notify) {
+			(void)ipc_port_deallocate(notify);
+			dyld_notify[i] = MACH_PORT_NULL;
+		}
+	}
+	dyld_notify_prune();
+	pthread_mutex_unlock(&dyld_notify_lock);
+	return KERN_SUCCESS;
 }
 
 kern_return_t

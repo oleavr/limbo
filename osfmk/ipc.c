@@ -233,6 +233,7 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t notice_order = PTHREAD_MUTEX_INITIALIZER;
 static struct arrival_waiter *arrival_waiters;
 static __thread bool kernel_receive;
+static __thread bool serving_remote;
 static struct dead_name_request *dead_name_requests;
 static struct remote_send_once *remote_send_onces;
 static struct port_return *port_returns;
@@ -896,6 +897,12 @@ send(mach_msg_header_t *msg, mach_msg_size_t size, ipc_side_t sender,
 	return MACH_MSG_SUCCESS;
 }
 
+bool
+ipc_serving_remote(void)
+{
+	return serving_remote;
+}
+
 static void
 serve_kernel(struct ipc_port *dest, struct ipc_kmsg *kmsg, bool remote)
 {
@@ -908,6 +915,8 @@ serve_kernel(struct ipc_port *dest, struct ipc_kmsg *kmsg, bool remote)
 	void *kobject = dest->kobject;
 	pthread_mutex_unlock(&lock);
 
+	bool outer_remote = serving_remote;
+	serving_remote = remote;
 	if (ops != NULL && ops->serve != NULL) {
 		if (!ops->serve(kobject, kmsg->header, remote)) {
 			serve_kobject(kmsg->header);
@@ -917,6 +926,7 @@ serve_kernel(struct ipc_port *dest, struct ipc_kmsg *kmsg, bool remote)
 	} else if (!serve_xpc || !xpc_bootstrap_serve(kmsg->header)) {
 		serve_kobject(kmsg->header);
 	}
+	serving_remote = outer_remote;
 
 	pthread_mutex_lock(&lock);
 	release_unused_entries(kmsg->header);
