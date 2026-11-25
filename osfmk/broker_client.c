@@ -616,7 +616,7 @@ send_parts(uint32_t type, const struct iovec *parts, int part_count,
 		return errno;
 	}
 	pthread_mutex_lock(&send_lock);
-	int error = broker_wire_send(broker_fd, frame, 0);
+	int error = broker_wire_send(broker_fd, frame, MSG_NOSIGNAL);
 	pthread_mutex_unlock(&send_lock);
 	broker_wire_free(frame);
 	return error;
