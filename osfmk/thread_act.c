@@ -247,11 +247,12 @@ get_state(const ucontext_t *context, thread_state_flavor_t flavor,
 			return KERN_INVALID_ARGUMENT;
 		}
 		const struct fpsimd_context *fpsimd = fpsimd_of(context);
-		struct darwin_arm_neon_state64 neon = {
-				.fpsr = fpsimd->fpsr,
-				.fpcr = fpsimd->fpcr,
-		};
-		memcpy(neon.v, fpsimd->vregs, sizeof(neon.v));
+		struct darwin_arm_neon_state64 neon = {0};
+		if (fpsimd != NULL) {
+			neon.fpsr = fpsimd->fpsr;
+			neon.fpcr = fpsimd->fpcr;
+			memcpy(neon.v, fpsimd->vregs, sizeof(neon.v));
+		}
 		memcpy(old_state, &neon, sizeof(neon));
 		*old_stateCnt = DARWIN_ARM_NEON_STATE64_COUNT;
 		return KERN_SUCCESS;
@@ -320,9 +321,11 @@ set_state(ucontext_t *context, thread_state_flavor_t flavor,
 		struct darwin_arm_neon_state64 neon;
 		memcpy(&neon, new_state, sizeof(neon));
 		struct fpsimd_context *fpsimd = fpsimd_of(context);
-		memcpy(fpsimd->vregs, neon.v, sizeof(neon.v));
-		fpsimd->fpsr = neon.fpsr;
-		fpsimd->fpcr = neon.fpcr;
+		if (fpsimd != NULL) {
+			memcpy(fpsimd->vregs, neon.v, sizeof(neon.v));
+			fpsimd->fpsr = neon.fpsr;
+			fpsimd->fpcr = neon.fpcr;
+		}
 		return KERN_SUCCESS;
 	}
 	struct thread_state state;
@@ -340,11 +343,19 @@ set_state(ucontext_t *context, thread_state_flavor_t flavor,
 static struct fpsimd_context *
 fpsimd_of(const ucontext_t *context)
 {
-	struct _aarch64_ctx *record = (void *)context->uc_mcontext.__reserved;
-	while (record->magic != FPSIMD_MAGIC) {
-		record = (void *)((uint8_t *)record + record->size);
+	uint8_t *p = (uint8_t *)context->uc_mcontext.__reserved;
+	uint8_t *end = p + sizeof(context->uc_mcontext.__reserved);
+	while (p + sizeof(struct _aarch64_ctx) <= end) {
+		struct _aarch64_ctx *head = (void *)p;
+		if (head->magic == 0 || head->size == 0) {
+			break;
+		}
+		if (head->magic == FPSIMD_MAGIC) {
+			return (struct fpsimd_context *)head;
+		}
+		p += head->size;
 	}
-	return (struct fpsimd_context *)record;
+	return NULL;
 }
 #endif
 
