@@ -747,13 +747,19 @@ task_set_phys_footprint_limit(task_t task, int new_limit, int *old_limit)
 kern_return_t
 task_suspend2(task_read_t target_task, task_suspension_token_t *suspend_token)
 {
-	unimplemented();
+	(void)target_task;
+	kern_return_t kr = thread_task_suspend();
+	if (kr == KERN_SUCCESS) {
+		*suspend_token = ipc_kobject_name(IPC_KOBJECT_TASK);
+	}
+	return kr;
 }
 
 kern_return_t
 task_resume2(task_suspension_token_t suspend_token)
 {
-	unimplemented();
+	(void)suspend_token;
+	return thread_task_resume();
 }
 
 kern_return_t
