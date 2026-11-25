@@ -128,6 +128,13 @@ test('xpc_launchd', python,
   timeout: 300,
 )
 
+test('setid', python,
+  args: [runner, limbo, files('guest' / 'setid.c'),
+    meson.current_build_dir(), limbo_broker],
+  suite: 'guest',
+  timeout: 300,
+)
+
 test('launchd', python,
   args: [files('run-launchd.py'), limbo, limbo_broker, limbo_launchctl,
     files('../broker.h'), meson.current_build_dir()],
