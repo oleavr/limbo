@@ -28,6 +28,7 @@
  */
 
 #include <dirent.h>
+#include <limits.h>
 #include <mach/mach.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -276,8 +277,9 @@ memory_usage(pid_t pid, struct memory_usage *usage)
 {
 	memset(usage, 0, sizeof(*usage));
 	long page = sysconf(_SC_PAGESIZE);
-	char path[32];
-	snprintf(path, sizeof(path), "/proc/%d/statm", pid);
+	char dir[64 + NAME_MAX], path[80 + NAME_MAX];
+	process_proc_dir(pid, dir, sizeof(dir));
+	snprintf(path, sizeof(path), "%s/statm", dir);
 	FILE *statm = fopen(path, "r");
 	if (statm != NULL) {
 		unsigned long size, resident;
@@ -287,7 +289,7 @@ memory_usage(pid_t pid, struct memory_usage *usage)
 		}
 		fclose(statm);
 	}
-	snprintf(path, sizeof(path), "/proc/%d/status", pid);
+	snprintf(path, sizeof(path), "%s/status", dir);
 	FILE *status = fopen(path, "r");
 	if (status != NULL) {
 		char line[256];
