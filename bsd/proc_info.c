@@ -1135,7 +1135,9 @@ listpids(uint32_t type, uint32_t typeinfo, user_addr_t buffer,
 			break;
 		case PROC_PPID_ONLY:
 			match = status_field(pid, "PPid:", 0, &value)
-					&& value == typeinfo;
+					&& (uint32_t)process_guest_parent(
+							   (int32_t)value)
+							== typeinfo;
 			break;
 		default:
 			match = false;
