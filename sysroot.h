@@ -47,3 +47,4 @@ bool sysroot_space(dev_t dev, struct statvfs *space);
 bool sysroot_fd_on_data_volume(int fd);
 bool sysroot_at_on_data_volume(
 		int dirfd, const char *path, const char *host_path);
+const char *sysroot_data_mount_point(void);

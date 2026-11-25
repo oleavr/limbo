@@ -661,7 +661,7 @@ pack_attributes(int fd, bool data, const struct __darwin_attrlist *alistp,
 	if (returned.volattr & ATTR_VOL_MOUNTPOINT) {
 		offset = pack_reference(buffer, offset, references,
 				&reference_count,
-				data ? DARWIN_DATA_MOUNT_ON : "/");
+				data ? sysroot_data_mount_point() : "/");
 		volattr &= ~ATTR_VOL_MOUNTPOINT;
 	}
 
@@ -839,7 +839,8 @@ pack_attributes(int fd, bool data, const struct __darwin_attrlist *alistp,
 
 	if (returned.dirattr & ATTR_DIR_MOUNTSTATUS) {
 		bool mounted_on = strcmp(path, "/") == 0
-				|| strcmp(path, DARWIN_DATA_MOUNT_ON) == 0;
+				|| strcmp(path, sysroot_data_mount_point())
+						== 0;
 		offset = pack_u32(buffer, offset,
 				mounted_on ? DIR_MNTSTATUS_MNTPOINT : 0);
 		dirattr &= ~ATTR_DIR_MOUNTSTATUS;
