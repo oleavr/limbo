@@ -159,7 +159,8 @@ def enter_namespace_as_root():
     os.read(ready_r, 1)
     for kind in ("uid", "gid"):
         with open(f"/proc/{pid}/{kind}_map", "w") as f:
-            f.write("0 0 65536\n")
+            f.write("0 0 65536\n" if kind == "uid"
+                    else "0 0 65536\n4294967293 4294967293 1\n")
     os.write(go_w, b"x")
     _, status = os.waitpid(pid, 0)
     sys.exit(os.waitstatus_to_exitcode(status))
