@@ -559,6 +559,60 @@ struct read_overwrite_reply {
 #pragma pack(pop)
 
 bool
+mach_vm_read_request_answer(
+		mach_msg_header_t *msg, mach_msg_size_t size, int32_t pid)
+{
+	struct read_request *request = (void *)msg;
+	if (size < sizeof(*request) || request->size == 0
+			|| (mach_msg_size_t)request->size != request->size
+			|| request->header.msgh_local_port == MACH_PORT_NULL) {
+		return false;
+	}
+	mach_vm_address_t address = 0;
+	if (_kernelrpc_mach_vm_allocate(
+			    0, &address, request->size, VM_FLAGS_ANYWHERE)
+			!= KERN_SUCCESS) {
+		return false;
+	}
+	void *buffer = (void *)address;
+	struct iovec local = {.iov_base = buffer, .iov_len = request->size};
+	struct iovec remote = {.iov_base = (void *)(uintptr_t)request->address,
+			.iov_len = request->size};
+	if (process_vm_readv(pid, &local, 1, &remote, 1, 0)
+			!= (ssize_t)request->size) {
+		_kernelrpc_mach_vm_deallocate(0, address, request->size);
+		return false;
+	}
+	struct read_reply reply = {
+			.header = {
+					.msgh_bits = MACH_MSGH_BITS_SET(
+							MACH_MSGH_BITS_LOCAL(
+									request->header.msgh_bits),
+							0, 0, MACH_MSGH_BITS_COMPLEX),
+					.msgh_size = sizeof(reply),
+					.msgh_remote_port
+					= request->header.msgh_local_port,
+					.msgh_id = request->header.msgh_id + 100,
+			},
+			.body = {.msgh_descriptor_count = 1},
+			.data = {
+					.address = buffer,
+					.size = (mach_msg_size_t)request->size,
+					.deallocate = true,
+					.copy = MACH_MSG_VIRTUAL_COPY,
+					.type = MACH_MSG_OOL_DESCRIPTOR,
+			},
+			.ndr = NDR_record,
+			.data_count = (mach_msg_type_number_t)request->size,
+	};
+	if (ipc_kernel_send(&reply.header) != MACH_MSG_SUCCESS) {
+		_kernelrpc_mach_vm_deallocate(0, address, request->size);
+		return false;
+	}
+	return true;
+}
+
+bool
 mach_vm_read_overwrite_request_answer(
 		mach_msg_header_t *msg, mach_msg_size_t size, int32_t pid)
 {
