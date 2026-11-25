@@ -230,11 +230,18 @@ sys_sys_fcntl(int fd, int cmd, long arg)
 	} break;
 	case _F_DUPFD:
 	case _F_DUPFD_CLOEXEC: {
+		if (arg < 0 || arg >= bsd_fd_limit()) {
+			return _EINVAL;
+		}
 		int copy = fcntl(fd,
 				cmd == _F_DUPFD ? F_DUPFD : F_DUPFD_CLOEXEC,
 				arg);
 		if (copy == -1) {
 			return err_map(errno);
+		}
+		if (copy >= bsd_fd_limit()) {
+			close(copy);
+			return _EMFILE;
 		}
 		kevent_dup(fd, copy);
 		return copy;

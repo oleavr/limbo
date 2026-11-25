@@ -78,5 +78,7 @@ bool process_executable_path(int32_t pid, char *path);
 ssize_t process_cmdline(int32_t pid, char *buffer, size_t size);
 bool process_is_guest(int32_t pid);
 
+int bsd_fd_limit(void);
+
 bool process_environment_value(
 		int32_t pid, const char *name, char *value, size_t size);

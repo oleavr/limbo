@@ -46,6 +46,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/resource.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/sys_domain.h>
@@ -227,6 +228,12 @@ check_control_with_many_open(void)
 {
 	enum { OPEN = 1100 };
 	static int fds[OPEN];
+	struct rlimit limit;
+	CHECK(getrlimit(RLIMIT_NOFILE, &limit) == 0);
+	if (limit.rlim_cur < OPEN + 64) {
+		limit.rlim_cur = OPEN + 64;
+		CHECK(setrlimit(RLIMIT_NOFILE, &limit) == 0);
+	}
 	for (int i = 0; i < OPEN; i++) {
 		fds[i] = open("/dev/null", O_RDONLY);
 		CHECK(fds[i] >= 0);
