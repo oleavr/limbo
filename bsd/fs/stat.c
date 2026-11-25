@@ -342,7 +342,7 @@ convert_statfs(const struct statfs *src, dev_t device, bool data,
 	dest->f_type = src->f_type;
 	dest->f_flags = data ? DARWIN_DATA_MOUNT_FLAGS : DARWIN_MOUNT_FLAGS;
 	strcpy(dest->f_fstypename, "apfs");
-	strcpy(dest->f_mntonname, data ? DARWIN_DATA_MOUNT_ON : "/");
+	strcpy(dest->f_mntonname, data ? sysroot_data_mount_point() : "/");
 	strcpy(dest->f_mntfromname,
 			data ? DARWIN_DATA_MOUNT_FROM
 			     : DARWIN_SYSTEM_MOUNT_FROM);

@@ -55,7 +55,8 @@
 #define RESOLVE_NOFOLLOW_ANY 0x1
 #define LINKS_MAX            32
 
-#define DATA_VOLUME "/System/Volumes/Data"
+#define DATA_VOLUME     "/System/Volumes/Data"
+#define IOS_DATA_VOLUME "/private/var"
 
 #define DARWIN_PTY_PREFIX "/dev/ttys"
 
@@ -71,6 +72,7 @@ static dev_t devices[DEVICES_MAX];
 static size_t device_count;
 static char **firmlinks;
 static size_t firmlink_count;
+static bool ios_layout;
 
 static void note_devices(void);
 static const char *unescaped(char *field);
@@ -169,6 +171,17 @@ load_firmlinks(void)
 	snprintf(path, sizeof(path), "%s/usr/share/firmlinks", root);
 	FILE *file = fopen(path, "re");
 	if (file == NULL) {
+		char volumes[PATH_MAX + sizeof("/System/Volumes")];
+		char var[PATH_MAX + sizeof(IOS_DATA_VOLUME)];
+		snprintf(volumes, sizeof(volumes), "%s/System/Volumes", root);
+		snprintf(var, sizeof(var), "%s" IOS_DATA_VOLUME, root);
+		struct stat s;
+		if (stat(volumes, &s) != 0 && stat(var, &s) == 0
+				&& S_ISDIR(s.st_mode)) {
+			ios_layout = true;
+			firmlinks = malloc(sizeof(*firmlinks));
+			firmlinks[firmlink_count++] = strdup(IOS_DATA_VOLUME);
+		}
 		return;
 	}
 	char line[PATH_MAX];
@@ -525,6 +538,12 @@ on_data_volume(const char *host_path)
 		}
 	}
 	return false;
+}
+
+const char *
+sysroot_data_mount_point(void)
+{
+	return ios_layout ? IOS_DATA_VOLUME : DATA_VOLUME;
 }
 
 bool
