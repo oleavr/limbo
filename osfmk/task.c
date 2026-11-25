@@ -49,6 +49,7 @@
 
 static mach_port_t special_ports[TASK_MAX_SPECIAL_PORT + 1];
 static mach_port_t registered_ports[3];
+static struct exception_action *task_exception_actions;
 static mach_vm_address_t dyld_all_image_info_addr;
 static mach_vm_size_t dyld_all_image_info_size;
 
@@ -555,6 +556,8 @@ task_set_exception_ports(task_t task, exception_mask_t exception_mask,
 		mach_port_t new_port, exception_behavior_t behavior,
 		thread_state_flavor_t new_flavor)
 {
+	exception_actions_set(&task_exception_actions, exception_mask, new_port,
+			behavior, new_flavor, false);
 	return KERN_SUCCESS;
 }
 
@@ -565,7 +568,8 @@ task_get_exception_ports(task_t task, exception_mask_t exception_mask,
 		exception_behavior_array_t old_behaviors,
 		exception_flavor_array_t old_flavors)
 {
-	*masksCnt = 0;
+	exception_actions_get(&task_exception_actions, exception_mask, masks,
+			masksCnt, old_handlers, old_behaviors, old_flavors);
 	return KERN_SUCCESS;
 }
 
@@ -578,7 +582,10 @@ task_swap_exception_ports(task_t task, exception_mask_t exception_mask,
 		exception_behavior_array_t old_behaviors,
 		exception_flavor_array_t old_flavors)
 {
-	*masksCnt = 0;
+	exception_actions_get(&task_exception_actions, exception_mask, masks,
+			masksCnt, old_handlers, old_behaviors, old_flavors);
+	exception_actions_set(&task_exception_actions, exception_mask, new_port,
+			behavior, new_flavor, true);
 	return KERN_SUCCESS;
 }
 

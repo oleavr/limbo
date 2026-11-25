@@ -119,14 +119,8 @@ static uint64_t timeval_nanoseconds(const struct timeval *time);
 static integer_t run_state(char linux_state);
 static time_value_t time_value(uint64_t nanoseconds);
 static uint64_t started_thread_id(struct thread *thread);
-static void handlers_of(struct thread *thread, exception_mask_t mask,
-		exception_mask_array_t masks, mach_msg_type_number_t *count,
-		exception_handler_array_t handlers,
-		exception_behavior_array_t behaviors,
-		exception_flavor_array_t flavors);
-static void set_handlers(struct thread *thread, exception_mask_t mask,
-		mach_port_t new_port, exception_behavior_t behavior,
-		thread_state_flavor_t flavor, bool keep_old);
+
+static pthread_mutex_t exception_lock = PTHREAD_MUTEX_INITIALIZER;
 
 kern_return_t
 thread_terminate(mach_port_t target_act)
@@ -659,8 +653,8 @@ thread_set_exception_ports(thread_act_t thread, exception_mask_t exception_mask,
 	if (target == NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
-	set_handlers(target, exception_mask, new_port, behavior, new_flavor,
-			false);
+	exception_actions_set(&target->exception_actions, exception_mask,
+			new_port, behavior, new_flavor, false);
 	return KERN_SUCCESS;
 }
 
@@ -675,8 +669,8 @@ thread_get_exception_ports(thread_act_t thread, exception_mask_t exception_mask,
 	if (target == NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
-	handlers_of(target, exception_mask, masks, masksCnt, old_handlers,
-			old_behaviors, old_flavors);
+	exception_actions_get(&target->exception_actions, exception_mask, masks,
+			masksCnt, old_handlers, old_behaviors, old_flavors);
 	return KERN_SUCCESS;
 }
 
@@ -693,21 +687,23 @@ thread_swap_exception_ports(thread_act_t thread,
 	if (target == NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
-	handlers_of(target, exception_mask, masks, masksCnt, old_handlers,
-			old_behaviors, old_flavors);
-	set_handlers(target, exception_mask, new_port, behavior, new_flavor,
-			true);
+	exception_actions_get(&target->exception_actions, exception_mask, masks,
+			masksCnt, old_handlers, old_behaviors, old_flavors);
+	exception_actions_set(&target->exception_actions, exception_mask,
+			new_port, behavior, new_flavor, true);
 	return KERN_SUCCESS;
 }
 
-static void
-handlers_of(struct thread *thread, exception_mask_t mask,
+void
+exception_actions_get(struct exception_action **actions, exception_mask_t mask,
 		exception_mask_array_t masks, mach_msg_type_number_t *count,
 		exception_handler_array_t handlers,
 		exception_behavior_array_t behaviors,
 		exception_flavor_array_t flavors)
 {
-	if (thread->exception_actions == NULL) {
+	pthread_mutex_lock(&exception_lock);
+	if (*actions == NULL) {
+		pthread_mutex_unlock(&exception_lock);
 		*count = 0;
 		return;
 	}
@@ -716,8 +712,7 @@ handlers_of(struct thread *thread, exception_mask_t mask,
 		if (!(mask & (1 << type))) {
 			continue;
 		}
-		const struct exception_action *action
-				= &thread->exception_actions[type];
+		const struct exception_action *action = &(*actions)[type];
 		mach_msg_type_number_t i = 0;
 		while (i < found
 				&& !(handlers[i] == action->port
@@ -737,24 +732,24 @@ handlers_of(struct thread *thread, exception_mask_t mask,
 		}
 		masks[i] |= 1 << type;
 	}
+	pthread_mutex_unlock(&exception_lock);
 	*count = found;
 }
 
-static void
-set_handlers(struct thread *thread, exception_mask_t mask, mach_port_t new_port,
-		exception_behavior_t behavior, thread_state_flavor_t flavor,
-		bool keep_old)
+void
+exception_actions_set(struct exception_action **actions, exception_mask_t mask,
+		mach_port_t new_port, exception_behavior_t behavior,
+		thread_state_flavor_t flavor, bool keep_old)
 {
-	if (thread->exception_actions == NULL) {
-		thread->exception_actions = calloc(EXC_TYPES_COUNT,
-				sizeof(*thread->exception_actions));
+	pthread_mutex_lock(&exception_lock);
+	if (*actions == NULL) {
+		*actions = calloc(EXC_TYPES_COUNT, sizeof(**actions));
 	}
 	for (int type = FIRST_EXCEPTION; type < EXC_TYPES_COUNT; type++) {
 		if (!(mask & (1 << type))) {
 			continue;
 		}
-		struct exception_action *action
-				= &thread->exception_actions[type];
+		struct exception_action *action = &(*actions)[type];
 		mach_port_name_t old = action->port;
 		ipc_port_mod_refs(new_port, MACH_PORT_RIGHT_SEND, 1);
 		action->port = new_port;
@@ -764,6 +759,7 @@ set_handlers(struct thread *thread, exception_mask_t mask, mach_port_t new_port,
 			ipc_port_mod_refs(old, MACH_PORT_RIGHT_SEND, -1);
 		}
 	}
+	pthread_mutex_unlock(&exception_lock);
 }
 
 kern_return_t

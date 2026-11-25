@@ -66,6 +66,17 @@ struct exception_action {
 
 struct thread;
 
+void exception_actions_get(struct exception_action **actions,
+		exception_mask_t mask, exception_mask_array_t masks,
+		mach_msg_type_number_t *count,
+		exception_handler_array_t handlers,
+		exception_behavior_array_t behaviors,
+		exception_flavor_array_t flavors);
+void exception_actions_set(struct exception_action **actions,
+		exception_mask_t mask, mach_port_t new_port,
+		exception_behavior_t behavior, thread_state_flavor_t flavor,
+		bool keep_old);
+
 typedef bool (*thread_continuation_t)(
 		struct thread *thread, struct thread_state *state);
 
