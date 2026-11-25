@@ -193,6 +193,9 @@ int sys_pathconf(char *path, int name);
 int sys_sys_fpathconf(int fd, int name);
 int sys_getrlimit(uint32_t which, void *rlp);
 int sys_setrlimit(uint32_t which, void *rlp);
+void rlimit_nofile_start(void);
+void rlimit_nofile_exec(void);
+void rlimit_nofile_exec_failed(void);
 int sys_getdirentries(int fd, char *buf, uint32_t count, long *basep);
 user_addr_t sys_mmap(
 		void *addr, size_t len, int prot, int flags, int fd, off_t pos);

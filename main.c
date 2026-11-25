@@ -46,6 +46,7 @@
 #include <unistd.h>
 
 #include "broker.h"
+#include "bsd/handler.h"
 #include "bsd/mac.h"
 #include "bsd/persona.h"
 #include "bsd/responsibility.h"
@@ -92,6 +93,7 @@ main(int argc, char *argv[], char *envp[])
 		return restart_without_aslr(argv, envp);
 	}
 
+	rlimit_nofile_start();
 	raise_file_limit();
 
 	if (syscall_dispatch_enable()) {
