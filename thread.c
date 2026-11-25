@@ -67,6 +67,7 @@ static uint64_t thread_state_tsd_base(const struct thread_state *state);
 static bool outside_guest_code(struct thread *thread);
 static void restart(struct thread *thread);
 static void exit_if_terminated(struct thread *thread);
+static bool thread_listed(const struct thread *thread);
 
 struct thread *
 thread_current(void)
@@ -113,14 +114,14 @@ thread_guest_ports(mach_port_name_t *ports, size_t max)
 	size_t count = 0;
 	for (struct thread *thread = all_threads; thread != NULL;
 			thread = thread->all_next) {
-		if (thread->guest && !thread->terminating) {
+		if (thread_listed(thread)) {
 			count++;
 		}
 	}
 	size_t oldest_first = count;
 	for (struct thread *thread = all_threads; thread != NULL;
 			thread = thread->all_next) {
-		if (thread->guest && !thread->terminating) {
+		if (thread_listed(thread)) {
 			oldest_first--;
 			if (oldest_first < max) {
 				ports[oldest_first] = thread->port;
@@ -131,6 +132,13 @@ thread_guest_ports(mach_port_name_t *ports, size_t max)
 	return count;
 }
 
+static bool
+thread_listed(const struct thread *thread)
+{
+	return thread->guest && !thread->terminating && thread->tid != 0
+			&& syscall(SYS_tgkill, getpid(), thread->tid, 0) == 0;
+}
+
 size_t
 thread_guest_handles(uint64_t *out, size_t max, bool ids)
 {
@@ -138,14 +146,14 @@ thread_guest_handles(uint64_t *out, size_t max, bool ids)
 	size_t count = 0;
 	for (struct thread *thread = all_threads; thread != NULL;
 			thread = thread->all_next) {
-		if (thread->guest && !thread->terminating) {
+		if (thread_listed(thread)) {
 			count++;
 		}
 	}
 	size_t oldest_first = count;
 	for (struct thread *thread = all_threads; thread != NULL;
 			thread = thread->all_next) {
-		if (thread->guest && !thread->terminating) {
+		if (thread_listed(thread)) {
 			oldest_first--;
 			if (oldest_first < max) {
 				out[oldest_first] = ids ? (uint64_t)thread->tid
@@ -164,7 +172,7 @@ thread_guest_port_of(uint64_t value, bool id)
 	pthread_mutex_lock(&all_threads_lock);
 	for (struct thread *thread = all_threads; thread != NULL;
 			thread = thread->all_next) {
-		if (thread->guest && !thread->terminating
+		if (thread_listed(thread)
 				&& (id ? (uint64_t)thread->tid
 				       : thread->tsd_base)
 						== value) {
