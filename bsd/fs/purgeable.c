@@ -55,10 +55,12 @@ purgeable_mark(int fd, uint64_t flags)
 	char path[48];
 	fd_path(fd, path, sizeof(path));
 	if (flags & PURGEABLE_MARK) {
-		return setxattr(path, PURGEABLE_XATTR, &flags, sizeof(flags),
+		int r = setxattr(path, PURGEABLE_XATTR, &flags, sizeof(flags),
 				0);
+		return r == -1 && errno == ENOTSUP ? 0 : r;
 	}
-	if (removexattr(path, PURGEABLE_XATTR) == -1 && errno != ENODATA) {
+	if (removexattr(path, PURGEABLE_XATTR) == -1 && errno != ENODATA
+			&& errno != ENOTSUP) {
 		return -1;
 	}
 	return 0;
