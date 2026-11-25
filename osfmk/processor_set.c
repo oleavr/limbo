@@ -158,14 +158,74 @@ processor_set_policy_disable(processor_set_t processor_set, int policy,
 	return KERN_FAILURE;
 }
 
+static kern_return_t
+all_tasks(task_array_t *task_list, mach_msg_type_number_t *task_listCnt)
+{
+	if (geteuid() != 0) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	size_t count = 0, capacity = 256;
+	mach_port_name_t *names = malloc(capacity * sizeof(*names));
+	DIR *proc = opendir("/proc");
+	struct dirent *entry;
+	while (proc != NULL && names != NULL
+			&& (entry = readdir(proc)) != NULL) {
+		char *end;
+		long pid = strtol(entry->d_name, &end, 10);
+		if (*end != '\0' || pid <= 0) {
+			continue;
+		}
+		mach_port_name_t name;
+		if (pid == getpid()) {
+			name = ipc_task_self();
+			if (ipc_port_mod_refs(name, MACH_PORT_RIGHT_SEND, 1)
+					!= KERN_SUCCESS) {
+				continue;
+			}
+		} else {
+			name = ipc_task_for_pid((int32_t)pid);
+		}
+		if (name == MACH_PORT_NULL) {
+			continue;
+		}
+		if (count == capacity) {
+			capacity *= 2;
+			mach_port_name_t *grown = realloc(
+					names, capacity * sizeof(*names));
+			if (grown == NULL) {
+				break;
+			}
+			names = grown;
+		}
+		names[count++] = name;
+	}
+	if (proc != NULL) {
+		closedir(proc);
+	}
+	mach_vm_address_t address = 0;
+	if (count != 0
+			&& _kernelrpc_mach_vm_allocate(0, &address,
+					   count * sizeof(mach_port_name_t),
+					   VM_FLAGS_ANYWHERE)
+					!= KERN_SUCCESS) {
+		free(names);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+	if (count != 0) {
+		memcpy((void *)address, names, count * sizeof(*names));
+	}
+	free(names);
+	*task_list = (task_array_t)address;
+	*task_listCnt = (mach_msg_type_number_t)count;
+	return KERN_SUCCESS;
+}
+
 kern_return_t
 processor_set_tasks(processor_set_t processor_set, task_array_t *task_list,
 		mach_msg_type_number_t *task_listCnt)
 {
 	(void)processor_set;
-	(void)task_list;
-	(void)task_listCnt;
-	return KERN_FAILURE;
+	return all_tasks(task_list, task_listCnt);
 }
 
 kern_return_t
@@ -213,7 +273,5 @@ processor_set_tasks_with_flavor(processor_set_t processor_set,
 {
 	(void)processor_set;
 	(void)flavor;
-	(void)task_list;
-	(void)task_listCnt;
-	return KERN_FAILURE;
+	return all_tasks(task_list, task_listCnt);
 }
