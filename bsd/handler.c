@@ -416,9 +416,6 @@ open_flags(int flags)
 int
 sys_sys_close(int fd)
 {
-	if (broker_client_owns_fd(fd)) {
-		return 0;
-	}
 	kevent_close(fd);
 	net_close(fd);
 	route_close(fd);
@@ -615,6 +612,15 @@ control_to_host(const struct xnu_msghdr *guest, void *host, size_t size)
 		}
 		size_t length = cmsg->cmsg_len - sizeof(*cmsg);
 		if (cmsg->cmsg_level == xnu_SOL_SOCKET
+				&& cmsg->cmsg_type == xnu_SCM_RIGHTS) {
+			const int *sent = (const int *)(cmsg + 1);
+			for (size_t i = 0; i != length / sizeof(int); i++) {
+				if (sent[i] >= own_floor) {
+					return SIZE_MAX;
+				}
+			}
+		}
+		if (cmsg->cmsg_level == xnu_SOL_SOCKET
 				&& cmsg->cmsg_type == xnu_SCM_RIGHTS
 				&& used + CMSG_SPACE(length) <= size) {
 			struct cmsghdr *out = (void *)((uint8_t *)host + used);
@@ -754,6 +760,9 @@ sys_sendmsg(int s, void *msg, int flags)
 	if (guest->msg_control != NULL) {
 		host.msg_controllen = control_to_host(guest, control,
 				sizeof(control));
+		if (host.msg_controllen == SIZE_MAX) {
+			return _EBADF;
+		}
 		host.msg_control = host.msg_controllen != 0 ? control : NULL;
 	}
 	return errno_map(sendmsg(s, &host,
@@ -1461,17 +1470,37 @@ bsd_fd_limit(void)
 }
 
 int
+limbo_fd_copy(int fd)
+{
+	int copy = fcntl(fd, F_DUPFD_CLOEXEC, own_floor);
+	return copy != -1 ? copy : fcntl(fd, F_DUPFD_CLOEXEC, 0);
+}
+
+bool
+limbo_fd_is_own(int fd)
+{
+	return fd >= own_floor;
+}
+
+int
+limbo_fd_high(int fd)
+{
+	if (fd < 0 || fd >= own_floor) {
+		return fd;
+	}
+	int high = fcntl(fd, F_DUPFD_CLOEXEC, own_floor);
+	if (high == -1) {
+		return fd;
+	}
+	close(fd);
+	return high;
+}
+
+int
 sys_sys_dup2(uint32_t from, uint32_t to)
 {
 	if ((int)to < 0 || (int)to >= bsd_fd_limit()) {
 		return _EBADF;
-	}
-	if (broker_client_owns_fd((int)to)) {
-		int moved = fcntl((int)to, F_DUPFD_CLOEXEC, 512);
-		if (moved == -1) {
-			return _EMFILE;
-		}
-		broker_client_fd_moved((int)to, moved);
 	}
 	if (from != to && fcntl((int)from, F_GETFD) != -1) {
 		kevent_close((int)to);
@@ -1509,6 +1538,9 @@ static int
 select_guest(int nd, uint32_t *in, uint32_t *ou, uint32_t *ex,
 		const struct timespec *timeout, const uint32_t *mask)
 {
+	if (nd > own_floor) {
+		nd = own_floor;
+	}
 	if (nd < 0 || nd > FD_SETSIZE) {
 		return _EINVAL;
 	}
@@ -3000,16 +3032,22 @@ sys_poll(void *fds, uint32_t nfds, int timeout)
 	if (host == NULL) {
 		return _ENOMEM;
 	}
+	int own = 0;
 	for (uint32_t i = 0; i < nfds; i++) {
-		host[i].fd = guest[i].fd;
+		host[i].fd = guest[i].fd < own_floor ? guest[i].fd : -1;
+		own += guest[i].fd >= own_floor;
 		host[i].events = poll_events_to_linux(guest[i].events);
 	}
-	int result = poll(host, nfds, timeout);
+	int result = poll(host, nfds, own != 0 && timeout != 0 ? 0 : timeout);
 	int err = errno;
 	if (result != -1) {
 		for (uint32_t i = 0; i < nfds; i++) {
-			guest[i].revents = poll_events_from_linux(host[i].revents);
+			guest[i].revents = guest[i].fd >= own_floor
+					? POLLNVAL
+					: poll_events_from_linux(
+							  host[i].revents);
 		}
+		result += own;
 	}
 	free(host);
 	return (result == -1) ? err_map(err) : result;
@@ -4484,7 +4522,7 @@ sys_audit_session_join(mach_port_name_t port)
 int
 sys_sys_fileport_makeport(int fd, user_addr_t portnamep)
 {
-	int copy = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+	int copy = limbo_fd_copy(fd);
 	if (copy == -1) {
 		return err_map(errno);
 	}
@@ -5387,6 +5425,7 @@ sys_proc_info_extended_id(int32_t callnum, int32_t pid, uint32_t flavor,
 static uint64_t dispatch_bsd(unsigned long syscall, uint64_t arg1,
 		uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5,
 		uint64_t arg6, uint64_t *sp);
+static unsigned descriptor_arguments(unsigned long syscall);
 static bool makes_descriptor(unsigned long syscall);
 static int descriptors_made_first(unsigned long syscall);
 static bool descriptor_room(int count);
@@ -5395,6 +5434,14 @@ uint64_t
 sys_bsd(unsigned long syscall, uint64_t arg1, uint64_t arg2, uint64_t arg3,
 		uint64_t arg4, uint64_t arg5, uint64_t arg6, uint64_t *sp)
 {
+	const uint64_t arguments[] = {arg1, arg2, arg3, arg4, arg5, arg6};
+	unsigned descriptors = descriptor_arguments(syscall);
+	for (int i = 0; i < 6; i++) {
+		if ((descriptors & (1u << i))
+				&& (int)arguments[i] >= own_floor) {
+			return (uint64_t)_EBADF;
+		}
+	}
 	int needed = descriptors_made_first(syscall);
 	if (needed != 0 && !descriptor_room(needed)) {
 		return (uint64_t)_EMFILE;
@@ -5406,6 +5453,135 @@ sys_bsd(unsigned long syscall, uint64_t arg1, uint64_t arg2, uint64_t arg3,
 		return (uint64_t)_EMFILE;
 	}
 	return result;
+}
+
+static unsigned
+descriptor_arguments(unsigned long syscall)
+{
+	switch (syscall) {
+	case 0x3:
+	case 0x4:
+	case 0x6:
+	case 0xd:
+	case 0x1b:
+	case 0x1c:
+	case 0x1d:
+	case 0x1e:
+	case 0x1f:
+	case 0x20:
+	case 0x23:
+	case 0x29:
+	case 0x36:
+	case 0x5c:
+	case 0x5f:
+	case 0x62:
+	case 0x68:
+	case 0x69:
+	case 0x6a:
+	case 0x76:
+	case 0x78:
+	case 0x79:
+	case 0x7b:
+	case 0x7c:
+	case 0x83:
+	case 0x85:
+	case 0x86:
+	case 0x8b:
+	case 0x99:
+	case 0x9a:
+	case 0x9e:
+	case 0xbb:
+	case 0xbd:
+	case 0xc0:
+	case 0xc4:
+	case 0xc7:
+	case 0xc9:
+	case 0xda:
+	case 0xde:
+	case 0xe4:
+	case 0xe5:
+	case 0xeb:
+	case 0xed:
+	case 0xef:
+	case 0xf1:
+	case 0xf5:
+	case 0x119:
+	case 0x11b:
+	case 0x13c:
+	case 0x153:
+	case 0x157:
+	case 0x158:
+	case 0x15a:
+	case 0x15d:
+	case 0x16b:
+	case 0x171:
+	case 0x176:
+	case 0x184:
+	case 0x185:
+	case 0x18c:
+	case 0x18d:
+	case 0x18f:
+	case 0x191:
+	case 0x192:
+	case 0x193:
+	case 0x194:
+	case 0x196:
+	case 0x198:
+	case 0x199:
+	case 0x19b:
+	case 0x19c:
+	case 0x19d:
+	case 0x19e:
+	case 0x19f:
+	case 0x1ae:
+	case 0x1b6:
+	case 0x1ba:
+	case 0x1bc:
+	case 0x1bf:
+	case 0x1c0:
+	case 0x1c1:
+	case 0x1cd:
+	case 0x1cf:
+	case 0x1d0:
+	case 0x1d2:
+	case 0x1d3:
+	case 0x1d4:
+	case 0x1d5:
+	case 0x1d6:
+	case 0x1d8:
+	case 0x1d9:
+	case 0x1db:
+	case 0x1dc:
+	case 0x1e0:
+	case 0x1e1:
+	case 0x1e5:
+	case 0x1e6:
+	case 0x1e7:
+	case 0x1f6:
+	case 0x205:
+	case 0x20b:
+	case 0x20c:
+	case 0x21c:
+	case 0x21d:
+	case 0x21e:
+	case 0x21f:
+		return 0x1;
+	case 0x1da:
+	case 0x206:
+	case 0x20e:
+		return 0x2;
+	case 0x5a:
+	case 0x151:
+		return 0x3;
+	case 0x1d1:
+	case 0x1d7:
+	case 0x1e8:
+		return 0x5;
+	case 0xc5:
+		return 0x10;
+	default:
+		return 0;
+	}
 }
 
 static bool

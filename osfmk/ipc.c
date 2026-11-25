@@ -1703,7 +1703,7 @@ ipc_export_record(struct ipc_export *out, const void *record, size_t size)
 static bool
 export_fd(struct remote_fds *fds, int fd)
 {
-	int copy = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+	int copy = limbo_fd_copy(fd);
 	if (copy == -1) {
 		fds->failed = true;
 		return false;
@@ -2328,8 +2328,7 @@ forward_frame(uint64_t global_id, const void *blob, uint32_t length,
 	int *copies = malloc((fd_count + 1) * sizeof(*copies));
 	size_t copied = 0;
 	while (copied != fd_count
-			&& (copies[copied] = fcntl(
-					    fds[copied], F_DUPFD_CLOEXEC, 0))
+			&& (copies[copied] = limbo_fd_copy(fds[copied]))
 					!= -1) {
 		copied++;
 	}
@@ -2745,7 +2744,7 @@ import_holders(struct ipc_entry *entry, const uint8_t **data)
 static mach_port_name_t
 import_fileport(int fd)
 {
-	int own = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+	int own = limbo_fd_copy(fd);
 	if (own == -1) {
 		return MACH_PORT_NULL;
 	}
@@ -2758,7 +2757,7 @@ import_fileport(int fd)
 static mach_port_name_t
 import_memory_entry(int fd, const uint8_t *record)
 {
-	int own = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+	int own = limbo_fd_copy(fd);
 	if (own == -1) {
 		return MACH_PORT_NULL;
 	}
@@ -2794,7 +2793,7 @@ import_kind(const struct ipc_kobject_ops *ops, const uint8_t **data,
 int
 ipc_import_fd(const int *fds, size_t fd_count, uint32_t index)
 {
-	return index < fd_count ? fcntl(fds[index], F_DUPFD_CLOEXEC, 0) : -1;
+	return index < fd_count ? limbo_fd_copy(fds[index]) : -1;
 }
 
 extern const struct ipc_kobject_ops *const __start_limbo_ipc_kobject_ops[]

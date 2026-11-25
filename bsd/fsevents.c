@@ -47,6 +47,7 @@
 #include "commpage.h"
 #include "fs/device.h"
 #include "fsevents.h"
+#include "process.h"
 #include "sysroot.h"
 #include "xnu-errno.h"
 
@@ -299,9 +300,9 @@ start_watching(void)
 	if (watching) {
 		return;
 	}
-	int fan = fanotify_init(FAN_CLASS_NOTIF | FAN_CLOEXEC
+	int fan = limbo_fd_high(fanotify_init(FAN_CLASS_NOTIF | FAN_CLOEXEC
 					| FAN_REPORT_DFID_NAME_TARGET,
-			O_RDONLY | O_LARGEFILE | O_CLOEXEC);
+			O_RDONLY | O_LARGEFILE | O_CLOEXEC));
 	if (fan == -1) {
 		return;
 	}

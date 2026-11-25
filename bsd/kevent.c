@@ -52,6 +52,7 @@
 #include "kevent.h"
 #include "memorystatus.h"
 #include "osfmk/ipc.h"
+#include "process.h"
 #include "signals.h"
 #include "thread.h"
 #include "workq.h"
@@ -600,6 +601,11 @@ kevent_register(struct kqueue *kq, const struct kevent_qos_s *change)
 	if (kn == NULL) {
 		if (!(change->flags & EV_ADD)) {
 			return _ENOENT;
+		}
+		if ((change->filter == EVFILT_READ
+				    || change->filter == EVFILT_WRITE)
+				&& limbo_fd_is_own((int)change->ident)) {
+			return _EBADF;
 		}
 		kn = knote_attach(kq, change);
 	} else {
@@ -1242,7 +1248,7 @@ fd_watch_start(void)
 	}
 	static pthread_once_t once = PTHREAD_ONCE_INIT;
 	pthread_once(&once, fd_watch_init);
-	fd_watch_event = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+	fd_watch_event = limbo_fd_high(eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK));
 	sigset_t all, previous;
 	sigfillset(&all);
 	pthread_sigmask(SIG_SETMASK, &all, &previous);

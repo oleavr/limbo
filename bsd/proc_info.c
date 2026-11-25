@@ -532,6 +532,9 @@ sys_proc_info(int32_t callnum, int32_t pid, uint32_t flavor, uint64_t arg,
 	case PROC_INFO_CALL_PIDINFO:
 		return pidinfo(pid, flavor, arg, buffer, buffersize);
 	case PROC_INFO_CALL_PIDFDINFO:
+		if (limbo_fd_is_own((int32_t)arg)) {
+			return _EBADF;
+		}
 		return fdinfo(pid, flavor, (int32_t)arg, (void *)buffer,
 				buffersize);
 	case PROC_INFO_CALL_KERNMSGBUF:

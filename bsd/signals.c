@@ -44,6 +44,7 @@
 
 #include "bsd/handler.h"
 #include "bsd/kevent.h"
+#include "bsd/process.h"
 #include "bsd/signals.h"
 #include "bsd/signo.h"
 #include "bsd/xnu-errno.h"
@@ -449,7 +450,7 @@ signals_watch(int sig, bool watch)
 		watch_counts[sig]--;
 	}
 	if (watch && relay_fd == -1) {
-		relay_fd = eventfd(0, EFD_CLOEXEC);
+		relay_fd = limbo_fd_high(eventfd(0, EFD_CLOEXEC));
 		sigset_t all, old;
 		sigfillset(&all);
 		pthread_sigmask(SIG_SETMASK, &all, &old);

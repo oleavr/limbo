@@ -52,7 +52,6 @@
 
 #define PORT_COUNT   32
 #define FDS_SEEN     256
-#define SOCKETS_SEEN 1024
 #define OVERSIZED    (2u << 20)
 #define GUARD_TICKS  1000
 #define REAP_TICKS   300
@@ -211,8 +210,8 @@ static int host_file_limit(const char *soft);
 static void runner_request(const char *what, char *path, size_t size);
 static child_t start_peer(const char *name);
 static void end_peer(const child_t *child);
-static bool is_broker_socket(int fd);
 static void look_up_after_dup2_over_low_fds(void);
+static void work_after_dup2_over_every_fd(void);
 static void pid_suspended_guest(void);
 static void queue_moves_with_receive_right(void);
 static void send_right_outlives_mover(void);
@@ -2331,28 +2330,17 @@ lose_connection(void)
 	mach_port_t port = bootstrap_call(LOOK_UP, LOST_NAME);
 	CHECK(port != MACH_PORT_NULL);
 	mach_port_t reply = post_for(port, MARK_ID);
-	int violated = 0;
-	for (int fd = 0; fd != SOCKETS_SEEN; fd++) {
-		if (is_broker_socket(fd)) {
-			violated += write(fd, "", 1) == 1;
-		}
-	}
-	CHECK(violated == 1);
+	char path[PATH_MAX];
+	runner_request("end-broker", path, sizeof(path));
+	int marker = open(path, O_WRONLY | O_CREAT, 0644);
+	CHECK(marker >= 0);
+	CHECK(close(marker) == 0);
 	mach_port_name_t unused;
 	CHECK(receive_notification(
 			      reply, MACH_NOTIFY_SEND_ONCE, ANSWER_MS, &unused)
 			== MACH_MSG_SUCCESS);
 	CHECK(type_of(port) == MACH_PORT_TYPE_DEAD_NAME);
 	CHECK(bootstrap_call(LOOK_UP, LOST_NAME) == MACH_PORT_NULL);
-}
-
-static bool
-is_broker_socket(int fd)
-{
-	int type;
-	socklen_t length = sizeof(type);
-	return getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &length) == 0
-			&& type == SOCK_SEQPACKET;
 }
 
 static volatile sig_atomic_t signalled;
@@ -2463,6 +2451,7 @@ check_transport(void)
 	check_memory_entry(port);
 	check_descriptors_wait(peer, port);
 	look_up_after_dup2_over_low_fds();
+	work_after_dup2_over_every_fd();
 
 	send_quit(port);
 	int status = reap(peer);
@@ -2496,6 +2485,53 @@ look_up_after_dup2_over_low_fds(void)
 	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 }
 
+static void
+work_after_dup2_over_every_fd(void)
+{
+	pid_t pid = fork();
+	CHECK(pid >= 0);
+	if (pid == 0) {
+		alarm(30);
+		semaphore_t before;
+		CHECK(semaphore_create(mach_task_self(), &before,
+				      SYNC_POLICY_FIFO, 0)
+				== KERN_SUCCESS);
+		int pipe_fds[2];
+		CHECK(pipe(pipe_fds) == 0);
+		CHECK(dup2(pipe_fds[1], 1000) == 1000);
+		for (int fd = 3; fd < 1000; fd++) {
+			if (fd != pipe_fds[0]) {
+				CHECK(dup2(1000, fd) == fd);
+			}
+		}
+		CHECK(bootstrap_call(LOOK_UP, IDLE_SERVICE_NAME)
+				!= MACH_PORT_NULL);
+		CHECK(semaphore_signal(before) == KERN_SUCCESS);
+		CHECK(semaphore_wait(before) == KERN_SUCCESS);
+		semaphore_t after;
+		CHECK(semaphore_create(mach_task_self(), &after,
+				      SYNC_POLICY_FIFO, 1)
+				== KERN_SUCCESS);
+		CHECK(semaphore_wait(after) == KERN_SUCCESS);
+		mach_vm_address_t address = (mach_vm_address_t)&address;
+		mach_vm_size_t size = 0;
+		vm_region_basic_info_data_64_t info;
+		mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+		mach_port_t object = MACH_PORT_NULL;
+		CHECK(mach_vm_region(mach_task_self(), &address, &size,
+				      VM_REGION_BASIC_INFO_64,
+				      (vm_region_info_t)&info, &count, &object)
+				== KERN_SUCCESS);
+		CHECK(write(700, "x", 1) == 1);
+		char byte = 0;
+		CHECK(read(pipe_fds[0], &byte, 1) == 1 && byte == 'x');
+		_exit(0);
+	}
+	int status;
+	waitpid(pid, &status, 0);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -2516,7 +2552,6 @@ main(int argc, char *argv[])
 	}
 	program = argv[0];
 	check_exec();
-	check_lost_connection();
 	check_blocked_signals();
 
 	pid_t pid = fork();
@@ -2555,6 +2590,7 @@ main(int argc, char *argv[])
 	job_is_not_launchd();
 	start_at_the_prompt();
 	start_at_login_and_on_demand();
+	check_lost_connection();
 	return 0;
 }
 

@@ -40,6 +40,7 @@
 #include <unistd.h>
 
 #include "bsd/boot_state.h"
+#include "bsd/process.h"
 #include "sysroot.h"
 
 static void
@@ -145,13 +146,13 @@ open_file(const char *path)
 {
 	int fd = open(path, O_RDWR | O_CLOEXEC);
 	if (fd != -1 || errno != ENOENT) {
-		return fd;
+		return limbo_fd_high(fd);
 	}
 	fd = open(path, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
 	if (fd == -1 && errno == EEXIST) {
 		fd = open(path, O_RDWR | O_CLOEXEC);
 	}
-	return fd;
+	return limbo_fd_high(fd);
 }
 
 void

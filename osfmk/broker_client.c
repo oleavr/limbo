@@ -43,11 +43,13 @@
 
 #include "broker.h"
 #include "broker_client.h"
+#include "bsd/process.h"
 #include "ipc.h"
 #include "launchd.h"
 #include "thread.h"
 
 static void connect_to_broker(const char *path);
+static void own_frame_fds(struct broker_wire_frame *frame);
 static void *read_until_end(void *user);
 static void *read_frames(void *user);
 static void dispatch_frame(const struct broker_frame *header,
@@ -121,19 +123,6 @@ broker_client_available(void)
 	return broker_fd != -1;
 }
 
-bool
-broker_client_owns_fd(int fd)
-{
-	return fd != -1 && fd == broker_fd;
-}
-
-void
-broker_client_fd_moved(int from, int to)
-{
-	if (from != -1 && broker_fd == from) {
-		broker_fd = to;
-	}
-}
 
 uint32_t
 broker_client_guest_id(void)
@@ -193,6 +182,7 @@ broker_client_receive_frame(int fd, struct broker_wire_ahead *ahead,
 	if (received != 1) {
 		return received;
 	}
+	own_frame_fds(frame);
 	header->type = frame->type & ~BROKER_FRAME_OOL;
 	header->length = frame->length;
 	*lost = frame->lost
@@ -214,7 +204,7 @@ static int
 duplicate_fds(const int *fds, size_t fd_count, int *copies)
 {
 	for (size_t i = 0; i != fd_count; i++) {
-		copies[i] = fcntl(fds[i], F_DUPFD_CLOEXEC, 0);
+		copies[i] = limbo_fd_copy(fds[i]);
 		if (copies[i] == -1) {
 			int error = errno;
 			while (i-- != 0) {
@@ -383,16 +373,18 @@ broker_client_send(uint64_t dest_global_id, const void *blob, uint32_t length,
 }
 
 static void
+own_frame_fds(struct broker_wire_frame *frame)
+{
+	for (size_t i = 0; i < frame->fd_count; i++) {
+		frame->fds[i] = limbo_fd_high(frame->fds[i]);
+	}
+}
+
+static void
 connect_to_broker(const char *path)
 {
-	broker_fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
-	if (broker_fd != -1 && broker_fd < 512) {
-		int high = fcntl(broker_fd, F_DUPFD_CLOEXEC, 512);
-		if (high != -1) {
-			close(broker_fd);
-			broker_fd = high;
-		}
-	}
+	broker_fd = limbo_fd_high(
+			socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0));
 	struct sockaddr_un addr = { .sun_family = AF_UNIX };
 	strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
 	if (connect(broker_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
@@ -451,6 +443,7 @@ read_frames(void *user)
 		if (received == 0) {
 			continue;
 		}
+		own_frame_fds(frame);
 
 		struct broker_frame header = {
 				.type = frame->type & ~BROKER_FRAME_OOL,
