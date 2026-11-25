@@ -1,5 +1,6 @@
 /*
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -25,19 +26,37 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <errno.h>
 #include <fcntl.h>
+#include <libproc.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
+#include <mach/mach.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include "check.h"
 
 extern char **environ;
+
+pid_t responsibility_get_pid_responsible_for_pid(pid_t pid);
+
+typedef struct responsibility_identity *responsibility_identity_t;
+
+responsibility_identity_t responsibility_get_attribution_for_audittoken(
+		audit_token_t *token, int flags);
+const char *responsibility_identity_get_binary_path(
+		responsibility_identity_t identity);
+const void *responsibility_identity_get_binary_entitlement_data(
+		responsibility_identity_t identity, size_t *length);
+void responsibility_identity_release(responsibility_identity_t identity);
+int responsibility_identity_open_binary_fd(
+		responsibility_identity_t identity, int flags);
 
 static char self[PATH_MAX];
 
@@ -56,6 +75,42 @@ main(int argc, char *argv[])
 
 	uint32_t size = sizeof(self);
 	CHECK(_NSGetExecutablePath(self, &size) == 0);
+
+#ifdef __arm64__
+	audit_token_t token;
+	mach_msg_type_number_t count = TASK_AUDIT_TOKEN_COUNT;
+	CHECK(task_info(mach_task_self(), TASK_AUDIT_TOKEN, (task_info_t)&token,
+			      &count)
+			== KERN_SUCCESS);
+	responsibility_identity_t identity
+			= responsibility_get_attribution_for_audittoken(
+					&token, 0);
+	CHECK(identity != NULL);
+	pid_t responsible_pid
+			= responsibility_get_pid_responsible_for_pid(getpid());
+	char responsible[PROC_PIDPATHINFO_MAXSIZE];
+	CHECK(proc_pidpath(responsible_pid, responsible, sizeof(responsible))
+			> 0);
+	const char *binary = responsibility_identity_get_binary_path(identity);
+	CHECK(binary != NULL && strcmp(binary, responsible) == 0);
+	size_t entitlements_length = 1;
+	responsibility_identity_get_binary_entitlement_data(
+			identity, &entitlements_length);
+	CHECK(responsible_pid != getpid() || entitlements_length == 0);
+	errno = 0;
+	int binary_fd = responsibility_identity_open_binary_fd(
+			identity, O_RDONLY);
+	CHECK(binary_fd >= 0 || errno != ENOTSUP);
+	if (binary_fd >= 0) {
+		struct stat by_id, by_path;
+		CHECK(fstat(binary_fd, &by_id) == 0
+				&& stat(self, &by_path) == 0);
+		CHECK(by_id.st_ino == by_path.st_ino
+				&& by_id.st_dev == by_path.st_dev);
+		close(binary_fd);
+	}
+	responsibility_identity_release(identity);
+#endif
 
 	int fds[2];
 	CHECK(pipe(fds) == 0);

@@ -40,9 +40,12 @@
 #include "bsd/process.h"
 #include "bsd/responsibility.h"
 #include "bsd/sandbox_profile.h"
+#include "codesign.h"
 #include "fs/device.h"
+#include "fs/fileid.h"
 #include "handler.h"
 #include "mac.h"
+#include "osfmk/task.h"
 #include "sha.h"
 #include "sysroot.h"
 #include "trace.h"
@@ -169,6 +172,211 @@ quarantine_responsible_for_pid(
 	return 0;
 }
 
+struct quarantine_responsible_args {
+	uint64_t pid;
+	uint64_t pidversion;
+	audit_token_t *responsible;
+	uint64_t *path_length;
+	char *path;
+	uint64_t *offset;
+	uint64_t *team_id_length;
+	char *team_id;
+	uint64_t *signing_id_length;
+	char *signing_id;
+	uint8_t *uuid;
+	uint64_t *flags;
+	uint64_t *entitlements_length;
+	void *entitlements;
+	uint64_t *hosted_path_length;
+	char *hosted_path;
+	uint8_t *cdhash;
+	uint32_t *platform;
+	uint32_t *sdk;
+	uint64_t *csflags;
+	uint32_t *fsid;
+	uint64_t *file_id;
+	uint64_t *hosted_team_id_length;
+	char *hosted_team_id;
+	uint8_t *file_flags;
+};
+
+#define QUARANTINE_RESPONSIBLE   182
+#define CS_OPS_STATUS            0
+#define CS_OPS_CDHASH            5
+#define CS_OPS_PIDOFFSET         6
+#define CS_OPS_ENTITLEMENTS_BLOB 7
+#define CS_OPS_IDENTITY          11
+#define CS_OPS_TEAMID            14
+#define CS_PLATFORM_BINARY       0x04000000
+#define CS_BLOB_HEADER           8
+
+static int32_t responsible_pid(int32_t pid);
+static void responsible_string(
+		const char *string, char *buffer, uint64_t *length);
+static const char *responsible_signature_string(
+		int32_t pid, uint32_t ops, char *buffer, size_t size);
+static int responsible_entitlements(
+		int32_t pid, void *entitlements, uint64_t *length);
+
+static int
+quarantine_responsible(const struct quarantine_responsible_args *args)
+{
+	if (args == NULL) {
+		return _EFAULT;
+	}
+	int32_t responsible = responsible_pid((int32_t)args->pid);
+	if (args->responsible != NULL) {
+		memset(args->responsible, 0, sizeof(*args->responsible));
+		task_audit_token_of_pid(responsible, args->responsible);
+		args->responsible->val[7] = responsible == (int32_t)args->pid
+				? (uint32_t)args->pidversion
+				: 10;
+		if (args->path_length != NULL) {
+			*args->path_length = 0;
+		}
+		return 0;
+	}
+
+	char host[PATH_MAX];
+	const char *path = process_executable_path(responsible, host)
+			? sysroot_guest_path(host)
+			: NULL;
+	responsible_string(path, args->path, args->path_length);
+
+	char string[CS_BLOB_HEADER + 1024];
+	responsible_string(
+			responsible_signature_string(responsible, CS_OPS_TEAMID,
+					string, sizeof(string)),
+			args->team_id, args->team_id_length);
+	responsible_string(responsible_signature_string(responsible,
+					   CS_OPS_IDENTITY, string,
+					   sizeof(string)),
+			args->signing_id, args->signing_id_length);
+	responsible_string(NULL, args->hosted_path, args->hosted_path_length);
+	responsible_string(NULL, args->hosted_team_id,
+			args->hosted_team_id_length);
+
+	uint32_t status = 0;
+	codesign_ops(responsible, CS_OPS_STATUS, &status, sizeof(status));
+	if (args->flags != NULL) {
+		*args->flags = (status & CS_PLATFORM_BINARY) ? 1 : 0;
+	}
+	if (args->csflags != NULL) {
+		*args->csflags = status;
+	}
+	int binary = path != NULL ? open(host, O_RDONLY | O_CLOEXEC) : -1;
+	struct stat file;
+	if (binary >= 0 && fstat(binary, &file) == 0) {
+		uint64_t id = sysroot_file_id(file.st_dev, file.st_ino);
+		fileid_remember(id, path);
+		if (args->fsid != NULL) {
+			*args->fsid = (uint32_t)darwin_fsid(
+					sysroot_device(file.st_dev),
+					sysroot_root_device(),
+					sysroot_fd_on_data_volume(binary));
+		}
+		if (args->file_id != NULL) {
+			*args->file_id = id;
+		}
+		if (args->file_flags != NULL) {
+			*args->file_flags = 1;
+		}
+	}
+	if (binary >= 0) {
+		close(binary);
+	}
+	if (args->offset != NULL) {
+		uint64_t offset = 0;
+		codesign_ops(responsible, CS_OPS_PIDOFFSET, &offset,
+				sizeof(offset));
+		*args->offset = offset;
+	}
+	if (args->cdhash != NULL) {
+		uint8_t hash[20] = {0};
+		codesign_ops(responsible, CS_OPS_CDHASH, hash, sizeof(hash));
+		memset(args->cdhash, 0, 32);
+		memcpy(args->cdhash, hash, sizeof(hash));
+	}
+	if (args->platform != NULL) {
+		*args->platform = codesign_platform(responsible);
+	}
+	if (args->entitlements_length == NULL) {
+		return 0;
+	}
+	return responsible_entitlements(responsible, args->entitlements,
+			args->entitlements_length);
+}
+
+static int32_t
+responsible_pid(int32_t pid)
+{
+	struct process process;
+	return process_lookup(pid, &process) == 0 ? responsibility_of(&process)
+						  : pid;
+}
+
+static void
+responsible_string(const char *string, char *buffer, uint64_t *length)
+{
+	if (length == NULL) {
+		return;
+	}
+	size_t size = string != NULL ? strlen(string) + 1 : 0;
+	if (buffer == NULL || size == 0 || size > *length) {
+		*length = 0;
+		return;
+	}
+	memcpy(buffer, string, size);
+	*length = size;
+}
+
+static const char *
+responsible_signature_string(
+		int32_t pid, uint32_t ops, char *buffer, size_t size)
+{
+	if (codesign_ops(pid, ops, buffer, size) != 0) {
+		return NULL;
+	}
+	buffer[size - 1] = '\0';
+	return buffer + CS_BLOB_HEADER;
+}
+
+static int
+responsible_entitlements(int32_t pid, void *entitlements, uint64_t *length)
+{
+	uint8_t header[CS_BLOB_HEADER];
+	if (codesign_ops(pid, CS_OPS_ENTITLEMENTS_BLOB, header, sizeof(header))
+			!= _ERANGE) {
+		*length = 0;
+		return 0;
+	}
+	uint32_t blob_length = (uint32_t)header[4] << 24
+			| (uint32_t)header[5] << 16 | (uint32_t)header[6] << 8
+			| header[7];
+	if (blob_length <= CS_BLOB_HEADER) {
+		*length = 0;
+		return 0;
+	}
+	uint64_t needed = blob_length - CS_BLOB_HEADER;
+	if (entitlements == NULL || *length < needed) {
+		*length = needed;
+		return _ERANGE;
+	}
+	uint8_t *blob = malloc(blob_length);
+	if (blob == NULL
+			|| codesign_ops(pid, CS_OPS_ENTITLEMENTS_BLOB, blob,
+					   blob_length)
+					!= 0) {
+		free(blob);
+		*length = 0;
+		return 0;
+	}
+	memcpy(entitlements, blob + CS_BLOB_HEADER, needed);
+	*length = needed;
+	free(blob);
+	return 0;
+}
+
 static int
 quarantine_handle_syscall(int call, void *arg)
 {
@@ -182,6 +390,8 @@ quarantine_handle_syscall(int call, void *arg)
 		return 0;
 	case QUARANTINE_RESPONSIBLE_FOR_PID:
 		return quarantine_responsible_for_pid(arg);
+	case QUARANTINE_RESPONSIBLE:
+		return quarantine_responsible(arg);
 	default:
 		unimplemented();
 	}
