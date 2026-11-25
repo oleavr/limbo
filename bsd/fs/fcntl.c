@@ -362,7 +362,7 @@ sys_sys_fcntl(int fd, int cmd, long arg)
 static int
 path_package_component(const char *path)
 {
-	if (path[0] != '/') {
+	if (path == NULL || path[0] != '/') {
 		return _EINVAL;
 	}
 	int component = 0;
