@@ -3128,18 +3128,30 @@ sys_shmget(void *key, size_t size, int shmflg)
 	unimplemented();
 }
 
+static int host_ipc_name(const char *name, char *host, size_t size);
+
 int
 sys_shm_open(const char *name, int oflag, int mode)
 {
 	trace_string(name);
-	return errno_map(shm_open(name, open_flags(oflag), mode));
+	char host[NAME_MAX];
+	int err = host_ipc_name(name, host, sizeof(host));
+	if (err != 0) {
+		return err;
+	}
+	return errno_map(shm_open(host, open_flags(oflag), mode));
 }
 
 int
 sys_shm_unlink(const char *name)
 {
 	trace_string(name);
-	return errno_map(shm_unlink(name));
+	char host[NAME_MAX];
+	int err = host_ipc_name(name, host, sizeof(host));
+	if (err != 0) {
+		return err;
+	}
+	return errno_map(shm_unlink(host));
 }
 
 #define SEMAPHORE_MAX 1024
@@ -3153,7 +3165,12 @@ sys_sem_open(const char *name, int oflag, int mode, int value)
 	mode_t readers = (mode_t)mode & 0444;
 	mode_t host_mode = readers | readers >> 1 | 0600;
 	trace_string(name);
-	sem_t *sem = sem_open(name, open_flags(oflag) & (O_CREAT | O_EXCL),
+	char host[NAME_MAX - 4];
+	int err = host_ipc_name(name, host, sizeof(host));
+	if (err != 0) {
+		return (user_addr_t)(intptr_t)err;
+	}
+	sem_t *sem = sem_open(host, open_flags(oflag) & (O_CREAT | O_EXCL),
 			host_mode, (unsigned int)value);
 	if (sem == SEM_FAILED) {
 		return (user_addr_t)(intptr_t)err_map(errno);
@@ -3195,7 +3212,25 @@ int
 sys_sem_unlink(const char *name)
 {
 	trace_string(name);
-	return errno_map(sem_unlink(name));
+	char host[NAME_MAX - 4];
+	int err = host_ipc_name(name, host, sizeof(host));
+	if (err != 0) {
+		return err;
+	}
+	return errno_map(sem_unlink(host));
+}
+
+static int
+host_ipc_name(const char *name, char *host, size_t size)
+{
+	while (*name == '/') {
+		name++;
+	}
+	int n = snprintf(host, size, "/limbo.%s", name);
+	if (n < 0 || (size_t)n >= size) {
+		return _ENAMETOOLONG;
+	}
+	return 0;
 }
 
 int
