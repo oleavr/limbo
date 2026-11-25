@@ -56,6 +56,7 @@
 #include "launchd_engine.h"
 #include "osfmk/launchd_jobs.h"
 #include "plist.h"
+#include "sysroot.h"
 
 #define DEFAULT_THROTTLE   10
 #define OTHER_PERSONA_TYPE 6
@@ -2137,7 +2138,8 @@ start(struct job *job)
 						|| setuid(uid) != 0)) {
 			_exit(126);
 		}
-		if (chdir("/") != 0) {
+		char root[PATH_MAX];
+		if (chdir(sysroot_host_path("/", 0, root)) != 0) {
 			_exit(126);
 		}
 		syscall(SYS_execveat, limbo_fd, "", argv, env, AT_EMPTY_PATH);
