@@ -492,6 +492,9 @@ is_own(const char *variable)
 {
 	return strncmp(variable, SANDBOX_VARIABLE "=", sizeof(SANDBOX_VARIABLE))
 			== 0
+			|| strncmp(variable, EXEC_PATH_VARIABLE "=",
+					   sizeof(EXEC_PATH_VARIABLE))
+			== 0
 			|| responsibility_names(variable);
 }
 
