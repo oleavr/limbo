@@ -295,6 +295,13 @@ broker_client_hold(const char *name)
 }
 
 void
+broker_client_jetsam_priority(int32_t pid, int32_t priority)
+{
+	struct broker_jetsam_priority jetsam = {pid, priority};
+	send_frame(BROKER_JETSAM_PRIORITY, &jetsam, sizeof(jetsam));
+}
+
+void
 broker_client_submit_service(const char *bundle)
 {
 	uint64_t port = broker_client_launchd_port();

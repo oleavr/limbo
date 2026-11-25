@@ -56,6 +56,7 @@
 #include <unistd.h>
 
 #include "broker.h"
+#include "broker_jetsam.h"
 #include "osfmk/ipc_remote.h"
 
 #define CONNECTION_FDS  (2 * BROKER_FDS_MAX)
@@ -84,6 +85,7 @@ union broker_request {
 	struct broker_task_for_pid task_for_pid;
 	struct broker_hold hold;
 	struct broker_launchd_port launchd_port;
+	struct broker_jetsam_priority jetsam;
 };
 
 struct held_send {
@@ -274,6 +276,7 @@ main(int argc, char *argv[])
 		snprintf(socket_path, sizeof(socket_path), "%s", path);
 	}
 	setenv(LIMBO_BROKER_SOCKET_ENV, socket_path, 1);
+	jetsam_start();
 	start_launchd(argc > 3 ? argv[3] : NULL, control_fd);
 	run(listen_fd);
 	return exit_status;
@@ -876,6 +879,17 @@ handle_guest(int fd)
 	}
 	case BROKER_LAUNCHD_PORT:
 		launchd_port_told(conn, payload, length);
+		break;
+	case BROKER_JETSAM_PRIORITY:
+		if (conn->peer_uid == 0
+				&& length >= sizeof(struct
+						   broker_jetsam_priority)) {
+			const struct broker_jetsam_priority *jetsam
+					= (const struct broker_jetsam_priority
+									*)
+							payload;
+			jetsam_set_priority(jetsam->pid, jetsam->priority);
+		}
 		break;
 	}
 	free(payload);

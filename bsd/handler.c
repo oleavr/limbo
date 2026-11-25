@@ -4564,7 +4564,23 @@ int
 sys_memorystatus_control(uint32_t command, int32_t pid, uint32_t flags,
 		user_addr_t buffer, size_t buffersize)
 {
-	enum { MEMORYSTATUS_CMD_GET_MEMLIMIT_PROPERTIES = 8 };
+	enum {
+		MEMORYSTATUS_CMD_SET_PRIORITY_PROPERTIES = 2,
+		MEMORYSTATUS_CMD_GET_MEMLIMIT_PROPERTIES = 8,
+	};
+	if (command == MEMORYSTATUS_CMD_SET_PRIORITY_PROPERTIES) {
+		if (geteuid() != 0) {
+			return _EPERM;
+		}
+		if (buffer == NULL || buffersize < sizeof(int32_t)) {
+			return _EINVAL;
+		}
+		int32_t priority;
+		memcpy(&priority, buffer, sizeof(priority));
+		broker_client_jetsam_priority(
+				pid != 0 ? pid : getpid(), priority);
+		return 0;
+	}
 	if (buffer != NULL) {
 		memset(buffer, 0, buffersize);
 	}
