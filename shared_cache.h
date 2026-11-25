@@ -190,6 +190,8 @@ extern void *shared_cache_start;
 extern int shared_cache_cpu_subtype;
 
 int shared_cache_mmap(void);
+void shared_cache_match_dyld(const uint8_t *dyld);
+
 #ifndef __x86_64__
 void patch_thread_self_reads(uint64_t address, uint64_t size);
 #endif

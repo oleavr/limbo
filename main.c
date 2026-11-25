@@ -255,6 +255,7 @@ run(int argc, char *argv[], char *envp[])
 			return 1;
 		}
 		dyld_note_all_image_info(dyld_base);
+		shared_cache_match_dyld(dyld_base);
 	} else if (entry == 0) {
 		fprintf(stderr, "limbo: binary has no entry point\n");
 		return 1;
