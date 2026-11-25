@@ -69,6 +69,7 @@ typedef enum {
 struct ipc_kmsg {
 	struct ipc_kmsg *next;
 	struct ipc_sender sender;
+	mach_msg_return_t body_error;
 	mach_msg_header_t header[];
 };
 
@@ -319,7 +320,7 @@ static bool remote_right_fits(
 static void import_body_ports(mach_msg_header_t *header,
 		const uint64_t *global_ids, const uint8_t *data, const int *fds,
 		size_t fd_count, uint32_t sender_guest_id,
-		uint32_t meant_guest_id);
+		uint32_t meant_guest_id, mach_msg_return_t *body_error);
 static mach_port_name_t import_body_port(uint64_t global_id,
 		mach_msg_type_name_t type, const int **fds,
 		const uint8_t **data, const int *all_fds, size_t fd_count,
@@ -856,6 +857,7 @@ send(mach_msg_header_t *msg, mach_msg_size_t size, ipc_side_t sender,
 	struct ipc_kmsg *kmsg = malloc(
 			sizeof(*kmsg) + size + sizeof(mach_msg_max_trailer_t));
 	kmsg->sender = sender_identity(sender_pid);
+	kmsg->body_error = MACH_MSG_SUCCESS;
 	memcpy(kmsg->header, msg, size);
 	kmsg->header->msgh_size = size;
 	if (!has_valid_descriptors(kmsg->header)) {
@@ -2168,6 +2170,7 @@ deliver(uint64_t dest_global_id, const struct broker_sender *sender,
 			+ sizeof(mach_msg_max_trailer_t));
 	remember_guest_pid(rh->sender_guest_id, rh->sender.pid);
 	kmsg->sender = rh->sender;
+	kmsg->body_error = MACH_MSG_SUCCESS;
 	if (sender != NULL && sender->pid > 0) {
 		kmsg->sender.pid = sender->pid;
 		kmsg->sender.uid = kmsg->sender.euid = sender->uid;
@@ -2202,7 +2205,7 @@ deliver(uint64_t dest_global_id, const struct broker_sender *sender,
 	import_body_ports(kmsg->header, global_ids,
 			(const uint8_t *)&global_ids[rh->descriptor_count], fds,
 			fd_count, rh->sender_guest_id,
-			broker_guest_of(dest_global_id));
+			broker_guest_of(dest_global_id), &kmsg->body_error);
 
 	if (dest == NULL || lost) {
 		destroy_rights(kmsg->header);
@@ -2449,7 +2452,8 @@ remote_right_fits(uint64_t global_id, mach_msg_type_name_t disposition)
 static void
 import_body_ports(mach_msg_header_t *header, const uint64_t *global_ids,
 		const uint8_t *data, const int *fds, size_t fd_count,
-		uint32_t sender_guest_id, uint32_t meant_guest_id)
+		uint32_t sender_guest_id, uint32_t meant_guest_id,
+		mach_msg_return_t *body_error)
 {
 	const int *all_fds = fds;
 	if (!(header->msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
@@ -2478,6 +2482,10 @@ import_body_ports(mach_msg_header_t *header, const uint64_t *global_ids,
 					= (mach_msg_ool_descriptor64_t *)cursor;
 			d->address = (uint64_t)copy_ool(data, d->size);
 			data += d->size;
+			if (d->address == 0 && d->size != 0) {
+				d->size = 0;
+				*body_error = MACH_MSG_VM_SPACE;
+			}
 			cursor += sizeof(*d);
 		} else if (descriptor->type == MACH_MSG_OOL_PORTS_DESCRIPTOR) {
 			mach_msg_ool_ports_descriptor64_t *d
@@ -2486,17 +2494,30 @@ import_body_ports(mach_msg_header_t *header, const uint64_t *global_ids,
 			mach_msg_type_name_t type
 					= received_type(d->disposition);
 			mach_vm_address_t address = 0;
-			if (d->count != 0) {
-				_kernelrpc_mach_vm_allocate(0, &address,
-						d->count * sizeof(mach_port_name_t),
-						VM_FLAGS_ANYWHERE);
+			if (d->count != 0
+					&& _kernelrpc_mach_vm_allocate(0,
+							   &address,
+							   d->count * sizeof(mach_port_name_t),
+							   VM_FLAGS_ANYWHERE)
+							!= KERN_SUCCESS) {
+				address = 0;
+				*body_error = MACH_MSG_VM_SPACE;
 			}
 			mach_port_name_t *names = (mach_port_name_t *)address;
 			for (mach_msg_size_t j = 0; j < d->count; j++) {
-				names[j] = import_body_port(global_ids[count++],
-						type, &fds, &data, all_fds,
-						fd_count, sender_guest_id,
+				mach_port_name_t name = import_body_port(
+						global_ids[count++], type, &fds,
+						&data, all_fds, fd_count,
+						sender_guest_id,
 						meant_guest_id);
+				if (names != NULL) {
+					names[j] = name;
+				} else {
+					destroy_right(name, type);
+				}
+			}
+			if (names == NULL) {
+				d->count = 0;
 			}
 			d->address = address;
 			d->disposition = type;
@@ -3409,7 +3430,10 @@ copy_ool(const void *address, mach_msg_size_t size)
 		return NULL;
 	}
 	mach_vm_address_t copy = 0;
-	_kernelrpc_mach_vm_allocate(0, &copy, size, VM_FLAGS_ANYWHERE);
+	if (_kernelrpc_mach_vm_allocate(0, &copy, size, VM_FLAGS_ANYWHERE)
+			!= KERN_SUCCESS) {
+		return NULL;
+	}
 	memcpy((void *)copy, address, size);
 	return (void *)copy;
 }
@@ -3627,7 +3651,9 @@ receive(mach_msg_header_t *msg, mach_msg_option64_t options,
 						+ size);
 		memcpy(trailer, (uint8_t *)kmsg->header + size, trailer_size);
 		trailer->msgh_trailer_size = trailer_size;
-		mr = MACH_MSG_SUCCESS;
+		mr = kmsg->body_error != MACH_MSG_SUCCESS
+				? MACH_RCV_BODY_ERROR | kmsg->body_error
+				: MACH_MSG_SUCCESS;
 	}
 	free(kmsg);
 	return mr;
@@ -4095,6 +4121,7 @@ deliver_notification(struct ipc_port *port, const mach_msg_header_t *msg)
 	struct ipc_kmsg *kmsg = malloc(sizeof(*kmsg) + msg->msgh_size
 			+ sizeof(mach_msg_max_trailer_t));
 	kmsg->sender = (struct ipc_sender){0};
+	kmsg->body_error = MACH_MSG_SUCCESS;
 	memcpy(kmsg->header, msg, msg->msgh_size);
 	kmsg->header->msgh_bits = MACH_MSGH_BITS_SET(0,
 			MACH_MSG_TYPE_PORT_SEND_ONCE, 0,
