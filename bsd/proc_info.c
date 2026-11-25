@@ -67,6 +67,7 @@
 #define PROC_INFO_CALL_DIRTYCONTROL    0x8
 #define PROC_INFO_CALL_PIDRUSAGE       0x9
 #define PROC_INFO_CALL_PIDORIGINATORINFO 0xa
+#define PROC_INFO_CALL_CANUSEFGHW        0xc
 #define PROC_INFO_CALL_SET_DYLD_IMAGES 0xf
 
 #define PROC_SELFSET_THREADNAME 2
@@ -78,6 +79,9 @@
 #define PROC_PIDORIGINATOR_UUID_SIZE     16
 #define PROC_PIDORIGINATOR_BGSTATE_SIZE  4
 #define PROC_PIDORIGINATOR_PID_UUID_SIZE 48
+
+#define PROC_FGHW_DAEMON_NO_VOUCHER 13
+#define PROC_FGHW_ERROR             99
 
 #define PROC_ALL_PIDS  1
 #define PROC_UID_ONLY  4
@@ -515,6 +519,8 @@ static int listpids(uint32_t type, uint32_t typeinfo, user_addr_t buffer,
 static bool status_field(pid_t pid, const char *field, int index,
 		unsigned long *value);
 static uint64_t wakeups(int32_t pid);
+static int can_use_foreground_hw(
+		int32_t pid, user_addr_t reason, int32_t reasonsize);
 
 int
 sys_proc_info(int32_t callnum, int32_t pid, uint32_t flavor, uint64_t arg,
@@ -545,6 +551,8 @@ sys_proc_info(int32_t callnum, int32_t pid, uint32_t flavor, uint64_t arg,
 		return pidrusage(pid, flavor, buffer);
 	case PROC_INFO_CALL_PIDORIGINATORINFO:
 		return pidoriginatorinfo(pid, flavor, buffer, buffersize);
+	case PROC_INFO_CALL_CANUSEFGHW:
+		return can_use_foreground_hw(pid, buffer, buffersize);
 	default:
 		unimplemented();
 	}
@@ -1102,6 +1110,27 @@ pidoriginatorinfo(int32_t pid, uint32_t flavor, user_addr_t buffer,
 	uint32_t backgrounded = 0;
 	memcpy(buffer, &backgrounded, sizeof(backgrounded));
 	return size;
+}
+
+static int
+can_use_foreground_hw(int32_t pid, user_addr_t reason, int32_t reasonsize)
+{
+	uint32_t answer = PROC_FGHW_ERROR;
+	int error = 0;
+	struct process process;
+	if (pid <= 0) {
+		error = _EINVAL;
+	} else if (process_lookup(pid, &process)) {
+		error = _ESRCH;
+	} else if (pid != getpid()) {
+		error = geteuid() == 0 ? _EINVAL : _EPERM;
+	} else {
+		answer = PROC_FGHW_DAEMON_NO_VOUCHER;
+	}
+	if (reason != NULL && reasonsize >= (int32_t)sizeof(answer)) {
+		memcpy(reason, &answer, sizeof(answer));
+	}
+	return error;
 }
 
 static int
