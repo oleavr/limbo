@@ -4979,7 +4979,7 @@ sys_stack_snapshot_with_config(int stackshot_config_version,
 int
 sys_microstackshot(user_addr_t tracebuf, uint32_t tracebuf_size, uint32_t flags)
 {
-	unimplemented();
+	return _ENOTSUP;
 }
 
 int
