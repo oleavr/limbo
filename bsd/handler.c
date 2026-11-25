@@ -2694,9 +2694,14 @@ rlimit_nofile_exec_failed(void)
 }
 
 #ifndef __x86_64__
+static void *map_low(size_t len, int prot, int tflags, int fd, off_t pos);
+
 static void *
 map_page_aligned(size_t len, int prot, int tflags, int fd, off_t pos)
 {
+	if (mach_vm_places_low()) {
+		return map_low(len, prot, tflags, fd, pos);
+	}
 	size_t span = ((len + PAGE_MASK) & ~(size_t)PAGE_MASK) + PAGE_SIZE;
 	uint8_t *region = mmap(
 			NULL, span, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
@@ -2717,6 +2722,24 @@ map_page_aligned(size_t len, int prot, int tflags, int fd, off_t pos)
 	}
 	uint8_t *tail = base + (span - PAGE_SIZE);
 	munmap(tail, region + span - tail);
+	return mapped;
+}
+
+static void *
+map_low(size_t len, int prot, int tflags, int fd, off_t pos)
+{
+	size_t span = (len + PAGE_MASK) & ~(size_t)PAGE_MASK;
+	uint8_t *base = mach_vm_reserve_low(span);
+	if (base == MAP_FAILED) {
+		return MAP_FAILED;
+	}
+	void *mapped = mmap(base, len, prot, tflags | MAP_FIXED, fd, pos);
+	if (mapped == MAP_FAILED) {
+		int saved = errno;
+		munmap(base, span);
+		mach_vm_unmapped((mach_vm_address_t)(uintptr_t)base, span);
+		errno = saved;
+	}
 	return mapped;
 }
 #endif

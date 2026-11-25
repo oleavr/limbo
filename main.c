@@ -75,6 +75,7 @@ static void join_job_persona(void);
 static void apply_environment(const char *name, bool overwrite);
 #ifdef __arm64__
 static void reserve_high_address_space(uint64_t limit);
+static uintptr_t image_end(const uint8_t *base);
 #endif
 static uintptr_t build_stack(uint8_t *exe_base, const char *path, int argc,
 		char *argv[], char *envp[]);
@@ -164,6 +165,32 @@ reserve_high_address_space(uint64_t limit)
 		line = *next == '\n' ? next + 1 : next;
 	}
 }
+
+static uintptr_t
+image_end(const uint8_t *base)
+{
+	const struct mach_header_64 *header = (const void *)base;
+	const struct load_command *command = (const void *)(header + 1);
+	uint64_t low = UINT64_MAX, high = 0;
+	for (uint32_t i = 0; i < header->ncmds; i++) {
+		if (command->cmd == LC_SEGMENT_64) {
+			const struct segment_command_64 *segment
+					= (const void *)command;
+			if (segment->vmsize != 0 && segment->initprot != 0) {
+				if (segment->vmaddr < low) {
+					low = segment->vmaddr;
+				}
+				if (segment->vmaddr + segment->vmsize > high) {
+					high = segment->vmaddr
+							+ segment->vmsize;
+				}
+			}
+		}
+		command = (const void *)((const uint8_t *)command
+				+ command->cmdsize);
+	}
+	return high > low ? (uintptr_t)base + (uintptr_t)(high - low) : 0;
+}
 #endif
 
 static int
@@ -225,6 +252,7 @@ run(int argc, char *argv[], char *envp[])
 	if (codesign_embedded()) {
 		reserve_high_address_space(IOS_GUEST_ADDRESS_LIMIT);
 	}
+	mach_vm_set_anywhere_base(image_end(exe_base));
 	/* Leave pointer authentication off, as XNU does for an arm64 process,
 	 * and for an arm64e one too. Linux gives each exec keys of its own, so
 	 * with them on, the shared cache's signed pointers differ in every

@@ -173,6 +173,16 @@ static uint64_t *reclaim_index(size_t offset);
 static uint64_t absolute_per_second(void);
 static uint64_t reclaim_next_deadline(void);
 static void shared_range_drop(struct shared_range **link);
+#ifndef __x86_64__
+static void *place_low(
+		mach_vm_size_t size, mach_vm_offset_t mask, int protection);
+static bool names_supported(void);
+
+static pthread_mutex_t low_lock = PTHREAD_MUTEX_INITIALIZER;
+static uintptr_t anywhere_base = LOW_ANYWHERE_BASE;
+static uintptr_t first_free = LOW_ANYWHERE_BASE;
+#endif
+static uint64_t guest_limit;
 
 kern_return_t
 _kernelrpc_mach_vm_allocate(vm_task_entry_t target, mach_vm_address_t *address,
@@ -212,6 +222,11 @@ map_anonymous(mach_vm_address_t *address, mach_vm_size_t size,
 static void *
 map_aligned(mach_vm_size_t size, mach_vm_offset_t mask, vm_prot_t protection)
 {
+#ifndef __x86_64__
+	if (mach_vm_places_low()) {
+		return place_low(size, mask, protection);
+	}
+#endif
 	mach_vm_size_t padded_size = size + mask + 1;
 #ifdef __x86_64__
 	uint8_t *padded = mmap(NULL, padded_size, protection,
@@ -248,6 +263,104 @@ map_aligned(mach_vm_size_t size, mach_vm_offset_t mask, vm_prot_t protection)
 	}
 	return base;
 }
+
+void
+mach_vm_set_anywhere_base(uintptr_t base)
+{
+#ifndef __x86_64__
+	base = (base + PAGE_MASK) & ~(uintptr_t)PAGE_MASK;
+	pthread_mutex_lock(&low_lock);
+	if (base > anywhere_base) {
+		anywhere_base = base;
+	}
+	if (first_free < anywhere_base) {
+		first_free = anywhere_base;
+	}
+	pthread_mutex_unlock(&low_lock);
+#else
+	(void)base;
+#endif
+}
+
+#ifndef __x86_64__
+bool
+mach_vm_places_low(void)
+{
+	static _Atomic int places = -1;
+	if (places == -1) {
+		struct vma_query query;
+		places = vma_lookup((uintptr_t)&query, false, &query) != -1
+				&& names_supported();
+	}
+	return places == 1;
+}
+
+static bool
+names_supported(void)
+{
+	void *probe = mmap(NULL, PAGE_SIZE, PROT_NONE,
+			MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
+	if (probe == MAP_FAILED) {
+		return false;
+	}
+	bool named = prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME,
+				     (unsigned long)(uintptr_t)probe, PAGE_SIZE,
+				     TAG_NAME)
+			== 0;
+	munmap(probe, PAGE_SIZE);
+	return named;
+}
+
+void *
+mach_vm_reserve_low(size_t size)
+{
+	return place_low((size + PAGE_MASK) & ~(size_t)PAGE_MASK, PAGE_MASK,
+			PROT_NONE);
+}
+
+static void *
+place_low(mach_vm_size_t size, mach_vm_offset_t mask, int protection)
+{
+	int flags = MAP_PRIVATE | MAP_ANON | MAP_NORESERVE
+			| MAP_FIXED_NOREPLACE;
+	mask |= PAGE_MASK;
+	pthread_mutex_lock(&low_lock);
+	uintptr_t at = (first_free + mask) & ~(uintptr_t)mask;
+	bool follows = at == first_free;
+	void *placed = MAP_FAILED;
+	while (placed == MAP_FAILED) {
+		struct vma_query query;
+		int asked = vma_lookup(at, true, &query);
+		if (asked == -1) {
+			errno = ENOMEM;
+			break;
+		}
+		if (at + size < at || at + size > guest_limit) {
+			errno = ENOMEM;
+			break;
+		}
+		if (asked == 1 && query.vma_start < at + size) {
+			follows = follows && query.vma_start <= at;
+			if (follows) {
+				first_free = query.vma_end;
+			}
+			at = (query.vma_end + mask) & ~(uintptr_t)mask;
+			follows = follows && at == first_free;
+			continue;
+		}
+		placed = mmap((void *)at, size, protection, flags, -1, 0);
+		if (placed == MAP_FAILED && errno != EEXIST) {
+			break;
+		}
+		if (placed != MAP_FAILED && follows) {
+			first_free = at + size;
+		}
+	}
+	pthread_mutex_unlock(&low_lock);
+	return placed;
+}
+
+#endif
 
 kern_return_t
 _kernelrpc_mach_vm_deallocate(vm_task_entry_t target, mach_vm_address_t address,
@@ -2428,6 +2541,17 @@ _kernelrpc_mach_vm_reallocate(vm_map_t target_task, mach_vm_address_t src,
 void
 mach_vm_unmapped(mach_vm_address_t address, mach_vm_size_t size)
 {
+#ifndef __x86_64__
+	pthread_mutex_lock(&low_lock);
+	uintptr_t start = (uintptr_t)address & ~(uintptr_t)PAGE_MASK;
+	if (start < anywhere_base) {
+		start = anywhere_base;
+	}
+	if (start < first_free && address + size > start) {
+		first_free = start;
+	}
+	pthread_mutex_unlock(&low_lock);
+#endif
 	pthread_mutex_lock(&shared_ranges_lock);
 	struct shared_range **link = &shared_ranges;
 	while (*link != NULL) {
