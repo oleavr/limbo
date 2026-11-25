@@ -385,8 +385,10 @@ spawn_exec(const char *path, const struct darwin_spawnattr *attrp,
 	const char *host = exec_path(
 			path, argv, buffer, &script_argv, &executable);
 	char **env = exec_environment(envp, executable, told);
+	rlimit_nofile_exec();
 	execve(host, (script_argv != NULL) ? script_argv : argv, env);
 	int err = errno;
+	rlimit_nofile_exec_failed();
 	if (env != envp) {
 		free(env);
 	}

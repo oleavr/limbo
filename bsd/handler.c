@@ -1205,8 +1205,10 @@ sys_execve(char *fname, char **argp, char **envp)
 			fname, argp, buffer, &script_argv, &executable);
 	char **env = exec_environment(
 			envp, executable, RESPONSIBILITY_INHERITED);
+	rlimit_nofile_exec();
 	int result = errno_map(execve(
 			host, (script_argv != NULL) ? script_argv : argp, env));
+	rlimit_nofile_exec_failed();
 	if (env != envp) {
 		free(env);
 	}
@@ -1433,9 +1435,15 @@ itimerval_from_linux(const struct itimerval *from,
 	to->it_value.tv_usec = from->it_value.tv_usec;
 }
 
+static rlim_t started_nofile;
+
 int
 sys_sys_getdtablesize(void)
 {
+	if (started_nofile != 0) {
+		return started_nofile > INT32_MAX ? INT32_MAX
+						  : (int)started_nofile;
+	}
 	return getdtablesize();
 }
 
@@ -2521,6 +2529,9 @@ sys_getrlimit(uint32_t which, void *rlp)
 	if (getrlimit(resource, &limit) == -1) {
 		return err_map(errno);
 	}
+	if (resource == RLIMIT_NOFILE && started_nofile != 0) {
+		limit.rlim_cur = started_nofile;
+	}
 	uint64_t *darwin_limit = rlp;
 	darwin_limit[0] = rlimit_to_darwin(limit.rlim_cur);
 	darwin_limit[1] = rlimit_to_darwin(limit.rlim_max);
@@ -2575,7 +2586,45 @@ sys_setrlimit(uint32_t which, void *rlp)
 			.rlim_cur = rlimit_from_darwin(darwin_limit[0]),
 			.rlim_max = rlimit_from_darwin(darwin_limit[1]),
 	};
-	return errno_map(setrlimit(resource, &limit));
+	if (setrlimit(resource, &limit) == -1) {
+		return err_map(errno);
+	}
+	if (resource == RLIMIT_NOFILE) {
+		started_nofile = 0;
+	}
+	return 0;
+}
+
+void
+rlimit_nofile_start(void)
+{
+	struct rlimit limit;
+	if (getrlimit(RLIMIT_NOFILE, &limit) == 0) {
+		started_nofile = limit.rlim_cur;
+	}
+}
+
+void
+rlimit_nofile_exec(void)
+{
+	struct rlimit limit;
+	if (started_nofile == 0 || getrlimit(RLIMIT_NOFILE, &limit) != 0) {
+		return;
+	}
+	limit.rlim_cur = started_nofile < limit.rlim_max ? started_nofile
+							 : limit.rlim_max;
+	setrlimit(RLIMIT_NOFILE, &limit);
+}
+
+void
+rlimit_nofile_exec_failed(void)
+{
+	struct rlimit limit;
+	if (started_nofile == 0 || getrlimit(RLIMIT_NOFILE, &limit) != 0) {
+		return;
+	}
+	limit.rlim_cur = limit.rlim_max;
+	setrlimit(RLIMIT_NOFILE, &limit);
 }
 
 #ifndef __x86_64__
