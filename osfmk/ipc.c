@@ -2861,6 +2861,13 @@ ipc_remote_guest_gone(uint32_t guest_id)
 	}
 	pthread_mutex_unlock(&lock);
 	flush_notices();
+	for (const struct ipc_kobject_ops *const *ops
+			= __start_limbo_ipc_kobject_ops;
+			ops != __stop_limbo_ipc_kobject_ops; ops++) {
+		if ((*ops)->guest_gone != NULL) {
+			(*ops)->guest_gone(guest_id);
+		}
+	}
 }
 
 void
