@@ -4811,6 +4811,9 @@ sys_proc_trace_log(uint64_t pid, uint64_t uniqueid)
 int
 sys_openbyid_np(user_addr_t fsid, user_addr_t objid, int oflags)
 {
+	if (fsid == NULL || objid == NULL) {
+		return _EINVAL;
+	}
 	uint64_t id;
 	memcpy(&id, objid, sizeof(id));
 	char path[PATH_MAX];
