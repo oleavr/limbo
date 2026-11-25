@@ -4505,7 +4505,9 @@ sys_memorystatus_control(uint32_t command, int32_t pid, uint32_t flags,
 	if (buffer != NULL) {
 		memset(buffer, 0, buffersize);
 	}
-	if (command == MEMORYSTATUS_CMD_GET_MEMLIMIT_PROPERTIES) {
+	if (command == MEMORYSTATUS_CMD_GET_MEMLIMIT_PROPERTIES
+			&& buffer != NULL
+			&& buffersize >= 4 * sizeof(int32_t)) {
 		int32_t *limits = buffer;
 		limits[0] = -1;
 		limits[2] = -1;
