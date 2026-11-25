@@ -83,6 +83,10 @@ static void *map_aligned(mach_vm_size_t size, mach_vm_offset_t mask,
 static kern_return_t copy_checked(void *to, void *from, mach_vm_size_t size);
 static kern_return_t read_remote(mach_port_name_t task,
 		mach_vm_address_t address, mach_vm_size_t size, void *data);
+static kern_return_t remap_remote_copy(mach_vm_address_t *target_address,
+		mach_vm_size_t size, mach_vm_offset_t mask, int flags,
+		mach_port_name_t src_task, mach_vm_address_t src_address,
+		vm_prot_t *cur_protection, vm_prot_t *max_protection);
 static kern_return_t remap_share(mach_vm_address_t *target_address,
 		mach_vm_size_t size, mach_vm_offset_t mask, int flags,
 		mach_vm_address_t src_address);
@@ -512,6 +516,11 @@ _kernelrpc_mach_vm_remap(vm_map_t target_task,
 		vm_prot_t *cur_protection, vm_prot_t *max_protection,
 		vm_inherit_t inheritance)
 {
+	if (ipc_port_is_remote(src_task)) {
+		return remap_remote_copy(target_address, size, mask, flags,
+				src_task, src_address, cur_protection,
+				max_protection);
+	}
 	*cur_protection = region_protection(src_address);
 	*max_protection = VM_PROT_ALL;
 	if (!copy) {
@@ -1650,12 +1659,53 @@ _kernelrpc_mach_vm_remap_new(vm_map_t target_task,
 		vm_prot_t *cur_protection, vm_prot_t *max_protection,
 		vm_inherit_t inheritance)
 {
+	if (ipc_port_is_remote(src_task)) {
+		return remap_remote_copy(target_address, size, mask, flags,
+				src_task, src_address, cur_protection,
+				max_protection);
+	}
 	if (!copy) {
 		unimplemented();
 	}
 
 	return remap_copy(target_address, size, mask, flags, src_address,
 			cur_protection);
+}
+
+static kern_return_t
+remap_remote_copy(mach_vm_address_t *target_address, mach_vm_size_t size,
+		mach_vm_offset_t mask, int flags, mach_port_name_t src_task,
+		mach_vm_address_t src_address, vm_prot_t *cur_protection,
+		vm_prot_t *max_protection)
+{
+	mach_vm_address_t start = src_address & ~(mach_vm_address_t)PAGE_MASK;
+	mach_vm_offset_t lead = src_address - start;
+	mach_vm_size_t length = (lead + size + PAGE_MASK) & ~PAGE_MASK;
+	kern_return_t kr = map_anonymous(target_address, length, mask, flags,
+			VM_PROT_READ | VM_PROT_WRITE);
+	if (kr != KERN_SUCCESS) {
+		return kr;
+	}
+	uint8_t *data = (uint8_t *)(uintptr_t)*target_address;
+	if (read_remote(src_task, start, length, data) != KERN_SUCCESS) {
+		bool any = false;
+		for (mach_vm_size_t at = 0; at < length; at += PAGE_SIZE) {
+			any |= read_remote(src_task, start + at, PAGE_SIZE,
+					       data + at)
+					== KERN_SUCCESS;
+		}
+		if (!any) {
+			_kernelrpc_mach_vm_deallocate(
+					0, *target_address, length);
+			return KERN_INVALID_ADDRESS;
+		}
+	}
+	if (flags & VM_FLAGS_RETURN_DATA_ADDR) {
+		*target_address += lead;
+	}
+	*cur_protection = VM_PROT_READ | VM_PROT_WRITE;
+	*max_protection = VM_PROT_ALL;
+	return KERN_SUCCESS;
 }
 
 #define RECLAIM_LEN_OFFSET       0x10
