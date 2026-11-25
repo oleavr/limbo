@@ -82,6 +82,7 @@ struct ipc_memory_record {
 struct ipc_export;
 
 #define IPC_REMOTE_SEMAPHORE (UINT64_MAX - 3)
+#define IPC_REMOTE_EVENTLINK (UINT64_MAX - 4)
 
 struct ipc_kobject_ops {
 	ipc_kobject_type_t type;
@@ -120,6 +121,7 @@ void *ipc_kobject_lookup(mach_port_name_t name, ipc_kobject_type_t type);
 void *ipc_kobject_lookup_held(mach_port_name_t name, ipc_kobject_type_t type,
 		void (*hold)(void *kobject));
 void ipc_kobject_destroy(mach_port_name_t name);
+void ipc_kobject_fork_child(ipc_kobject_type_t type);
 void *ipc_kobject_detach(mach_port_name_t name, ipc_kobject_type_t type);
 
 bool ipc_port_peek(mach_port_name_t name);

@@ -35,3 +35,4 @@ uint64_t eventlink_wait_until(mach_port_name_t name, uint64_t count,
 		uint64_t deadline, uint32_t clock_id, uint32_t option);
 uint64_t eventlink_signal_wait_until(mach_port_name_t name, uint64_t count,
 		uint64_t deadline, uint32_t clock_id, uint32_t option);
+void eventlink_fork_child(void);
