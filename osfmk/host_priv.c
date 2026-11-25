@@ -47,6 +47,7 @@ static const struct {
 		{"Get Kexts in Collection", "<dict></dict>", kOSReturnSuccess},
 		{"DaemonReady", NULL, kOSReturnSuccess},
 		{"Get Kernel Requests", "<array></array>", kOSReturnSuccess},
+		{"Get Loaded Kext Info", "<dict></dict>", kOSReturnSuccess},
 		{"LoadCodelessKext", NULL, kOSKextReturnUnsupported},
 };
 
