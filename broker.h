@@ -76,6 +76,7 @@ enum broker_frame_type {
 	BROKER_CONTROL_REPLY,
 	BROKER_LAUNCHD_PORT,
 	BROKER_HOLD,
+	BROKER_JETSAM_PRIORITY,
 };
 
 #define BROKER_EXIT_REBOOT       3
@@ -193,6 +194,11 @@ struct broker_launchd_port {
 
 struct broker_hold {
 	char name[LIMBO_BROKER_SERVICE_NAME_MAX];
+};
+
+struct broker_jetsam_priority {
+	int32_t pid;
+	int32_t priority;
 };
 
 struct broker_submit_service {
