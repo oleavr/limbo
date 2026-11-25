@@ -658,6 +658,90 @@ read_remote(mach_port_name_t task, mach_vm_address_t address,
 	return kr;
 }
 
+#define PAGEMAP_ENTRY_PRESENT (1ull << 63)
+#define PAGEMAP_ENTRY_SWAPPED (1ull << 62)
+
+#pragma pack(push, 4)
+
+struct page_range_query_request {
+	mach_msg_header_t header;
+	NDR_record_t ndr;
+	mach_vm_offset_t address;
+	mach_vm_size_t size;
+	mach_vm_address_t dispositions;
+	mach_vm_size_t dispositions_count;
+};
+
+struct page_range_query_reply {
+	mach_msg_header_t header;
+	NDR_record_t ndr;
+	kern_return_t ret_code;
+	mach_vm_size_t dispositions_count;
+};
+
+#pragma pack(pop)
+
+bool
+mach_vm_page_range_query_request_answer(
+		mach_msg_header_t *msg, mach_msg_size_t size, int32_t pid)
+{
+	struct page_range_query_request *request = (void *)msg;
+	if (size < sizeof(*request)
+			|| request->header.msgh_local_port == MACH_PORT_NULL) {
+		return false;
+	}
+	char path[64];
+	snprintf(path, sizeof(path), "/proc/%d/pagemap", (int)pid);
+	int fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd == -1) {
+		return false;
+	}
+	mach_vm_address_t start
+			= request->address & ~(mach_vm_address_t)PAGE_MASK;
+	mach_vm_size_t pages
+			= (request->address + request->size - start + PAGE_MASK)
+			/ PAGE_SIZE;
+	if (pages > request->dispositions_count) {
+		pages = request->dispositions_count;
+	}
+	size_t host_page = getpagesize();
+	size_t per_page = PAGE_SIZE / host_page;
+	int *out = (int *)(uintptr_t)request->dispositions;
+	uint64_t entries[PAGE_SIZE / 4096];
+	for (mach_vm_size_t i = 0; i < pages; i++) {
+		int disposition = 0;
+		off_t offset = (off_t)((start + i * PAGE_SIZE) / host_page)
+				* (off_t)sizeof(uint64_t);
+		ssize_t got = pread(fd, entries, per_page * sizeof(uint64_t),
+				offset);
+		for (ssize_t j = 0; j < got / (ssize_t)sizeof(uint64_t); j++) {
+			if (entries[j] & PAGEMAP_ENTRY_PRESENT) {
+				disposition |= VM_PAGE_QUERY_PAGE_PRESENT;
+			} else if (entries[j] & PAGEMAP_ENTRY_SWAPPED) {
+				disposition |= VM_PAGE_QUERY_PAGE_PAGED_OUT;
+			}
+		}
+		out[i] = disposition;
+	}
+	close(fd);
+	struct page_range_query_reply reply = {
+			.header = {
+					.msgh_bits = MACH_MSGH_BITS_SET(
+							MACH_MSGH_BITS_LOCAL(
+									request->header.msgh_bits),
+							0, 0, 0),
+					.msgh_size = sizeof(reply),
+					.msgh_remote_port
+					= request->header.msgh_local_port,
+					.msgh_id = request->header.msgh_id + 100,
+			},
+			.ndr = NDR_record,
+			.ret_code = KERN_SUCCESS,
+			.dispositions_count = pages,
+	};
+	return ipc_kernel_send(&reply.header) == MACH_MSG_SUCCESS;
+}
+
 static kern_return_t
 remap_share(mach_vm_address_t *target_address, mach_vm_size_t size,
 		mach_vm_offset_t mask, int flags, mach_vm_address_t src_address)
@@ -1476,6 +1560,9 @@ mach_vm_page_range_query(vm_map_read_t target_map, mach_vm_offset_t address,
 		mach_vm_size_t size, mach_vm_address_t dispositions,
 		mach_vm_size_t *dispositions_count)
 {
+	if (ipc_serving_remote()) {
+		return KERN_FAILURE;
+	}
 	mach_vm_address_t start = address & ~(mach_vm_address_t)PAGE_MASK;
 	mach_vm_size_t pages = (address + size - start + PAGE_MASK) / PAGE_SIZE;
 	if (pages > *dispositions_count) {
