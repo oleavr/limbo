@@ -502,8 +502,11 @@ sys_unlink(user_addr_t path)
 		return _EPERM;
 	}
 	char buffer[PATH_MAX];
-	return errno_map(unlink(
-			sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer)));
+	const char *host = sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer);
+	if (acl_check_delete_at(AT_FDCWD, host) == -1) {
+		return _EACCES;
+	}
+	return errno_map(unlink(host));
 }
 
 int
@@ -2158,9 +2161,15 @@ sys_rename(char *from, char *to)
 		return _EPERM;
 	}
 	char from_buffer[PATH_MAX], to_buffer[PATH_MAX];
-	return errno_map(rename(sysroot_host_path(from, AT_SYMLINK_NOFOLLOW,
-						from_buffer),
-			sysroot_host_path(to, AT_SYMLINK_NOFOLLOW, to_buffer)));
+	const char *host_from = sysroot_host_path(
+			from, AT_SYMLINK_NOFOLLOW, from_buffer);
+	const char *host_to
+			= sysroot_host_path(to, AT_SYMLINK_NOFOLLOW, to_buffer);
+	if (acl_check_delete_at(AT_FDCWD, host_from) == -1
+			|| acl_check_delete_at(AT_FDCWD, host_to) == -1) {
+		return _EACCES;
+	}
+	return errno_map(rename(host_from, host_to));
 }
 
 static bool
@@ -2273,8 +2282,11 @@ sys_rmdir(char *path)
 		return _EINVAL;
 	}
 	char buffer[PATH_MAX];
-	return errno_map(rmdir(
-			sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer)));
+	const char *host = sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer);
+	if (acl_check_delete_at(AT_FDCWD, host) == -1) {
+		return _EACCES;
+	}
+	return errno_map(rmdir(host));
 }
 
 int
@@ -4998,9 +5010,11 @@ sys_unlinkat(int fd, user_addr_t path, int flag)
 		return _EPERM;
 	}
 	char buffer[PATH_MAX];
-	return errno_map(unlinkat(at_fd(fd),
-			sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer),
-			at_flags(flag)));
+	const char *host = sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer);
+	if (acl_check_delete_at(at_fd(fd), host) == -1) {
+		return _EACCES;
+	}
+	return errno_map(unlinkat(at_fd(fd), host, at_flags(flag)));
 }
 
 int
@@ -5139,12 +5153,16 @@ sys_renameatx_np(int fromfd, char *from, int tofd, char *to, uint32_t flags)
 		return _EPERM;
 	}
 	char from_buffer[PATH_MAX], to_buffer[PATH_MAX];
-	return errno_map(renameat2(at_fd(fromfd),
-			sysroot_host_path(
-					from, AT_SYMLINK_NOFOLLOW, from_buffer),
-			at_fd(tofd),
-			sysroot_host_path(to, AT_SYMLINK_NOFOLLOW, to_buffer),
-			rename_flags(flags)));
+	const char *host_from = sysroot_host_path(
+			from, AT_SYMLINK_NOFOLLOW, from_buffer);
+	const char *host_to
+			= sysroot_host_path(to, AT_SYMLINK_NOFOLLOW, to_buffer);
+	if (acl_check_delete_at(at_fd(fromfd), host_from) == -1
+			|| acl_check_delete_at(at_fd(tofd), host_to) == -1) {
+		return _EACCES;
+	}
+	return errno_map(renameat2(at_fd(fromfd), host_from, at_fd(tofd),
+			host_to, rename_flags(flags)));
 }
 
 #define _RENAME_SWAP 0x00000002
