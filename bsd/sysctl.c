@@ -237,6 +237,7 @@ static int read_ip_stats(void *old, size_t *oldlenp);
 static int read_ip_ttl(void *old, size_t *oldlenp);
 static int read_pressure_level(void *old, size_t *oldlenp);
 static int read_osvariant_status(void *old, size_t *oldlenp);
+static int read_memsize_physical(void *old, size_t *oldlenp);
 static int query_grade_cputype(
 		const void *new, size_t newlen, void *old, size_t *oldlenp);
 
@@ -339,6 +340,8 @@ static const struct sysctl_node nodes[] = {
 				.number = PAGE_SIZE},
 		{"hw.memsize", {CTL_HW, HW_MEMSIZE}, SYSCTL_READER,
 				.reader = read_memsize},
+		{"hw.memsize_physical", {0, 0}, SYSCTL_READER,
+				.reader = read_memsize_physical},
 		{"hw.availcpu", {CTL_HW, HW_AVAILCPU}, SYSCTL_READER,
 				.reader = read_ncpu},
 		{"hw.activecpu", {0, 0}, SYSCTL_READER, .reader = read_ncpu},
@@ -785,6 +788,7 @@ oid_format(const int *oid, void *old, size_t *oldlenp)
 			kind = CTLTYPE_STRING;
 			format = "A";
 		} else if (node->reader == read_memsize
+				|| node->reader == read_memsize_physical
 				|| node->reader == read_osvariant_status) {
 			kind = CTLTYPE_QUAD;
 			format = "Q";
@@ -1074,6 +1078,15 @@ read_memsize(void *old, size_t *oldlenp)
 {
 	int64_t memsize = (int64_t)sysconf(_SC_PHYS_PAGES) * getpagesize();
 	return read_number(memsize, sizeof(int64_t), old, oldlenp);
+}
+
+static int
+read_memsize_physical(void *old, size_t *oldlenp)
+{
+	if (!codesign_embedded()) {
+		return _ENOENT;
+	}
+	return read_memsize(old, oldlenp);
 }
 
 static int
