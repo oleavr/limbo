@@ -62,9 +62,15 @@ kctl_socket(int type)
 		while (count <= (size_t)fd) {
 			count *= 2;
 		}
-		sockets = realloc(sockets, count * sizeof(*sockets));
-		memset(sockets + socket_count, 0,
-				(count - socket_count) * sizeof(*sockets));
+		bool *grown = realloc(sockets, count * sizeof(*sockets));
+		if (grown == NULL) {
+			pthread_mutex_unlock(&lock);
+			close(fd);
+			return _ENOMEM;
+		}
+		memset(grown + socket_count, 0,
+				(count - socket_count) * sizeof(*grown));
+		sockets = grown;
 		socket_count = count;
 	}
 	sockets[fd] = true;
