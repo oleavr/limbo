@@ -153,9 +153,13 @@ typedef enum {
 	SYSCTL_INT,
 	SYSCTL_QUAD,
 	SYSCTL_READER,
+	SYSCTL_QUERY,
 } sysctl_kind_t;
 
 typedef int (*sysctl_reader_t)(void *old, size_t *oldlenp);
+
+typedef int (*sysctl_query_t)(
+		const void *new, size_t newlen, void *old, size_t *oldlenp);
 
 struct sysctl_node {
 	const char *name;
@@ -165,6 +169,7 @@ struct sysctl_node {
 		const char *string;
 		int64_t number;
 		sysctl_reader_t reader;
+		sysctl_query_t query;
 	};
 };
 
@@ -230,6 +235,8 @@ static int read_udp_stats(void *old, size_t *oldlenp);
 static int read_ip_stats(void *old, size_t *oldlenp);
 static int read_ip_ttl(void *old, size_t *oldlenp);
 static int read_pressure_level(void *old, size_t *oldlenp);
+static int query_grade_cputype(
+		const void *new, size_t newlen, void *old, size_t *oldlenp);
 
 static const struct sysctl_node nodes[] = {
 		{"kern.ostype", {CTL_KERN, KERN_OSTYPE}, SYSCTL_STRING,
@@ -268,6 +275,8 @@ static const struct sysctl_node nodes[] = {
 		{"kern.msgbuf", {0, 0}, SYSCTL_READER, .reader = read_msgbuf},
 		{"kern.bootsessionuuid", {0, 0}, SYSCTL_READER,
 				.reader = read_bootsessionuuid},
+		{"kern.grade_cputype", {0, 0}, SYSCTL_QUERY,
+				.query = query_grade_cputype},
 		{"kern.osproductversion", {0, 0}, SYSCTL_READER,
 				.reader = read_osproductversion},
 		{"kern.secure_kernel", {0, 0}, SYSCTL_INT, .number = 0},
@@ -438,6 +447,11 @@ sys_sysctl(int *name, uint32_t namelen, void *old, size_t *oldlenp, void *new,
 		}
 		return read_bytes(node->name, strlen(node->name) + 1, old,
 				oldlenp);
+	}
+
+	const struct sysctl_node *question = lookup_oid(name, namelen);
+	if (question != NULL && question->kind == SYSCTL_QUERY) {
+		return question->query(new, newlen, old, oldlenp);
 	}
 
 	if (new != NULL) {
@@ -776,6 +790,10 @@ oid_format(const int *oid, void *old, size_t *oldlenp)
 			format = "I";
 		}
 		break;
+	case SYSCTL_QUERY:
+		kind = CTLTYPE_OPAQUE;
+		format = "S";
+		break;
 	default:
 		kind = CTLTYPE_INT;
 		format = "I";
@@ -794,13 +812,15 @@ sys_sys_sysctlbyname(const char *name, size_t namelen, void *old,
 		size_t *oldlenp, void *new, size_t newlen)
 {
 	trace_string(name);
+	const struct sysctl_node *node = lookup_name(name, namelen);
+	if (node != NULL && node->kind == SYSCTL_QUERY) {
+		return node->query(new, newlen, old, oldlenp);
+	}
 	if (new != NULL) {
 		if (old == NULL) {
 			return 0;
 		}
 	}
-
-	const struct sysctl_node *node = lookup_name(name, namelen);
 	if (node == NULL) {
 		return _ENOENT;
 	}
@@ -845,8 +865,49 @@ read_node(const struct sysctl_node *node, void *old, size_t *oldlenp)
 		return read_number(node->number, sizeof(int64_t), old, oldlenp);
 	case SYSCTL_READER:
 		return node->reader(old, oldlenp);
+	case SYSCTL_QUERY:
+		return _EINVAL;
 	}
 	unimplemented();
+}
+
+static int
+query_grade_cputype(const void *new, size_t newlen, void *old, size_t *oldlenp)
+{
+	if (new == NULL || newlen != 2 * sizeof(int32_t) || old == NULL
+			|| oldlenp == NULL || *oldlenp < sizeof(int32_t)) {
+		return _EINVAL;
+	}
+	int32_t asked[2];
+	memcpy(asked, new, sizeof(asked));
+	cpu_subtype_t subtype = asked[1] & ~CPU_SUBTYPE_MASK;
+	int32_t grade = 0;
+#ifdef __x86_64__
+	if (asked[0] == CPU_TYPE_X86_64) {
+		if (subtype == CPU_SUBTYPE_X86_64_H) {
+			grade = shared_cache_cpu_subtype == CPU_SUBTYPE_X86_64_H
+					? 2
+					: 0;
+		} else if (subtype == CPU_SUBTYPE_X86_64_ALL) {
+			grade = 1;
+		}
+	}
+#else
+	if (asked[0] == CPU_TYPE_ARM64) {
+		if (subtype == CPU_SUBTYPE_ARM64E) {
+			grade = shared_cache_cpu_subtype == CPU_SUBTYPE_ARM64E
+					? 3
+					: 0;
+		} else if (subtype == CPU_SUBTYPE_ARM64_V8) {
+			grade = 2;
+		} else if (subtype == CPU_SUBTYPE_ARM64_ALL) {
+			grade = 1;
+		}
+	}
+#endif
+	memcpy(old, &grade, sizeof(grade));
+	*oldlenp = sizeof(grade);
+	return 0;
 }
 
 static int
