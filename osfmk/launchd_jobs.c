@@ -44,6 +44,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "bsd/mac.h"
 #include "bsd/persona.h"
 #include "bsd/process.h"
 #include "launchd.h"
@@ -1565,6 +1566,18 @@ launchd_jobs_init(void)
 		unsigned int byte;
 		sscanf(hex + i * 2, "%2x", &byte);
 		own_dictionary[i] = (uint8_t)byte;
+	}
+	struct xpc_object dictionary = {
+			.data = own_dictionary,
+			.end = own_dictionary + own_dictionary_size,
+	};
+	bool omit = false;
+	xpc_dictionary_get_bool(&dictionary, "_OmitSandboxParameters", &omit);
+	if (omit
+			&& xpc_dictionary_get_string(
+					   &dictionary, "_SandboxProfile")
+					!= NULL) {
+		mac_sandbox_enter();
 	}
 }
 
