@@ -33,6 +33,7 @@
 
 int mac_sandbox_init(void);
 void mac_sandbox_enter(void);
+void mac_sandbox_set_container(const char *path);
 bool mac_sandbox_denies(int operation, int dirfd, const char *path, int follow);
 bool mac_sandbox_denies_fd(int operation, int fd);
 bool mac_sandbox_denies_open(int dirfd, const char *path, bool write,
