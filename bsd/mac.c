@@ -398,6 +398,7 @@ quarantine_handle_syscall(int call, void *arg)
 }
 
 #define SANDBOX_SET_PROFILE          0
+#define SANDBOX_APPLY                1
 #define SANDBOX_CHECK                2
 #define SANDBOX_CONTAINER_PATH       4
 #define SANDBOX_EXTENSION_ISSUE      5
@@ -427,6 +428,7 @@ struct sandbox_set_profile_args {
 };
 
 static bool sandboxed;
+static bool entered;
 static struct sandbox_profile profile;
 
 static void
@@ -525,6 +527,12 @@ mac_sandbox_init(void)
 	sandbox_profile_parse(&profile, data, size);
 	free(data);
 	return 0;
+}
+
+void
+mac_sandbox_enter(void)
+{
+	entered = true;
 }
 
 static int
@@ -667,7 +675,8 @@ static int
 sandbox_check(struct sandbox_check_args *args)
 {
 	bool self = args->pid == 0 || args->pid == getpid();
-	*args->result = self && sandboxed && args->operation == NULL;
+	*args->result = self && (sandboxed || entered)
+			&& args->operation == NULL;
 	if (args->operation == NULL
 			|| args->filter_type != SANDBOX_FILTER_PATH) {
 		return 0;
@@ -750,6 +759,9 @@ sandbox_handle_syscall(int call, void *arg)
 	switch (call) {
 	case SANDBOX_SET_PROFILE:
 		return sandbox_set_profile(arg);
+	case SANDBOX_APPLY:
+		mac_sandbox_enter();
+		return 0;
 	case SANDBOX_CHECK:
 		return sandbox_check(arg);
 	case SANDBOX_CONTAINER_PATH:
