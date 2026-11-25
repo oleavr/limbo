@@ -203,7 +203,8 @@ static bool
 is_record(const char *host_name)
 {
 	return strcmp(host_name, ACL_XATTR) == 0
-			|| strcmp(host_name, PROTECTION_XATTR) == 0;
+			|| strcmp(host_name, PROTECTION_XATTR) == 0
+			|| strcmp(host_name, PURGEABLE_XATTR) == 0;
 }
 
 static user_ssize_t
