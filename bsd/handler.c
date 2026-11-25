@@ -4577,7 +4577,7 @@ int
 sys_telemetry(uint64_t cmd, uint64_t deadline, uint64_t interval,
 		uint64_t leeway, uint64_t arg4, uint64_t arg5)
 {
-	unimplemented();
+	return _ENOTSUP;
 }
 
 int
