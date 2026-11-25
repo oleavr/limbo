@@ -2864,6 +2864,24 @@ ipc_remote_guest_gone(uint32_t guest_id)
 }
 
 void
+ipc_kobject_fork_child(ipc_kobject_type_t type)
+{
+	pthread_mutex_lock(&lock);
+	for (uint32_t i = 1; i < entry_count; i++) {
+		struct ipc_entry *entry = &entries[i];
+		if (entry->port == NULL || entry->port->kotype != type) {
+			continue;
+		}
+		entry->port = NULL;
+		entry->type = 0;
+		entry->urefs = 0;
+		entry->sorights = 0;
+		entry->generation += MACH_PORT_GEN(4);
+	}
+	pthread_mutex_unlock(&lock);
+}
+
+void
 ipc_remote_port_moved(uint64_t global_id, uint32_t guest_id)
 {
 	pthread_mutex_lock(&lock);

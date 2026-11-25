@@ -249,6 +249,7 @@ sys_fork(void)
 		signals_fork_child();
 		aio_fork_child();
 		semaphore_fork_child();
+		eventlink_fork_child();
 		persona_inherit(getpid(), parent);
 	}
 	syscall_set_rdx(pid == 0);
