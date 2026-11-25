@@ -67,6 +67,7 @@
 #define PROC_INFO_CALL_DIRTYCONTROL    0x8
 #define PROC_INFO_CALL_PIDRUSAGE       0x9
 #define PROC_INFO_CALL_PIDORIGINATORINFO 0xa
+#define PROC_INFO_CALL_LISTCOALITIONS    0xb
 #define PROC_INFO_CALL_CANUSEFGHW        0xc
 #define PROC_INFO_CALL_SET_DYLD_IMAGES 0xf
 
@@ -474,6 +475,8 @@ static int threadinfo_of_linux(const struct process *process, uint64_t id,
 		user_addr_t buffer, int32_t buffersize);
 static bool same_user(const struct process *process);
 static int coalition_ids(int32_t pid, uint64_t ids[2]);
+static int list_coalitions(int32_t flavor, uint32_t type, user_addr_t buffer,
+		int32_t buffersize);
 static size_t coalition_members(
 		uint64_t id, int32_t leader, int32_t *pids, size_t max);
 static bool linux_thread_is_guest(int32_t pid, int32_t tid);
@@ -554,6 +557,8 @@ sys_proc_info(int32_t callnum, int32_t pid, uint32_t flavor, uint64_t arg,
 		return pidrusage(pid, flavor, buffer);
 	case PROC_INFO_CALL_PIDORIGINATORINFO:
 		return pidoriginatorinfo(pid, flavor, buffer, buffersize);
+	case PROC_INFO_CALL_LISTCOALITIONS:
+		return list_coalitions(pid, flavor, buffer, buffersize);
 	case PROC_INFO_CALL_CANUSEFGHW:
 		return can_use_foreground_hw(pid, buffer, buffersize);
 	default:
@@ -1684,6 +1689,20 @@ fill_region_info(struct proc_regioninfo *region, unsigned long start,
 #define COALITION_KERNEL_RESOURCE 1
 #define COALITION_KERNEL_JETSAM   3
 #define COALITION_PID_BITS        22
+#define COALITION_TYPE_RESOURCE   0
+#define COALITION_TYPE_JETSAM     1
+
+#define LISTCOALITIONS_ALL_COALS   1
+#define LISTCOALITIONS_SINGLE_TYPE 2
+
+struct procinfo_coalinfo {
+	uint64_t coalition_id;
+	uint32_t coalition_type;
+	uint32_t coalition_tasks;
+};
+
+static void count_coalition(struct procinfo_coalinfo **list, size_t *count,
+		uint64_t id, uint32_t type, uint32_t tasks);
 
 static bool
 kernel_coalition_member(int32_t pid)
@@ -1816,4 +1835,83 @@ coalition_members(uint64_t id, int32_t leader, int32_t *pids, size_t max)
 	}
 	closedir(dir);
 	return count;
+}
+
+static int
+list_coalitions(int32_t flavor, uint32_t type, user_addr_t buffer,
+		int32_t buffersize)
+{
+	if ((flavor != LISTCOALITIONS_ALL_COALS
+			    && flavor != LISTCOALITIONS_SINGLE_TYPE)
+			|| buffersize < 0) {
+		return _EINVAL;
+	}
+	struct procinfo_coalinfo *list = NULL;
+	size_t count = 0;
+	uint32_t kernel = (uint32_t)coalition_members(
+			COALITION_KERNEL_RESOURCE, 0, NULL, 0);
+	count_coalition(&list, &count, COALITION_KERNEL_RESOURCE,
+			COALITION_TYPE_RESOURCE, kernel);
+	count_coalition(&list, &count, COALITION_KERNEL_JETSAM,
+			COALITION_TYPE_JETSAM, kernel);
+	DIR *dir = opendir("/proc");
+	struct dirent *entry;
+	while (dir != NULL && (entry = readdir(dir)) != NULL) {
+		char *end;
+		long pid = strtol(entry->d_name, &end, 10);
+		uint64_t ids[2];
+		if (*end != '\0' || pid <= 0
+				|| coalition_ids((int32_t)pid, ids) != 0
+				|| ids[0] == COALITION_KERNEL_RESOURCE) {
+			continue;
+		}
+		count_coalition(&list, &count, ids[0], COALITION_TYPE_RESOURCE,
+				1);
+		count_coalition(&list, &count, ids[1], COALITION_TYPE_JETSAM,
+				1);
+	}
+	if (dir != NULL) {
+		closedir(dir);
+	}
+	size_t kept = 0;
+	for (size_t i = 0; i != count; i++) {
+		if (flavor == LISTCOALITIONS_ALL_COALS
+				|| list[i].coalition_type == type) {
+			list[kept++] = list[i];
+		}
+	}
+	size_t size = kept * sizeof(*list);
+	if (buffer == NULL) {
+		free(list);
+		return (int)size;
+	}
+	if (size > (size_t)buffersize) {
+		size = (size_t)buffersize;
+	}
+	memcpy(buffer, list, size);
+	free(list);
+	return (int)size;
+}
+
+static void
+count_coalition(struct procinfo_coalinfo **list, size_t *count, uint64_t id,
+		uint32_t type, uint32_t tasks)
+{
+	for (size_t i = 0; i != *count; i++) {
+		if ((*list)[i].coalition_id == id) {
+			(*list)[i].coalition_tasks += tasks;
+			return;
+		}
+	}
+	struct procinfo_coalinfo *grown
+			= realloc(*list, (*count + 1) * sizeof(**list));
+	if (grown == NULL) {
+		return;
+	}
+	*list = grown;
+	(*list)[(*count)++] = (struct procinfo_coalinfo){
+			.coalition_id = id,
+			.coalition_type = type,
+			.coalition_tasks = tasks,
+	};
 }
