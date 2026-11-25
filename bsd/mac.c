@@ -771,6 +771,9 @@ sys___mac_syscall(char *policy, int call, user_addr_t arg)
 		return quarantine_handle_syscall(call, arg);
 	} else if (strncmp(policy, "Sandbox", MAC_MAX_POLICY_NAME) == 0) {
 		return sandbox_handle_syscall(call, arg);
+	} else if (strncmp(policy, "EndpointSecurity", MAC_MAX_POLICY_NAME)
+			== 0) {
+		return call < 2 ? _ENOTSUP : 0;
 	} else {
 		unimplemented();
 	}
