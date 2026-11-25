@@ -36,6 +36,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <linux/fs.h>
+#include <mach-o/loader.h>
 #include <mach/machine.h>
 #include <mach/vm_prot.h>
 #include <stdbool.h>
@@ -67,6 +68,9 @@ struct prepared_trampolines {
 
 void *shared_cache_start = NULL;
 int shared_cache_cpu_subtype = CPU_SUBTYPE_X86_64_ALL;
+
+static dyld_cache_dynamic_data_header_t *dynamic_data;
+static size_t dynamic_data_size;
 
 static int reserve_shared_region(dyld_cache_header_t *header);
 static const char *prepared_cache_path(const dyld_cache_header_t *header,
@@ -331,7 +335,46 @@ map_dynamic_data(int f, const char *path, dyld_cache_header_t *header)
 		perror("mprotect");
 		return 1;
 	}
+	dynamic_data = data;
+	dynamic_data_size = header->dynamicDataMaxSize;
 	return 0;
+}
+
+#define DYNAMIC_DATA_MAGIC "dyld_data    v"
+
+void
+shared_cache_match_dyld(const uint8_t *dyld)
+{
+	if (dynamic_data == NULL) {
+		return;
+	}
+	const struct mach_header_64 *header
+			= (const struct mach_header_64 *)dyld;
+	const uint8_t *command = dyld + sizeof(*header);
+	uint64_t text_size = 0;
+	for (uint32_t i = 0; i < header->ncmds; i++) {
+		const struct segment_command_64 *segment
+				= (const struct segment_command_64 *)command;
+		if (segment->cmd == LC_SEGMENT_64
+				&& strcmp(segment->segname, "__TEXT") == 0) {
+			text_size = segment->vmsize;
+			break;
+		}
+		command += segment->cmdsize;
+	}
+	const char *magic = memmem(dyld, text_size, DYNAMIC_DATA_MAGIC,
+			sizeof(DYNAMIC_DATA_MAGIC) - 1);
+	if (magic == NULL || magic[sizeof(DYNAMIC_DATA_MAGIC) - 1] == '\0'
+			|| magic[sizeof(DYNAMIC_DATA_MAGIC)] != '\0'
+			|| strcmp(magic, dynamic_data->magic) == 0) {
+		return;
+	}
+	if (mprotect(dynamic_data, dynamic_data_size, PROT_READ | PROT_WRITE)
+			== -1) {
+		return;
+	}
+	strcpy(dynamic_data->magic, magic);
+	mprotect(dynamic_data, dynamic_data_size, PROT_READ);
 }
 
 static void
