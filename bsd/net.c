@@ -695,6 +695,9 @@ net_ioctl(int fd, uint64_t command, void *data)
 	if (IOCGROUP(command) != 'i') {
 		return 1;
 	}
+	if (command == xnu_SIOCGIFCONF) {
+		return interface_conf(data);
+	}
 	struct xnu_ifreq *request = data;
 	char name[IFNAMSIZ + 1] = {0};
 	memcpy(name, request->name, IFNAMSIZ);
@@ -702,8 +705,6 @@ net_ioctl(int fd, uint64_t command, void *data)
 	int error;
 
 	switch (command) {
-	case xnu_SIOCGIFCONF:
-		return interface_conf(data);
 	case xnu_SIOCGIFFLAGS:
 		error = host_interface_ioctl(SIOCGIFFLAGS, name, &host);
 		if (error == 0) {
@@ -1026,6 +1027,9 @@ bpf_ioctl(int fd, uint64_t command, void *data)
 static int
 interface_conf(struct xnu_ifconf *conf)
 {
+	if (conf->length < 0) {
+		return _EINVAL;
+	}
 	struct ifaddrs *list;
 	if (getifaddrs(&list) == -1) {
 		return err_map(errno);
