@@ -1579,6 +1579,11 @@ launchd_jobs_init(void)
 					!= NULL) {
 		mac_sandbox_enter();
 	}
+	const char *container = xpc_dictionary_get_string(
+			&dictionary, "_SandboxContainer");
+	if (container != NULL && container[0] == '/') {
+		mac_sandbox_set_container(container);
+	}
 }
 
 bool
