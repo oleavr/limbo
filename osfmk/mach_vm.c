@@ -51,6 +51,7 @@
 #include <unistd.h>
 
 #include "bsd/codesign.h"
+#include "bsd/process.h"
 #include "commpage.h"
 #include "ipc.h"
 #include "mach_vm.h"
@@ -517,7 +518,7 @@ mach_port_name_t
 memory_entry_create(mach_vm_size_t size, void **contents)
 {
 	size = (size + PAGE_MASK) & ~PAGE_MASK;
-	int fd = memfd_create("memory entry", MFD_CLOEXEC);
+	int fd = limbo_fd_high(memfd_create("memory entry", MFD_CLOEXEC));
 	if (fd == -1 || ftruncate(fd, size) == -1) {
 		perror("memfd_create");
 		abort();
@@ -536,7 +537,7 @@ memory_entry_create(mach_vm_size_t size, void **contents)
 mach_port_name_t
 memory_entry_share(int fd, mach_vm_size_t size)
 {
-	int own = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+	int own = limbo_fd_copy(fd);
 	if (own == -1) {
 		perror("fcntl");
 		abort();
@@ -1142,7 +1143,7 @@ move_to_memfd(mach_vm_address_t address, mach_vm_size_t size,
 		vm_prot_t protection)
 {
 	bool shared;
-	int fd = memfd_create("remap", MFD_CLOEXEC);
+	int fd = limbo_fd_high(memfd_create("remap", MFD_CLOEXEC));
 	if (fd == -1 || ftruncate(fd, size) == -1
 			|| !copy_readable(fd, address, size, &shared)
 			|| (!shared
@@ -1194,7 +1195,7 @@ shared_range_fd(mach_vm_address_t start)
 			continue;
 		}
 		if (shared_range_mapped(range, mapped, device, inode)) {
-			fd = fcntl(range->fd, F_DUPFD_CLOEXEC, 0);
+			fd = limbo_fd_copy(range->fd);
 			break;
 		}
 		/* The range was unmapped or mapped anew since */
@@ -1209,7 +1210,7 @@ shared_range_add(mach_vm_address_t start, int fd)
 {
 	struct shared_range *range = malloc(sizeof(*range));
 	range->start = start;
-	range->fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+	range->fd = limbo_fd_copy(fd);
 	if (range->fd == -1) {
 		free(range);
 		return;
@@ -1274,7 +1275,7 @@ held_fd(mach_vm_address_t start)
 				&& S_ISREG(status.st_mode)
 				&& status.st_dev == device
 				&& status.st_ino == inode) {
-			found = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+			found = limbo_fd_copy(fd);
 		}
 	}
 	closedir(fds);
@@ -1687,7 +1688,8 @@ mach_make_memory_entry(vm_map_t target_task, memory_object_size_t *size,
 	 */
 	if (permission & MAP_MEM_NAMED_CREATE) {
 		mach_vm_size_t rounded = (*size + PAGE_MASK) & ~PAGE_MASK;
-		int fd = memfd_create("memory entry", MFD_CLOEXEC);
+		int fd = limbo_fd_high(
+				memfd_create("memory entry", MFD_CLOEXEC));
 		if (fd == -1 || ftruncate(fd, (off_t)rounded) == -1) {
 			if (fd != -1) {
 				close(fd);
@@ -1730,7 +1732,7 @@ static int
 copy_range(mach_vm_address_t address, mach_vm_size_t size)
 {
 	bool shared;
-	int fd = memfd_create("memory entry", MFD_CLOEXEC);
+	int fd = limbo_fd_high(memfd_create("memory entry", MFD_CLOEXEC));
 	if (fd == -1 || ftruncate(fd, size) == -1
 			|| !copy_readable(fd, address, size, &shared)) {
 		if (fd != -1) {

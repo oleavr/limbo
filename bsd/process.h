@@ -79,6 +79,9 @@ ssize_t process_cmdline(int32_t pid, char *buffer, size_t size);
 bool process_is_guest(int32_t pid);
 
 int bsd_fd_limit(void);
+int limbo_fd_high(int fd);
+int limbo_fd_copy(int fd);
+bool limbo_fd_is_own(int fd);
 
 bool process_environment_value(
 		int32_t pid, const char *name, char *value, size_t size);

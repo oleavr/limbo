@@ -83,8 +83,10 @@ def start_broker(broker, socket_path, binary, outdir):
         hello_marker = outdir.resolve() / "ipc-hello-again-marker"
         requests = Path(os.environ["LIMBO_SYSROOT"]) / "private" / "tmp"
         requested = "limbo-test" + str(socket_path.resolve()).replace("/", "_")
+        end_marker = requests / (requested + "-end-broker")
         limit_request = requests / (requested + "-host-limit")
-        for marker in (awaited_marker, hello_marker, limit_request):
+        for marker in (awaited_marker, hello_marker, end_marker,
+                       limit_request):
             if marker.exists():
                 marker.unlink()
         header = (Path(__file__).resolve().parent.parent / "broker.h").read_text()
@@ -114,16 +116,21 @@ def start_broker(broker, socket_path, binary, outdir):
     os.environ["LIMBO_BROKER"] = str(socket_path)
     if binary.stem == "ipc_broker":
         threading.Thread(target=serve_test_requests,
-                         args=(process, limit_request), daemon=True).start()
+                         args=(process, end_marker, limit_request),
+                         daemon=True).start()
     return process
 
 
-def serve_test_requests(process, limit_request):
-    """What the ipc_broker test asks of the host: a process's host file
-    limit lowered and restored, which a guest's own setrlimit doesn't reach"""
+def serve_test_requests(process, end_marker, limit_request):
+    """What the ipc_broker test asks of the host: its broker ended, or a
+    process's host file limit lowered and restored, which a guest's own
+    setrlimit no longer reaches"""
     saved = {}
     read = 0
     while process.poll() is None:
+        if end_marker.exists():
+            process.kill()
+            return
         lines = (limit_request.read_text()[read:]
                  if limit_request.exists() else "")
         while "\n" in lines:

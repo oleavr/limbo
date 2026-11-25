@@ -40,8 +40,6 @@ void broker_client_ensure(void);
 void broker_client_reset(void);
 void broker_client_fork_child(void);
 bool broker_client_available(void);
-bool broker_client_owns_fd(int fd);
-void broker_client_fd_moved(int from, int to);
 uint32_t broker_client_guest_id(void);
 uint32_t broker_client_domain(void);
 bool broker_client_send_frame(int fd, int flags, uint32_t type,
