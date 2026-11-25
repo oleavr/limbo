@@ -2,9 +2,11 @@
 
 import os
 import re
+import resource
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -79,7 +81,10 @@ def start_broker(broker, socket_path, binary, outdir):
     else:
         awaited_marker = outdir.resolve() / "ipc-awaited-marker"
         hello_marker = outdir.resolve() / "ipc-hello-again-marker"
-        for marker in (awaited_marker, hello_marker):
+        requests = Path(os.environ["LIMBO_SYSROOT"]) / "private" / "tmp"
+        requested = "limbo-test" + str(socket_path.resolve()).replace("/", "_")
+        limit_request = requests / (requested + "-host-limit")
+        for marker in (awaited_marker, hello_marker, limit_request):
             if marker.exists():
                 marker.unlink()
         header = (Path(__file__).resolve().parent.parent / "broker.h").read_text()
@@ -107,7 +112,32 @@ def start_broker(broker, socket_path, binary, outdir):
                                 str(jobs)], env=env)
     wait_for_broker(socket_path)
     os.environ["LIMBO_BROKER"] = str(socket_path)
+    if binary.stem == "ipc_broker":
+        threading.Thread(target=serve_test_requests,
+                         args=(process, limit_request), daemon=True).start()
     return process
+
+
+def serve_test_requests(process, limit_request):
+    """What the ipc_broker test asks of the host: a process's host file
+    limit lowered and restored, which a guest's own setrlimit doesn't reach"""
+    saved = {}
+    read = 0
+    while process.poll() is None:
+        lines = (limit_request.read_text()[read:]
+                 if limit_request.exists() else "")
+        while "\n" in lines:
+            line, lines = lines.split("\n", 1)
+            read += len(line) + 1
+            pid, soft = line.split()
+            pid = int(pid)
+            current, hard = resource.prlimit(pid, resource.RLIMIT_NOFILE)
+            if soft == "restore":
+                soft = saved.pop(pid, current)
+            else:
+                saved.setdefault(pid, current)
+            resource.prlimit(pid, resource.RLIMIT_NOFILE, (int(soft), hard))
+        time.sleep(0.01)
 
 
 def wait_for_broker(socket_path):

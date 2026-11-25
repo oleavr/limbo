@@ -49,6 +49,7 @@
 #include "bsd/responsibility.h"
 #include "fs/acl.h"
 #include "handler.h"
+#include "process.h"
 #include "signo.h"
 #include "sysroot.h"
 #include "xnu-errno.h"
@@ -161,6 +162,7 @@ static void convert_attr(
 static int convert_file_actions(const struct darwin_file_actions *src,
 		bool cloexec_default, posix_spawn_file_actions_t *dst);
 static int moved(int folder, int next);
+static bool file_actions_fit(const struct darwin_file_actions *actions);
 static int apply_file_actions(const struct darwin_file_actions *actions,
 		bool cloexec_default);
 static void close_unlisted(const struct darwin_file_actions *src,
@@ -654,6 +656,9 @@ static int
 convert_file_actions(const struct darwin_file_actions *src,
 		bool cloexec_default, posix_spawn_file_actions_t *dst)
 {
+	if (!file_actions_fit(src)) {
+		return _EBADF;
+	}
 	int count = (src != NULL) ? src->count : 0;
 	int folder = AT_FDCWD;
 	bool denied = false;
@@ -720,6 +725,9 @@ static int
 apply_file_actions(
 		const struct darwin_file_actions *actions, bool cloexec_default)
 {
+	if (!file_actions_fit(actions)) {
+		return _EBADF;
+	}
 	int count = (actions != NULL) ? actions->count : 0;
 	for (int i = 0; i < count; i++) {
 		const struct darwin_file_action *action = &actions->actions[i];
@@ -824,6 +832,26 @@ close_unlisted(const struct darwin_file_actions *src,
 		}
 	}
 	closedir(fds);
+}
+
+static bool
+file_actions_fit(const struct darwin_file_actions *actions)
+{
+	int count = (actions != NULL) ? actions->count : 0;
+	for (int i = 0; i < count; i++) {
+		const struct darwin_file_action *action = &actions->actions[i];
+		if (action->type == PSFA_CHDIR) {
+			continue;
+		}
+		if (action->filedes < 0 || action->filedes >= bsd_fd_limit()
+				|| (action->type == PSFA_DUP2
+						&& (action->newfiledes < 0
+								|| action->newfiledes
+										>= bsd_fd_limit()))) {
+			return false;
+		}
+	}
+	return true;
 }
 
 static bool

@@ -135,6 +135,8 @@
 			| (1 << 20) | (1 << 21))
 #define _ACCESS_EXECUTE_MASK (1 << 11)
 
+static rlim_t nofile_cur = INT32_MAX, nofile_max = INT32_MAX;
+static int own_floor = INT32_MAX;
 static __thread unsigned long current_syscall;
 
 static sem_t *semaphore(void *handle);
@@ -639,7 +641,12 @@ control_to_guest(struct msghdr *host, struct xnu_msghdr *guest)
 		}
 		size_t length = cmsg->cmsg_len - CMSG_LEN(0);
 		size_t space = xnu_CMSG_ALIGN(sizeof(struct xnu_cmsghdr) + length);
-		if (used + space > guest->msg_controllen) {
+		bool past_limit = false;
+		for (size_t i = 0; i != length / sizeof(int); i++) {
+			past_limit |= ((int *)CMSG_DATA(cmsg))[i]
+					>= bsd_fd_limit();
+		}
+		if (past_limit || used + space > guest->msg_controllen) {
 
 			for (size_t i = 0; i != length / sizeof(int); i++) {
 				close(((int *)CMSG_DATA(cmsg))[i]);
@@ -1441,21 +1448,24 @@ itimerval_from_linux(const struct itimerval *from,
 	to->it_value.tv_usec = from->it_value.tv_usec;
 }
 
-static rlim_t started_nofile;
-
 int
 sys_sys_getdtablesize(void)
 {
-	if (started_nofile != 0) {
-		return started_nofile > INT32_MAX ? INT32_MAX
-						  : (int)started_nofile;
-	}
-	return getdtablesize();
+	return bsd_fd_limit();
+}
+
+int
+bsd_fd_limit(void)
+{
+	return nofile_cur > INT32_MAX ? INT32_MAX : (int)nofile_cur;
 }
 
 int
 sys_sys_dup2(uint32_t from, uint32_t to)
 {
+	if ((int)to < 0 || (int)to >= bsd_fd_limit()) {
+		return _EBADF;
+	}
 	if (broker_client_owns_fd((int)to)) {
 		int moved = fcntl((int)to, F_DUPFD_CLOEXEC, 512);
 		if (moved == -1) {
@@ -2538,8 +2548,9 @@ sys_getrlimit(uint32_t which, void *rlp)
 	if (getrlimit(resource, &limit) == -1) {
 		return err_map(errno);
 	}
-	if (resource == RLIMIT_NOFILE && started_nofile != 0) {
-		limit.rlim_cur = started_nofile;
+	if (resource == RLIMIT_NOFILE) {
+		limit.rlim_cur = nofile_cur;
+		limit.rlim_max = nofile_max;
 	}
 	uint64_t *darwin_limit = rlp;
 	darwin_limit[0] = rlimit_to_darwin(limit.rlim_cur);
@@ -2595,33 +2606,45 @@ sys_setrlimit(uint32_t which, void *rlp)
 			.rlim_cur = rlimit_from_darwin(darwin_limit[0]),
 			.rlim_max = rlimit_from_darwin(darwin_limit[1]),
 	};
-	if (setrlimit(resource, &limit) == -1) {
-		return err_map(errno);
-	}
 	if (resource == RLIMIT_NOFILE) {
-		started_nofile = 0;
+		if (limit.rlim_cur > limit.rlim_max) {
+			return _EINVAL;
+		}
+		if (limit.rlim_max > nofile_max && geteuid() != 0) {
+			return _EPERM;
+		}
+		nofile_max = limit.rlim_max < (rlim_t)own_floor
+				? limit.rlim_max
+				: (rlim_t)own_floor;
+		nofile_cur = limit.rlim_cur < nofile_max ? limit.rlim_cur
+							 : nofile_max;
+		return 0;
 	}
-	return 0;
+	return errno_map(setrlimit(resource, &limit));
 }
 
 void
 rlimit_nofile_start(void)
 {
 	struct rlimit limit;
-	if (getrlimit(RLIMIT_NOFILE, &limit) == 0) {
-		started_nofile = limit.rlim_cur;
+	if (getrlimit(RLIMIT_NOFILE, &limit) != 0) {
+		return;
 	}
+	own_floor = limit.rlim_max / 2 < INT32_MAX ? (int)(limit.rlim_max / 2)
+						   : INT32_MAX;
+	nofile_max = own_floor;
+	nofile_cur = limit.rlim_cur < nofile_max ? limit.rlim_cur : nofile_max;
 }
 
 void
 rlimit_nofile_exec(void)
 {
 	struct rlimit limit;
-	if (started_nofile == 0 || getrlimit(RLIMIT_NOFILE, &limit) != 0) {
+	if (getrlimit(RLIMIT_NOFILE, &limit) != 0) {
 		return;
 	}
-	limit.rlim_cur = started_nofile < limit.rlim_max ? started_nofile
-							 : limit.rlim_max;
+	limit.rlim_cur = nofile_cur < limit.rlim_max ? nofile_cur
+						     : limit.rlim_max;
 	setrlimit(RLIMIT_NOFILE, &limit);
 }
 
@@ -2629,7 +2652,7 @@ void
 rlimit_nofile_exec_failed(void)
 {
 	struct rlimit limit;
-	if (started_nofile == 0 || getrlimit(RLIMIT_NOFILE, &limit) != 0) {
+	if (getrlimit(RLIMIT_NOFILE, &limit) != 0) {
 		return;
 	}
 	limit.rlim_cur = limit.rlim_max;
@@ -5361,8 +5384,95 @@ sys_proc_info_extended_id(int32_t callnum, int32_t pid, uint32_t flavor,
 	return sys_proc_info(callnum, pid, flavor, arg, buffer, buffersize);
 }
 
+static uint64_t dispatch_bsd(unsigned long syscall, uint64_t arg1,
+		uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5,
+		uint64_t arg6, uint64_t *sp);
+static bool makes_descriptor(unsigned long syscall);
+static int descriptors_made_first(unsigned long syscall);
+static bool descriptor_room(int count);
+
 uint64_t
 sys_bsd(unsigned long syscall, uint64_t arg1, uint64_t arg2, uint64_t arg3,
+		uint64_t arg4, uint64_t arg5, uint64_t arg6, uint64_t *sp)
+{
+	int needed = descriptors_made_first(syscall);
+	if (needed != 0 && !descriptor_room(needed)) {
+		return (uint64_t)_EMFILE;
+	}
+	uint64_t result = dispatch_bsd(
+			syscall, arg1, arg2, arg3, arg4, arg5, arg6, sp);
+	if (makes_descriptor(syscall) && (int64_t)result >= bsd_fd_limit()) {
+		close((int)result);
+		return (uint64_t)_EMFILE;
+	}
+	return result;
+}
+
+static bool
+makes_descriptor(unsigned long syscall)
+{
+	switch (syscall) {
+	case 0x5:
+	case 0x1e:
+	case 0x29:
+	case 0x61:
+	case 0xd8:
+	case 0xda:
+	case 0x10a:
+	case 0x115:
+	case 0x16a:
+	case 0x18e:
+	case 0x194:
+	case 0x1af:
+	case 0x1b9:
+	case 0x1bb:
+	case 0x1cf:
+	case 0x1d0:
+	case 0x1df:
+	case 0x1e4:
+	case 0x1f5:
+	case 0x20a:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static int
+descriptors_made_first(unsigned long syscall)
+{
+	switch (syscall) {
+	case 0x1e:
+	case 0x194:
+		return 1;
+	case 0x2a:
+	case 0x87:
+	case 0x94:
+		return 2;
+	default:
+		return 0;
+	}
+}
+
+static bool
+descriptor_room(int count)
+{
+	int taken[2] = {-1, -1};
+	bool room = true;
+	for (int i = 0; i < count && room; i++) {
+		taken[i] = open("/", O_PATH | O_CLOEXEC);
+		room = taken[i] != -1 && taken[i] < bsd_fd_limit();
+	}
+	for (int i = 0; i < count; i++) {
+		if (taken[i] != -1) {
+			close(taken[i]);
+		}
+	}
+	return room;
+}
+
+static uint64_t
+dispatch_bsd(unsigned long syscall, uint64_t arg1, uint64_t arg2, uint64_t arg3,
 		uint64_t arg4, uint64_t arg5, uint64_t arg6, uint64_t *sp)
 {
 	current_syscall = syscall;

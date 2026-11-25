@@ -29,6 +29,7 @@
 
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <mach/ndr.h>
@@ -206,6 +207,8 @@ static const char FROM_RECEIVER[] = "from the receiver";
 static const char *peer_name = PEER_NAME;
 
 static mach_msg_id_t receive_id(mach_port_t port);
+static int host_file_limit(const char *soft);
+static void runner_request(const char *what, char *path, size_t size);
 static child_t start_peer(const char *name);
 static void end_peer(const child_t *child);
 static bool is_broker_socket(int fd);
@@ -812,15 +815,55 @@ watch_death(mach_port_t name, mach_port_t notify)
 static kern_return_t
 send_starved(mach_msg_header_t *message)
 {
-	struct rlimit files;
-	CHECK(getrlimit(RLIMIT_NOFILE, &files) == 0);
-	struct rlimit none = {.rlim_cur = 0, .rlim_max = files.rlim_max};
-	CHECK(setrlimit(RLIMIT_NOFILE, &none) == 0);
+	host_file_limit("0");
 	kern_return_t kr = mach_msg(message, MACH_SEND_MSG, message->msgh_size,
 			0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
 			MACH_PORT_NULL);
-	CHECK(setrlimit(RLIMIT_NOFILE, &files) == 0);
+	host_file_limit("restore");
 	return kr;
+}
+
+static int
+host_file_limit(const char *soft)
+{
+	static int requests = -1;
+	bool restore = strcmp(soft, "restore") == 0;
+	if (requests == -1) {
+		char path[PATH_MAX];
+		runner_request("host-limit", path, sizeof(path));
+		requests = open(path, O_WRONLY | O_APPEND | O_CREAT, 0644);
+		CHECK(requests >= 0);
+	}
+	char line[64];
+	int length = snprintf(line, sizeof(line), "%d %s\n", getpid(), soft);
+	CHECK(write(requests, line, (size_t)length) == length);
+	for (;;) {
+		int probe = dup(STDERR_FILENO);
+		if (probe != -1) {
+			close(probe);
+		}
+		if ((probe != -1) == restore) {
+			break;
+		}
+		usleep(1000);
+	}
+	if (restore) {
+		CHECK(close(requests) == 0);
+		requests = -1;
+	}
+	return 0;
+}
+
+static void
+runner_request(const char *what, char *path, size_t size)
+{
+	const char *broker = getenv("LIMBO_BROKER");
+	CHECK(broker != NULL);
+	int n = snprintf(path, size, "/private/tmp/limbo-test");
+	for (const char *c = broker; *c != '\0' && (size_t)n + 1 < size; c++) {
+		path[n++] = *c == '/' ? '_' : *c;
+	}
+	snprintf(path + n, size - n, "-%s", what);
 }
 
 static int32_t
@@ -925,8 +968,6 @@ serve_peer(void)
 	mach_port_t held_reply = MACH_PORT_NULL;
 	mach_port_t doomed = MACH_PORT_NULL;
 	mach_port_t watch = MACH_PORT_NULL;
-	struct rlimit files;
-	struct rlimit none = {0};
 	mach_port_name_t seen;
 	for (;;) {
 		static union {
@@ -1025,11 +1066,9 @@ serve_peer(void)
 		} else if (message.Head.msgh_id == HOLD_BODY_ID) {
 			held_reply = message.carrier.port.name;
 		} else if (message.Head.msgh_id == STARVE_ID) {
-			CHECK(getrlimit(RLIMIT_NOFILE, &files) == 0);
-			none.rlim_max = files.rlim_max;
-			answer(&message.Head, setrlimit(RLIMIT_NOFILE, &none));
+			answer(&message.Head, host_file_limit("0"));
 		} else if (message.Head.msgh_id == FEED_ID) {
-			answer(&message.Head, setrlimit(RLIMIT_NOFILE, &files));
+			answer(&message.Head, host_file_limit("restore"));
 		} else if (message.Head.msgh_id == BAD_REPLY_ID) {
 			answer(&message.Head, bad_reply(held_reply));
 		} else if (message.Head.msgh_id == FAIL_HOME_ID) {
