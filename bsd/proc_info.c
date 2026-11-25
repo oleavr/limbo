@@ -470,6 +470,8 @@ static int threadinfo_of_linux(const struct process *process, uint64_t id,
 		user_addr_t buffer, int32_t buffersize);
 static bool same_user(const struct process *process);
 static int coalition_ids(int32_t pid, uint64_t ids[2]);
+static size_t coalition_members(
+		uint64_t id, int32_t leader, int32_t *pids, size_t max);
 static bool linux_thread_is_guest(int32_t pid, int32_t tid);
 static int threadinfo(uint64_t value, bool id, user_addr_t buffer,
 		int32_t buffersize);
@@ -1702,4 +1704,84 @@ proc_coalition_leader(uint64_t id, int32_t *leader)
 	}
 	*leader = pid;
 	return 0;
+}
+
+int
+proc_coalition_info(uint32_t flavor, uint64_t id, void *buffer, size_t *size)
+{
+	int32_t leader;
+	int error = proc_coalition_leader(id, &leader);
+	if (error != 0) {
+		return error;
+	}
+	switch (flavor) {
+	case 1: {
+		uint64_t usage[45] = {0};
+		int32_t pids[512];
+		size_t count = coalition_members(id, leader, pids, 512);
+		for (size_t i = 0; i != count && i < 512; i++) {
+			uint64_t info[58] = {0};
+			if (pidrusage(pids[i], 2, info) != 0) {
+				continue;
+			}
+			usage[0]++;
+			usage[3] += info[2] + info[3];
+			usage[9] += info[2] + info[3];
+			usage[4] += info[5];
+			usage[6] += info[18];
+			usage[7] += info[19];
+			usage[40] += info[9];
+		}
+		usage[23] = 7;
+		memcpy(buffer, usage,
+				*size < sizeof(usage) ? *size : sizeof(usage));
+		return 0;
+	}
+	case 5: {
+		size_t max = *size / sizeof(int32_t);
+		size_t count = coalition_members(id, leader, buffer, max);
+		*size = (count < max ? count : max) * sizeof(int32_t);
+		return 0;
+	}
+	default:
+		unimplemented();
+	}
+}
+
+static size_t
+coalition_members(uint64_t id, int32_t leader, int32_t *pids, size_t max)
+{
+	if (leader == 0) {
+		int32_t kernel[] = {0, 1, broker_client_pid(),
+				broker_client_launchd_pid()};
+		size_t count = kernel[2] <= 1            ? 2
+				: kernel[3] == kernel[2] ? 3
+							 : 4;
+		for (size_t i = 0; i != count && i < max; i++) {
+			pids[i] = kernel[i];
+		}
+		return count;
+	}
+	DIR *dir = opendir("/proc");
+	if (dir == NULL) {
+		return 0;
+	}
+	size_t count = 0;
+	struct dirent *entry;
+	while ((entry = readdir(dir)) != NULL) {
+		char *end;
+		long pid = strtol(entry->d_name, &end, 10);
+		uint64_t ids[2];
+		if (*end != '\0' || pid <= 0
+				|| coalition_ids((int32_t)pid, ids) != 0
+				|| (ids[0] != id && ids[1] != id)) {
+			continue;
+		}
+		if (count < max) {
+			pids[count] = (int32_t)pid;
+		}
+		count++;
+	}
+	closedir(dir);
+	return count;
 }

@@ -85,6 +85,7 @@ static void check_pipe_info(void);
 static void check_kqueue_info(void);
 static void check_workqueue(void);
 static void signal_done(void *done);
+static void check_coalitions(void);
 
 int
 main(void)
@@ -204,6 +205,7 @@ main(void)
 	check_pipe_info();
 	check_kqueue_info();
 	check_workqueue();
+	check_coalitions();
 
 	int value = -1;
 	size = sizeof(value);
@@ -614,4 +616,35 @@ static void
 signal_done(void *done)
 {
 	dispatch_semaphore_signal(done);
+}
+
+#define PROC_PIDCOALITIONINFO 20
+
+extern int __coalition_info(
+		uint32_t flavor, uint64_t *cid, void *buffer, size_t *size);
+extern int coalition_info_pid_list(uint64_t cid, pid_t *pids, size_t *size);
+
+static void
+check_coalitions(void)
+{
+	uint64_t ids[5] = {0};
+	CHECK(proc_pidinfo(getpid(), PROC_PIDCOALITIONINFO, 1, ids, sizeof(ids))
+			== sizeof(ids));
+	CHECK(ids[0] >= 1 && ids[1] >= 1 && ids[0] != ids[1]);
+	pid_t pids[64];
+	size_t size = sizeof(pids);
+	CHECK(coalition_info_pid_list(ids[0], pids, &size) == 0);
+	bool found = false;
+	for (size_t i = 0; i != size / sizeof(pid_t); i++) {
+		found = found || pids[i] == getpid();
+	}
+	CHECK(found);
+	uint64_t usage[45] = {0};
+	size = sizeof(usage);
+	uint64_t id = ids[0];
+	CHECK(__coalition_info(1, &id, usage, &size) == 0);
+	CHECK(usage[0] >= 1);
+	id = 2;
+	size = sizeof(pids);
+	CHECK(__coalition_info(5, &id, pids, &size) == -1 && errno == ESRCH);
 }

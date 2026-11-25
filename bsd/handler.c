@@ -4746,7 +4746,10 @@ int
 sys_coalition_info(
 		uint32_t flavor, uint64_t *cid, void *buffer, size_t *bufsize)
 {
-	unimplemented();
+	if (cid == NULL || bufsize == NULL || buffer == NULL) {
+		return _EFAULT;
+	}
+	return proc_coalition_info(flavor, *cid, buffer, bufsize);
 }
 
 int
