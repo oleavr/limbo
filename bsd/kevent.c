@@ -1573,6 +1573,9 @@ knote_delivered(struct knote *kn)
 	if (kn->kev.filter == EVFILT_SOCK) {
 		kn->sock_reported |= kn->kev.fflags;
 	}
+	if (kn->kev.filter == EVFILT_MEMORYSTATUS) {
+		kn->active = false;
+	}
 
 	if ((kn->kev.flags & (EV_DISPATCH | EV_UDATA_SPECIFIC))
 			== (EV_DISPATCH | EV_UDATA_SPECIFIC)) {
