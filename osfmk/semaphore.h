@@ -1,5 +1,6 @@
 /*
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -39,3 +40,4 @@ kern_return_t semaphore_wait_signal(
 		semaphore_t wait_name, semaphore_t signal_name);
 kern_return_t semaphore_timedwait_signal(semaphore_t wait_name,
 		semaphore_t signal_name, mach_timespec_t timeout);
+void semaphore_fork_child(void);

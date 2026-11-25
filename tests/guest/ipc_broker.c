@@ -154,6 +154,7 @@ static const char FORGER_SERVICE_NAME[] = "com.limbo.test.ipc.forger";
 static const char UNFORGED_SERVICE_NAME[] = "com.limbo.test.ipc.unforged";
 static const char HIDDEN_SERVICE_NAME[] = "com.limbo.test.ipc.hidden";
 static const char REHIDDEN_SERVICE_NAME[] = "com.limbo.test.ipc.rehidden";
+static const char SEMAPHORE_SERVICE_NAME[] = "com.limbo.test.ipc.semaphore";
 static const mach_msg_id_t CHECK_IN = 402;
 static const mach_msg_id_t LOOK_UP = 404;
 static const char RETURNED_SERVICE_NAME[] = "com.limbo.test.ipc.returned";
@@ -212,6 +213,8 @@ static child_t start_peer(const char *name);
 static void end_peer(const child_t *child);
 static void look_up_after_dup2_over_low_fds(void);
 static void work_after_dup2_over_every_fd(void);
+static double seconds_since(const struct timespec *start);
+static void semaphores_across_guests(void);
 static void pid_suspended_guest(void);
 static void queue_moves_with_receive_right(void);
 static void send_right_outlives_mover(void);
@@ -2452,6 +2455,7 @@ check_transport(void)
 	check_descriptors_wait(peer, port);
 	look_up_after_dup2_over_low_fds();
 	work_after_dup2_over_every_fd();
+	semaphores_across_guests();
 
 	send_quit(port);
 	int status = reap(peer);
@@ -2527,6 +2531,138 @@ work_after_dup2_over_every_fd(void)
 		CHECK(read(pipe_fds[0], &byte, 1) == 1 && byte == 'x');
 		_exit(0);
 	}
+	int status;
+	waitpid(pid, &status, 0);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
+static double
+seconds_since(const struct timespec *start)
+{
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return (double)(now.tv_sec - start->tv_sec)
+			+ (double)(now.tv_nsec - start->tv_nsec) / 1e9;
+}
+
+static void
+semaphores_across_guests(void)
+{
+	static const mach_timespec_t five_seconds = {5, 0};
+	pid_t pid = fork();
+	CHECK(pid >= 0);
+	if (pid == 0) {
+		mach_port_t service = bootstrap_call(
+				CHECK_IN, SEMAPHORE_SERVICE_NAME);
+		CHECK(service != MACH_PORT_NULL);
+		semaphore_t wake, reply;
+		CHECK(semaphore_create(mach_task_self(), &wake,
+				      SYNC_POLICY_FIFO, 0)
+				== KERN_SUCCESS);
+		CHECK(semaphore_create(mach_task_self(), &reply,
+				      SYNC_POLICY_FIFO, 0)
+				== KERN_SUCCESS);
+
+		struct {
+			mach_msg_header_t Head;
+			mach_msg_trailer_t trailer;
+			char padding[64];
+		} request;
+		memset(&request, 0, sizeof(request));
+		CHECK(mach_msg(&request.Head, MACH_RCV_MSG, 0, sizeof(request),
+				      service, MACH_MSG_TIMEOUT_NONE,
+				      MACH_PORT_NULL)
+				== MACH_MSG_SUCCESS);
+		CHECK(mach_port_mod_refs(mach_task_self(), reply,
+				      MACH_PORT_RIGHT_SEND, 1)
+				== KERN_SUCCESS);
+		struct {
+			mach_msg_header_t Head;
+			mach_msg_body_t body;
+			mach_msg_port_descriptor_t ports[2];
+		} message;
+		memset(&message, 0, sizeof(message));
+		message.Head.msgh_bits
+				= MACH_MSGH_BITS(MACH_MSGH_BITS_REMOTE(
+								 request.Head.msgh_bits),
+						  0)
+				| MACH_MSGH_BITS_COMPLEX;
+		message.Head.msgh_remote_port = request.Head.msgh_remote_port;
+		message.Head.msgh_size = sizeof(message);
+		message.Head.msgh_id = REPLY_ID;
+		message.body.msgh_descriptor_count = 2;
+		message.ports[0].name = wake;
+		message.ports[0].disposition = MACH_MSG_TYPE_COPY_SEND;
+		message.ports[0].type = MACH_MSG_PORT_DESCRIPTOR;
+		message.ports[1].name = reply;
+		message.ports[1].disposition = MACH_MSG_TYPE_MOVE_SEND;
+		message.ports[1].type = MACH_MSG_PORT_DESCRIPTOR;
+		CHECK(mach_msg(&message.Head, MACH_SEND_MSG, sizeof(message), 0,
+				      MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+				      MACH_PORT_NULL)
+				== MACH_MSG_SUCCESS);
+
+		CHECK(semaphore_timedwait(wake, five_seconds) == KERN_SUCCESS);
+		CHECK(semaphore_signal(reply) == KERN_SUCCESS);
+		CHECK(semaphore_timedwait(wake, five_seconds) == KERN_SUCCESS);
+		usleep(200000);
+		CHECK(semaphore_destroy(mach_task_self(), reply)
+				== KERN_SUCCESS);
+		_exit(0);
+	}
+
+	mach_port_t service = MACH_PORT_NULL;
+	for (int attempt = 0; attempt != 50 && service == MACH_PORT_NULL;
+			attempt++) {
+		service = bootstrap_call(LOOK_UP, SEMAPHORE_SERVICE_NAME);
+		if (service == MACH_PORT_NULL) {
+			usleep(100000);
+		}
+	}
+	CHECK(service != MACH_PORT_NULL);
+
+	mach_port_t reply_port;
+	mach_port_allocate(
+			mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &reply_port);
+	union {
+		mach_msg_header_t request;
+		struct {
+			mach_msg_header_t Head;
+			mach_msg_body_t body;
+			mach_msg_port_descriptor_t ports[2];
+			mach_msg_trailer_t trailer;
+		} reply;
+	} message;
+	memset(&message, 0, sizeof(message));
+	message.request.msgh_bits = MACH_MSGH_BITS(
+			MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+	message.request.msgh_remote_port = service;
+	message.request.msgh_local_port = reply_port;
+	message.request.msgh_size = sizeof(message.request);
+	message.request.msgh_id = REQUEST_ID;
+	CHECK(mach_msg(&message.request, MACH_SEND_MSG | MACH_RCV_MSG,
+			      sizeof(message.request), sizeof(message),
+			      reply_port, 8000, MACH_PORT_NULL)
+			== MACH_MSG_SUCCESS);
+	CHECK(message.reply.Head.msgh_bits & MACH_MSGH_BITS_COMPLEX);
+	CHECK(message.reply.body.msgh_descriptor_count == 2);
+	semaphore_t wake = message.reply.ports[0].name;
+	semaphore_t reply = message.reply.ports[1].name;
+
+	struct timespec start;
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	CHECK(semaphore_signal(wake) == KERN_SUCCESS);
+	CHECK(semaphore_timedwait(reply, five_seconds) == KERN_SUCCESS);
+	CHECK(seconds_since(&start) < 2);
+
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	CHECK(semaphore_timedwait(reply, (mach_timespec_t){0, 300000000})
+			== KERN_OPERATION_TIMED_OUT);
+	CHECK(seconds_since(&start) >= 0.25);
+
+	CHECK(semaphore_signal(wake) == KERN_SUCCESS);
+	CHECK(semaphore_wait(reply) == KERN_TERMINATED);
+
 	int status;
 	waitpid(pid, &status, 0);
 	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);

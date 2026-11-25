@@ -81,6 +81,8 @@ struct ipc_memory_record {
 
 struct ipc_export;
 
+#define IPC_REMOTE_SEMAPHORE (UINT64_MAX - 3)
+
 struct ipc_kobject_ops {
 	ipc_kobject_type_t type;
 	uint64_t remote_id;

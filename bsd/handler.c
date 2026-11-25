@@ -248,6 +248,7 @@ sys_fork(void)
 		credentials_fork_child();
 		signals_fork_child();
 		aio_fork_child();
+		semaphore_fork_child();
 		persona_inherit(getpid(), parent);
 	}
 	syscall_set_rdx(pid == 0);

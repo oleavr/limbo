@@ -548,6 +548,12 @@ signals_handle(int sig, siginfo_t *info, ucontext_t *uc,
 	}
 }
 
+bool
+signals_thread_pending(void)
+{
+	return thread_pending != 0;
+}
+
 int
 signals_futex_wait(_Atomic uint32_t *word, pthread_mutex_t *mutex,
 		const struct timespec *deadline)
