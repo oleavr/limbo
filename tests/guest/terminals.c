@@ -30,7 +30,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "check.h"
@@ -80,6 +83,24 @@ main(void)
 		CHECK(strcmp(d->d_name, path + strlen("/dev/")) != 0);
 	}
 	closedir(dir);
+
+	pid_t child = fork();
+	CHECK(child >= 0);
+	if (child == 0) {
+		if (setsid() < 0 || ioctl(slave, TIOCSCTTY, 0) != 0) {
+			_exit(2);
+		}
+		struct kinfo_proc info;
+		size_t length = sizeof(info);
+		int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
+		if (sysctl(mib, 4, &info, &length, NULL, 0) != 0) {
+			_exit(3);
+		}
+		_exit(info.kp_eproc.e_tdev == (dev_t)st.st_rdev ? 0 : 4);
+	}
+	int status;
+	CHECK(waitpid(child, &status, 0) == child);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 
 	CHECK(close(slave) == 0);
 	CHECK(close(master) == 0);
