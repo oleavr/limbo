@@ -783,12 +783,18 @@ oid_format(const int *oid, void *old, size_t *oldlenp)
 		} else if (node->reader == read_hostname
 				|| node->reader == read_bootsessionuuid
 				|| node->reader == read_sandbox_sentinel
+#ifdef __x86_64__
+				|| node->reader == read_cpu_brand
+#endif
 				|| node->reader == read_osversion
 				|| node->reader == read_osproductversion) {
 			kind = CTLTYPE_STRING;
 			format = "A";
 		} else if (node->reader == read_memsize
 				|| node->reader == read_memsize_physical
+#ifdef __x86_64__
+				|| node->reader == read_cpu_frequency
+#endif
 				|| node->reader == read_osvariant_status) {
 			kind = CTLTYPE_QUAD;
 			format = "Q";
