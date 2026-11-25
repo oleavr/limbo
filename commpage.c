@@ -1,6 +1,7 @@
 /*
  * Copyright © 2021 Keegan Saunders
  * Copyright © 2026 Ole André Vadla Ravnås
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -341,6 +342,7 @@ static const uint8_t commpage_snapshot[] = {
 #define COMM_PAGE_APPROX_TIME_SUPPORTED 0xc8
 #define COMM_PAGE_NEWTIMEOFDAY_TICK    0x120
 #define COMM_PAGE_APRR_SUPPORT         0x10c
+#define COMM_PAGE_JIT_CAGE              0x10d
 #define COMM_PAGE_CPU_CAPABILITIES64   0x10
 #define COMM_PAGE_CPU_CAPABILITIES     0x20
 
@@ -407,6 +409,7 @@ commpage_mmap(void)
 	commpage[COMM_PAGE_APPROX_TIME_SUPPORTED] = 0;
 
 	commpage[COMM_PAGE_APRR_SUPPORT] = 0;
+	commpage[COMM_PAGE_JIT_CAGE] = 0;
 
 	uint64_t *capabilities64
 			= (uint64_t *)(commpage + COMM_PAGE_CPU_CAPABILITIES64);
