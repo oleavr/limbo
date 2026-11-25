@@ -707,9 +707,15 @@ pack_attributes(int fd, bool data, const struct __darwin_attrlist *alistp,
 
 	if (returned.volattr & ATTR_VOL_UUID) {
 		struct statfs fs;
-		fstatfs(fd, &fs);
+		dev_t device = sysroot_device(s.st_dev);
+		char root[PATH_MAX];
+		if (device == s.st_dev
+				|| statfs(sysroot_host_path("/", 0, root), &fs)
+						== -1) {
+			fstatfs(fd, &fs);
+		}
 		uint64_t uuid[2] = {*(uint64_t *)&fs.f_fsid,
-				s.st_dev ^ (data ? DATA_VOLUME_UUID_MARK : 0)};
+				device ^ (data ? DATA_VOLUME_UUID_MARK : 0)};
 		memcpy(buffer + offset, uuid, sizeof(uuid));
 		offset += sizeof(uuid);
 		volattr &= ~ATTR_VOL_UUID;
