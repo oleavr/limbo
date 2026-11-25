@@ -377,6 +377,48 @@ responsible_entitlements(int32_t pid, void *entitlements, uint64_t *length)
 	return 0;
 }
 
+#define QUARANTINE_MOUNT_POINT 88
+#define MOUNT_POINT_INFO_MIN   2
+
+struct quarantine_mount_point_args {
+	const char *path;
+	uint64_t *size;
+	void *buffer;
+};
+
+static bool same_file(const struct stat *s, const char *path);
+
+static int
+quarantine_mount_point(const struct quarantine_mount_point_args *args)
+{
+	if (args == NULL || args->path == NULL || args->size == NULL) {
+		return _EFAULT;
+	}
+	char buffer[PATH_MAX];
+	struct stat s;
+	if (stat(sysroot_host_path(args->path, 0, buffer), &s) != 0) {
+		return err_map(errno);
+	}
+	if (*args->size < MOUNT_POINT_INFO_MIN) {
+		return _ERANGE;
+	}
+	if (!same_file(&s, "/") && !same_file(&s, sysroot_data_mount_point())
+			&& !same_file(&s, "/dev")) {
+		return _EINVAL;
+	}
+	return _ENOATTR;
+}
+
+static bool
+same_file(const struct stat *s, const char *path)
+{
+	char buffer[PATH_MAX];
+	struct stat other;
+	return stat(sysroot_host_path(path, 0, buffer), &other) == 0
+			&& other.st_dev == s->st_dev
+			&& other.st_ino == s->st_ino;
+}
+
 static int
 quarantine_handle_syscall(int call, void *arg)
 {
@@ -392,6 +434,8 @@ quarantine_handle_syscall(int call, void *arg)
 		return quarantine_responsible_for_pid(arg);
 	case QUARANTINE_RESPONSIBLE:
 		return quarantine_responsible(arg);
+	case QUARANTINE_MOUNT_POINT:
+		return quarantine_mount_point(arg);
 	default:
 		unimplemented();
 	}
