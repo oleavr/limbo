@@ -904,6 +904,9 @@ file_table_size(int32_t pid)
 	process_proc_dir(pid, proc_dir, sizeof(proc_dir));
 	snprintf(path, sizeof(path), "%s/fd", proc_dir);
 	DIR *dir = opendir(path);
+	if (dir == NULL) {
+		return 0;
+	}
 	uint32_t size = 0;
 	struct dirent *entry;
 	while ((entry = readdir(dir)) != NULL) {
