@@ -535,7 +535,8 @@ sys_chmod(user_addr_t path, int mode)
 		return _EPERM;
 	}
 	char buffer[PATH_MAX];
-	return errno_map(chmod(sysroot_host_path(path, 0, buffer), mode));
+	return errno_map(acl_chmod_at(
+			AT_FDCWD, sysroot_host_path(path, 0, buffer), 0, mode));
 }
 
 int
@@ -2137,7 +2138,7 @@ sys_fchmod(int fd, int mode)
 	if (mac_sandbox_denies_fd(SANDBOX_FILE_WRITE_MODE, fd)) {
 		return _EPERM;
 	}
-	return errno_map(fchmod(fd, mode));
+	return errno_map(acl_chmod_at(fd, "", AT_EMPTY_PATH, mode));
 }
 
 int
@@ -3497,7 +3498,9 @@ sys_chmod_extended(user_addr_t path, void *uid, void *gid, int mode,
 			== -1) {
 		return err_map(errno);
 	}
-	if (mode != -1 && chmod(host_path, mode & ALLPERMS) == -1) {
+	if (mode != -1
+			&& acl_chmod_at(AT_FDCWD, host_path, 0, mode & ALLPERMS)
+					== -1) {
 		return err_map(errno);
 	}
 	if (xsecurity == NULL) {
@@ -3530,7 +3533,9 @@ sys_fchmod_extended(
 			== -1) {
 		return err_map(errno);
 	}
-	if (mode != -1 && fchmod(fd, mode & ALLPERMS) == -1) {
+	if (mode != -1
+			&& acl_chmod_at(fd, "", AT_EMPTY_PATH, mode & ALLPERMS)
+					== -1) {
 		return err_map(errno);
 	}
 	if (xsecurity == NULL) {
@@ -4963,8 +4968,8 @@ sys_fchmodat(int fd, user_addr_t path, int mode, int flag)
 	}
 	char buffer[PATH_MAX];
 	int flags = at_flags(flag);
-	return errno_map(fchmodat(at_fd(fd),
-			sysroot_host_path(path, flags, buffer), mode, flags));
+	return errno_map(acl_chmod_at(at_fd(fd),
+			sysroot_host_path(path, flags, buffer), flags, mode));
 }
 
 int

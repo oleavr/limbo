@@ -33,13 +33,27 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
 #include <sys/xattr.h>
 
+#include "bsd/gid.h"
+
 #define LIST_HEADER_SIZE    offsetof(struct acl_list, ace)
+#define PERMISSION_BITS     07777
 #define POSIX_ACL_XATTR     "system.posix_acl_access"
+#define POSIX_ACL_VERSION   2
+#define POSIX_ACL_USER_OBJ  0x01
+#define POSIX_ACL_USER      0x02
 #define POSIX_ACL_GROUP_OBJ 0x04
+#define POSIX_ACL_GROUP     0x08
+#define POSIX_ACL_MASK      0x10
+#define POSIX_ACL_OTHER     0x20
+#define POSIX_ACL_NO_ID     UINT32_MAX
+#define POSIX_READ          4
+#define POSIX_WRITE         2
+#define POSIX_EXECUTE       1
 #define POSIX_OWN_ENTRIES   4
 #define GUID_PREFIX_SIZE    12
 #define EVERYONE_GID        12
@@ -72,6 +86,11 @@ static const uint8_t group_prefix[GUID_PREFIX_SIZE] = {0xab, 0xcd, 0xef, 0xab,
 
 static bool valid(const struct acl_list *list, ssize_t size);
 static size_t list_size(const struct acl_list *list);
+static int record_write(const char *path, const struct acl_list *list);
+static size_t named_entries(const struct acl_list *list, bool directory,
+		struct posix_entry *named);
+static uint16_t posix_perm(uint32_t rights, bool directory);
+static int compare_entries(const void *a, const void *b);
 static bool applies(const struct kauth_ace *ace, uid_t uid, gid_t gid,
 		const gid_t *groups, size_t group_count);
 static bool guid_id(const uint8_t guid[16],
@@ -103,13 +122,125 @@ list_size(const struct acl_list *list)
 }
 
 int
-acl_store(const char *path, const struct acl_list *list)
+acl_store(const char *path, const struct stat *s, const struct acl_list *list)
+{
+	if (record_write(path, list) == -1) {
+		return -1;
+	}
+	int kept = acl_posix_group(path, true);
+	int group = kept >= 0 ? kept : (int)((s->st_mode & S_IRWXG) >> 3);
+	if (acl_posix_write(path, list, s, group) == -1
+			&& errno != EOPNOTSUPP) {
+		return -1;
+	}
+	return 0;
+}
+
+static int
+record_write(const char *path, const struct acl_list *list)
 {
 	if (list->count == KAUTH_FILESEC_NOACL) {
 		int r = removexattr(path, ACL_XATTR);
 		return (r == -1 && errno == ENODATA) ? 0 : r;
 	}
 	return setxattr(path, ACL_XATTR, list, list_size(list), 0);
+}
+
+int
+acl_posix_write(const char *path, const struct acl_list *list,
+		const struct stat *s, int group)
+{
+	struct posix_acl acl = {.version = POSIX_ACL_VERSION};
+	struct posix_entry *entry = acl.entry;
+	size_t count = named_entries(list, S_ISDIR(s->st_mode), entry);
+	if (count == 0) {
+		if (acl_posix_group(path, true) == -1) {
+			return 0;
+		}
+		if (removexattr(path, POSIX_ACL_XATTR) == -1
+				&& errno != ENODATA) {
+			return -1;
+		}
+		mode_t own = s->st_mode & (PERMISSION_BITS & ~S_IRWXG);
+		return chmod(path, own | (mode_t)(group << 3));
+	}
+
+	uint16_t other = s->st_mode & S_IRWXO;
+	uint16_t mask = (uint16_t)group;
+	for (size_t i = 0; i < count; i++) {
+		entry[i].perm |= other;
+		mask |= entry[i].perm;
+	}
+	entry[count++] = (struct posix_entry){POSIX_ACL_USER_OBJ,
+			(s->st_mode & S_IRWXU) >> 6, POSIX_ACL_NO_ID};
+	entry[count++] = (struct posix_entry){
+			POSIX_ACL_GROUP_OBJ, (uint16_t)group, POSIX_ACL_NO_ID};
+	entry[count++] = (struct posix_entry){
+			POSIX_ACL_MASK, mask, POSIX_ACL_NO_ID};
+	entry[count++] = (struct posix_entry){
+			POSIX_ACL_OTHER, other, POSIX_ACL_NO_ID};
+	qsort(entry, count, sizeof(*entry), compare_entries);
+	return setxattr(path, POSIX_ACL_XATTR, &acl,
+			sizeof(acl.version) + count * sizeof(*entry), 0);
+}
+
+static size_t
+named_entries(const struct acl_list *list, bool directory,
+		struct posix_entry *named)
+{
+	size_t count = 0;
+	for (uint32_t i = 0;
+			list->count != KAUTH_FILESEC_NOACL && i < list->count;
+			i++) {
+		const struct kauth_ace *ace = &list->ace[i];
+		if ((ace->flags & KAUTH_ACE_KINDMASK) != KAUTH_ACE_PERMIT
+				|| (ace->flags & KAUTH_ACE_ONLY_INHERIT)) {
+			continue;
+		}
+		uint32_t id;
+		uint16_t tag;
+		if (guid_id(ace->applicable, user_prefix, &id)) {
+			tag = POSIX_ACL_USER;
+		} else if (guid_id(ace->applicable, group_prefix, &id)) {
+			tag = POSIX_ACL_GROUP;
+			id = gid_to_linux(id);
+		} else {
+			continue;
+		}
+		size_t j = 0;
+		while (j < count
+				&& (named[j].tag != tag || named[j].id != id)) {
+			j++;
+		}
+		if (j == count) {
+			named[count++] = (struct posix_entry){tag, 0, id};
+		}
+		named[j].perm |= posix_perm(ace->rights, directory);
+	}
+	return count;
+}
+
+static uint16_t
+posix_perm(uint32_t rights, bool directory)
+{
+	uint32_t write = KAUTH_VNODE_WRITE_DATA | KAUTH_VNODE_APPEND_DATA
+			| KAUTH_ACE_GENERIC_WRITE | KAUTH_ACE_GENERIC_ALL
+			| (directory ? KAUTH_VNODE_DELETE_CHILD : 0);
+	uint16_t perm = 0;
+	if (rights
+			& (KAUTH_VNODE_READ_DATA | KAUTH_ACE_GENERIC_READ
+					| KAUTH_ACE_GENERIC_ALL)) {
+		perm |= POSIX_READ;
+	}
+	if (rights & write) {
+		perm |= POSIX_WRITE;
+	}
+	if (rights
+			& (KAUTH_VNODE_EXECUTE | KAUTH_ACE_GENERIC_EXECUTE
+					| KAUTH_ACE_GENERIC_ALL)) {
+		perm |= POSIX_EXECUTE;
+	}
+	return perm;
 }
 
 int
@@ -129,6 +260,16 @@ acl_posix_group(const char *path, bool follow)
 		}
 	}
 	return -1;
+}
+
+static int
+compare_entries(const void *a, const void *b)
+{
+	const struct posix_entry *x = a, *y = b;
+	if (x->tag != y->tag) {
+		return x->tag < y->tag ? -1 : 1;
+	}
+	return x->id < y->id ? -1 : x->id > y->id;
 }
 
 bool

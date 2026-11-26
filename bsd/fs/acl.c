@@ -59,6 +59,7 @@ static enum acl_result evaluate(const char *path, uint32_t rights);
 static uint32_t open_rights(int flags);
 static void object_path(int fd, char *buffer, size_t size);
 static bool may_set(const struct stat *s);
+static void mode_changed(int fd);
 static bool parent_gives(
 		int dirfd, const char *host_path, struct acl_list *parent);
 static void parent_path(
@@ -116,7 +117,7 @@ acl_set_at(int dirfd, const char *host_path, int at_flags,
 		errno = EPERM;
 		r = -1;
 	} else if (r == 0) {
-		r = acl_store(path, list);
+		r = acl_store(path, &s, list);
 	}
 	int saved = errno;
 	close(fd);
@@ -228,6 +229,40 @@ may_set(const struct stat *s)
 {
 	uid_t me = (uid_t)setfsuid((uid_t)-1);
 	return me == 0 || me == s->st_uid;
+}
+
+int
+acl_chmod_at(int dirfd, const char *host_path, int at_flags, mode_t mode)
+{
+	bool by_fd = (at_flags & AT_EMPTY_PATH) && host_path[0] == '\0';
+	int r = by_fd ? fchmod(dirfd, mode)
+		      : fchmodat(dirfd, host_path, mode, at_flags);
+	if (r == -1) {
+		return -1;
+	}
+	int fd = object_open(dirfd, host_path, at_flags);
+	if (fd != -1) {
+		mode_changed(fd);
+		close(fd);
+	}
+	return 0;
+}
+
+static void
+mode_changed(int fd)
+{
+	char path[48];
+	object_path(fd, path, sizeof(path));
+	struct stat s;
+	fstat(fd, &s);
+	if (S_ISLNK(s.st_mode)) {
+		return;
+	}
+	struct acl_list list;
+	acl_record_read(path, &list);
+	if (list.count != KAUTH_FILESEC_NOACL) {
+		acl_posix_write(path, &list, &s, (s.st_mode & S_IRWXG) >> 3);
+	}
 }
 
 int
@@ -352,7 +387,7 @@ inherit(int fd, const struct acl_list *parent, const struct acl_list *initial)
 	bool stores = !S_ISLNK(s.st_mode)
 			&& acl_inherit(parent, initial, S_ISDIR(s.st_mode),
 					&list);
-	return stores ? acl_store(path, &list) : 0;
+	return stores ? acl_store(path, &s, &list) : 0;
 }
 
 int

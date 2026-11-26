@@ -1141,9 +1141,10 @@ set_attributes(int dirfd, const char *path, int flags, void *alist,
 		uint32_t mode;
 		memcpy(&mode, cursor, sizeof(mode));
 		cursor += sizeof(mode);
-		int r = (path == NULL)
-				? fchmod(dirfd, mode & 07777)
-				: fchmodat(dirfd, path, mode & 07777, flags);
+		int r = (path == NULL) ? acl_chmod_at(dirfd, "", AT_EMPTY_PATH,
+							 mode & 07777)
+				       : acl_chmod_at(dirfd, path, flags,
+							 mode & 07777);
 		if (r == -1 && !(errno == EOPNOTSUPP
 					    && (flags & AT_SYMLINK_NOFOLLOW))) {
 			return -1;
