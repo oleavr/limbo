@@ -179,6 +179,8 @@ stat_at(int fd, const char *path, int flags, struct __darwin_user64_stat64 *ub)
 	convert_statx(&tmp, ub);
 	if (!S_ISLNK(tmp.stx_mode)) {
 		ub->st_flags = bsd_flags_get_at(fd, host_path, flags);
+		ub->st_mode = acl_darwin_mode_at(
+				fd, host_path, flags, ub->st_mode);
 	}
 	return 0;
 }
