@@ -3407,6 +3407,9 @@ int
 sys_open_extended(user_addr_t path, int flags, void *uid, void *gid, int mode,
 		user_addr_t xsecurity)
 {
+	if (path == NULL) {
+		return _EFAULT;
+	}
 	struct acl_list list;
 	const struct acl_list *initial;
 	if (initial_list(xsecurity, &list, &initial) == -1) {
