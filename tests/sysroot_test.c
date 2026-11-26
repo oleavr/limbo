@@ -48,6 +48,7 @@
 #include "check.h"
 #include "sysroot.h"
 
+#define ZONEINFO    "/var/db/timezone/zoneinfo/"
 #define VOLUME_SIZE "3m"
 #define SKIP        77
 
@@ -67,6 +68,8 @@ static void check_creation_path(
 		const char *path, int flags, const char *expected);
 static int remove_entry(const char *path, const struct stat *st, int type,
 		struct FTW *ftw);
+static const char *host_time_zone(void);
+static void check_time_zone(void);
 
 int
 main(int argc, char *argv[])
@@ -87,6 +90,7 @@ main(int argc, char *argv[])
 	if (mounts) {
 		check_devices();
 	}
+	check_time_zone();
 	check_data_volume();
 
 	check_host_path("/System/Library/file", 0, "/System/Library/file");
@@ -172,6 +176,34 @@ populate(void)
 	CHECK(write_file(firmlinks,
 			"/tmp\ttmp\n/Volumes\tVolumes\n/private\tprivate\n/"
 			"Users\tUsers\n"));
+
+	const char *zone = host_time_zone();
+	if (zone != NULL) {
+		make_dir("/private/var");
+		make_link("private/var", "/var");
+		char path[PATH_MAX * 3];
+		snprintf(path, sizeof(path), "%s" ZONEINFO "%s", root, zone);
+		for (char *slash = strchr(path + strlen(root) + 1, '/');
+				slash != NULL; slash = strchr(slash + 1, '/')) {
+			*slash = '\0';
+			mkdir(path, 0755);
+			*slash = '/';
+		}
+		make_file(path + strlen(root));
+	}
+}
+
+static const char *
+host_time_zone(void)
+{
+	static char link[PATH_MAX];
+	ssize_t length = readlink("/etc/localtime", link, sizeof(link) - 1);
+	if (length == -1) {
+		return NULL;
+	}
+	link[length] = '\0';
+	const char *zone = strstr(link, "zoneinfo/");
+	return zone != NULL ? zone + strlen("zoneinfo/") : NULL;
 }
 
 static bool
@@ -231,6 +263,23 @@ check_devices(void)
 	CHECK(space.f_blocks == volume.f_blocks);
 	CHECK(!sysroot_space(top.st_dev + 1000, &space));
 	CHECK(umount(path) == 0);
+}
+
+static void
+check_time_zone(void)
+{
+	const char *zone = host_time_zone();
+	if (zone == NULL) {
+		printf("skipping the time zone: the host names none\n");
+		return;
+	}
+	char link[PATH_MAX * 2], target[PATH_MAX], expected[PATH_MAX * 2];
+	snprintf(link, sizeof(link), "%s/private/etc/localtime", root);
+	ssize_t length = readlink(link, target, sizeof(target) - 1);
+	CHECK(length != -1);
+	target[length] = '\0';
+	snprintf(expected, sizeof(expected), ZONEINFO "%s", zone);
+	CHECK(strcmp(target, expected) == 0);
 }
 
 static void
