@@ -363,15 +363,26 @@ acl_chmod_at(int dirfd, const char *host_path, int at_flags, mode_t mode)
 	bool by_fd = (at_flags & AT_EMPTY_PATH) && host_path[0] == '\0';
 	int r = by_fd ? fchmod(dirfd, mode)
 		      : fchmodat(dirfd, host_path, mode, at_flags);
-	if (r == -1) {
+	if (r == -1 && (errno != EPERM || !through_broker())) {
 		return -1;
 	}
 	int fd = object_open(dirfd, host_path, at_flags);
-	if (fd != -1) {
-		mode_changed(fd);
-		close(fd);
+	if (fd == -1) {
+		errno = EPERM;
+		return r;
 	}
-	return 0;
+	if (r == 0) {
+		mode_changed(fd);
+	} else {
+		struct broker_acl request = {
+				.op = BROKER_ACL_CHMOD,
+				.mode = mode,
+		};
+		int error = ask_broker(&request, fd, -1);
+		r = answered(error == BROKER_ACL_UNKEPT ? EPERM : error);
+	}
+	close(fd);
+	return r;
 }
 
 static void

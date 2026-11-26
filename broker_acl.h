@@ -36,10 +36,12 @@ enum broker_acl_op {
 	BROKER_ACL_SET,
 	BROKER_ACL_INHERIT,
 	BROKER_ACL_REDERIVE,
+	BROKER_ACL_CHMOD,
 };
 
 struct broker_acl {
 	uint32_t op;
+	uint32_t mode;
 	char name[256];
 	struct acl_list list;
 };
