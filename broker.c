@@ -56,6 +56,7 @@
 #include <unistd.h>
 
 #include "broker.h"
+#include "broker_acl.h"
 #include "broker_jetsam.h"
 #include "broker_setid.h"
 #include "osfmk/ipc_remote.h"
@@ -88,6 +89,7 @@ union broker_request {
 	struct broker_launchd_port launchd_port;
 	struct broker_jetsam_priority jetsam;
 	struct broker_setid_exec setid;
+	struct broker_acl acl;
 };
 
 struct held_send {
@@ -900,6 +902,18 @@ handle_guest(int fd)
 		bool ool = frame->type & BROKER_FRAME_OOL;
 		setid_exec(conn->fd, payload, length, frame->fds,
 				frame->fd_count - ool);
+		break;
+	}
+	case BROKER_ACL: {
+		bool ool = frame->type & BROKER_FRAME_OOL;
+		struct broker_acl *request = (struct broker_acl *)payload;
+		request->name[sizeof(request->name) - 1] = '\0';
+		struct broker_acl_done done = {
+				.error
+				= broker_acl(conn->fd, request, frame->fds,
+						frame->fd_count - ool),
+		};
+		send_frame(conn, BROKER_ACL_DONE, &done, sizeof(done));
 		break;
 	}
 	}

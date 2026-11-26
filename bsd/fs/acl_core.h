@@ -32,7 +32,8 @@
 #include <stdint.h>
 #include <sys/stat.h>
 
-#define ACL_XATTR "user.limbo.acl"
+#define ACL_XATTR         "user.limbo.acl"
+#define ACL_TRUSTED_XATTR "trusted.limbo.acl"
 
 #define KAUTH_FILESEC_MAGIC   0x012cc16d
 #define KAUTH_FILESEC_NOACL   UINT32_MAX
@@ -83,9 +84,10 @@ struct acl_list {
 	struct kauth_ace ace[KAUTH_ACL_MAX_ENTRIES];
 };
 
-void acl_record_read(const char *path, struct acl_list *list);
+bool acl_trusted_available(void);
+void acl_record_read(const char *path, bool trusted, struct acl_list *list);
 int acl_store(const char *path, const struct stat *s,
-		const struct acl_list *list);
+		const struct acl_list *list, bool trusted);
 int acl_posix_write(const char *path, const struct acl_list *list,
 		const struct stat *s, int group);
 int acl_posix_group(const char *path, bool follow);

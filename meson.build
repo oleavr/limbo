@@ -77,9 +77,11 @@ limbo = executable('limbo',
 limbo_broker = executable('limbo-broker',
   sources: [
     'broker.c',
+    'broker_acl.c',
     'broker_jetsam.c',
     'broker_setid.c',
     'broker_wire.c',
+    'bsd/fs/acl_core.c',
   ],
   include_directories: include_dir,
   link_args: [

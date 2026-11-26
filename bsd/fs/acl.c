@@ -35,11 +35,16 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/fsuid.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
+#include "broker.h"
+#include "broker_acl.h"
 #include "bsd/gid.h"
 #include "protection.h"
 
@@ -58,7 +63,15 @@ static int object_open(int dirfd, const char *host_path, int at_flags);
 static enum acl_result evaluate(const char *path, uint32_t rights);
 static uint32_t open_rights(int flags);
 static void object_path(int fd, char *buffer, size_t size);
+static int broker_set(int fd, const struct acl_list *list);
+static bool through_broker(void);
+static int ask_broker(const struct broker_acl *request, int fd, int folder);
+static bool send_request(
+		int sock, const struct broker_acl *request, int fd, int folder);
+static int answer(int sock);
+static int answered(int error);
 static bool may_set(const struct stat *s);
+static bool trusted_here(void);
 static void mode_changed(int fd);
 static bool parent_gives(
 		int dirfd, const char *host_path, struct acl_list *parent);
@@ -67,7 +80,9 @@ static void parent_path(
 static uint32_t class_given(int dirfd, const char *host_path);
 static int open_or_make(int dirfd, const char *host_path, int flags,
 		mode_t mode, bool *made);
-static int inherit(int fd, const struct acl_list *parent,
+static int inherit(int fd, int dirfd, const char *host_path,
+		const struct acl_list *parent, const struct acl_list *initial);
+static int broker_inherit(int fd, int dirfd, const char *host_path,
 		const struct acl_list *initial);
 static int open_reaching(
 		int dirfd, const char *host_path, int flags, mode_t mode);
@@ -110,14 +125,19 @@ acl_set_at(int dirfd, const char *host_path, int at_flags,
 	object_path(fd, path, sizeof(path));
 	struct stat s;
 	int r = fstat(fd, &s);
+	int error = BROKER_ACL_UNKEPT;
 	if (r == 0 && S_ISLNK(s.st_mode)) {
 		errno = EOPNOTSUPP;
 		r = -1;
+	} else if (r == 0
+			&& (error = broker_set(fd, list))
+					!= BROKER_ACL_UNKEPT) {
+		r = answered(error);
 	} else if (r == 0 && !may_set(&s)) {
 		errno = EPERM;
 		r = -1;
 	} else if (r == 0) {
-		r = acl_store(path, &s, list);
+		r = acl_store(path, &s, list, trusted_here());
 	}
 	int saved = errno;
 	close(fd);
@@ -141,6 +161,105 @@ static void
 object_path(int fd, char *buffer, size_t size)
 {
 	snprintf(buffer, size, "/proc/thread-self/fd/%d", fd);
+}
+
+static int
+broker_set(int fd, const struct acl_list *list)
+{
+	if (!through_broker()) {
+		return BROKER_ACL_UNKEPT;
+	}
+	struct broker_acl request = {.op = BROKER_ACL_SET, .list = *list};
+	return ask_broker(&request, fd, -1);
+}
+
+static bool
+through_broker(void)
+{
+	return getenv(LIMBO_BROKER_SOCKET_ENV) != NULL
+			&& setfsuid((uid_t)-1) != 0;
+}
+
+static int
+ask_broker(const struct broker_acl *request, int fd, int folder)
+{
+	int sock = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+	struct sockaddr_un addr = {.sun_family = AF_UNIX};
+	strncpy(addr.sun_path, getenv(LIMBO_BROKER_SOCKET_ENV),
+			sizeof(addr.sun_path) - 1);
+	int error = BROKER_ACL_UNKEPT;
+	if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) == 0
+			&& send_request(sock, request, fd, folder)) {
+		error = answer(sock);
+	}
+	close(sock);
+	return error;
+}
+
+static bool
+send_request(int sock, const struct broker_acl *request, int fd, int folder)
+{
+	struct broker_frame header = {
+			.type = BROKER_ACL,
+			.length = sizeof(*request),
+	};
+	struct iovec iov[2] = {
+			{.iov_base = &header, .iov_len = sizeof(header)},
+			{.iov_base = (void *)request,
+					.iov_len = sizeof(*request)},
+	};
+	int fds[2] = {fd, folder};
+	size_t fds_size = (folder == -1 ? 1 : 2) * sizeof(int);
+	union {
+		char buffer[CMSG_SPACE(sizeof(fds))];
+		struct cmsghdr align;
+	} control = {0};
+	struct msghdr msg = {
+			.msg_iov = iov,
+			.msg_iovlen = 2,
+			.msg_control = control.buffer,
+			.msg_controllen = CMSG_SPACE(fds_size),
+	};
+	struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+	cmsg->cmsg_level = SOL_SOCKET;
+	cmsg->cmsg_type = SCM_RIGHTS;
+	cmsg->cmsg_len = CMSG_LEN(fds_size);
+	memcpy(CMSG_DATA(cmsg), fds, fds_size);
+	return sendmsg(sock, &msg, MSG_NOSIGNAL)
+			== (ssize_t)(sizeof(header) + sizeof(*request));
+}
+
+static int
+answer(int sock)
+{
+	for (;;) {
+		char frame[sizeof(struct broker_frame) + 64];
+		ssize_t n = recv(sock, frame, sizeof(frame), 0);
+		struct broker_frame header;
+		struct broker_acl_done done;
+		if (n < (ssize_t)sizeof(header)) {
+			return BROKER_ACL_UNKEPT;
+		}
+		memcpy(&header, frame, sizeof(header));
+		if (header.type != BROKER_ACL_DONE) {
+			continue;
+		}
+		if (n != (ssize_t)(sizeof(header) + sizeof(done))) {
+			return BROKER_ACL_UNKEPT;
+		}
+		memcpy(&done, frame + sizeof(header), sizeof(done));
+		return done.error;
+	}
+}
+
+static int
+answered(int error)
+{
+	if (error == 0) {
+		return 0;
+	}
+	errno = error;
+	return -1;
 }
 
 int
@@ -192,7 +311,7 @@ evaluate(const char *path, uint32_t rights)
 		return ACL_UNDECIDED;
 	}
 	struct acl_list list;
-	acl_record_read(path, &list);
+	acl_record_read(path, false, &list);
 	if (list.count == KAUTH_FILESEC_NOACL) {
 		return ACL_UNDECIDED;
 	}
@@ -231,6 +350,13 @@ may_set(const struct stat *s)
 	return me == 0 || me == s->st_uid;
 }
 
+static bool
+trusted_here(void)
+{
+	return getenv(LIMBO_BROKER_SOCKET_ENV) != NULL
+			&& setfsuid((uid_t)-1) == 0 && acl_trusted_available();
+}
+
 int
 acl_chmod_at(int dirfd, const char *host_path, int at_flags, mode_t mode)
 {
@@ -259,8 +385,13 @@ mode_changed(int fd)
 		return;
 	}
 	struct acl_list list;
-	acl_record_read(path, &list);
-	if (list.count != KAUTH_FILESEC_NOACL) {
+	acl_record_read(path, trusted_here(), &list);
+	if (list.count == KAUTH_FILESEC_NOACL) {
+		return;
+	}
+	struct broker_acl request = {.op = BROKER_ACL_REDERIVE};
+	if (!through_broker()
+			|| ask_broker(&request, fd, -1) == BROKER_ACL_UNKEPT) {
 		acl_posix_write(path, &list, &s, (s.st_mode & S_IRWXG) >> 3);
 	}
 }
@@ -288,7 +419,7 @@ acl_openat(int dirfd, const char *host_path, int flags, mode_t mode,
 	}
 	int fd = open_or_make(dirfd, host_path, flags, mode, made);
 	if (*made && (gives || initial != NULL)
-			&& inherit(fd, &parent, initial) == -1
+			&& inherit(fd, dirfd, host_path, &parent, initial) == -1
 			&& initial != NULL) {
 		int error = errno;
 		unlinkat(dirfd, host_path, 0);
@@ -307,7 +438,7 @@ parent_gives(int dirfd, const char *host_path, struct acl_list *parent)
 {
 	char path[PATH_MAX + 48];
 	parent_path(dirfd, host_path, path, sizeof(path));
-	acl_record_read(path, parent);
+	acl_record_read(path, trusted_here(), parent);
 	return acl_inheritable(parent);
 }
 
@@ -377,17 +508,59 @@ open_reaching(int dirfd, const char *host_path, int flags, mode_t mode)
 }
 
 static int
-inherit(int fd, const struct acl_list *parent, const struct acl_list *initial)
+inherit(int fd, int dirfd, const char *host_path, const struct acl_list *parent,
+		const struct acl_list *initial)
 {
 	char path[48];
 	object_path(fd, path, sizeof(path));
 	struct stat s;
 	fstat(fd, &s);
+	if (S_ISLNK(s.st_mode)) {
+		return 0;
+	}
+	int error = broker_inherit(fd, dirfd, host_path, initial);
+	if (error != BROKER_ACL_UNKEPT) {
+		return answered(error);
+	}
 	struct acl_list list;
-	bool stores = !S_ISLNK(s.st_mode)
-			&& acl_inherit(parent, initial, S_ISDIR(s.st_mode),
-					&list);
-	return stores ? acl_store(path, &s, &list) : 0;
+	bool stores = acl_inherit(parent, initial, S_ISDIR(s.st_mode), &list);
+	return stores ? acl_store(path, &s, &list, trusted_here()) : 0;
+}
+
+static int
+broker_inherit(int fd, int dirfd, const char *host_path,
+		const struct acl_list *initial)
+{
+	if (!through_broker()) {
+		return BROKER_ACL_UNKEPT;
+	}
+	char folder_path[PATH_MAX + 48];
+	parent_path(dirfd, host_path, folder_path, sizeof(folder_path));
+	size_t end = strlen(host_path);
+	while (end > 1 && host_path[end - 1] == '/') {
+		end--;
+	}
+	size_t start = end;
+	while (start > 0 && host_path[start - 1] != '/') {
+		start--;
+	}
+	struct broker_acl request = {
+			.op = BROKER_ACL_INHERIT,
+			.list = {.count = KAUTH_FILESEC_NOACL},
+	};
+	if (initial != NULL) {
+		request.list = *initial;
+	}
+	int folder = open(folder_path, O_PATH | O_DIRECTORY | O_CLOEXEC);
+	int error = BROKER_ACL_UNKEPT;
+	if (folder != -1 && end - start < sizeof(request.name)) {
+		memcpy(request.name, host_path + start, end - start);
+		error = ask_broker(&request, fd, folder);
+	}
+	if (folder != -1) {
+		close(folder);
+	}
+	return error;
 }
 
 int
@@ -408,7 +581,8 @@ acl_mkdirat(int dirfd, const char *host_path, mode_t mode,
 	if (fd == -1) {
 		return 0;
 	}
-	if (lists && inherit(fd, &parent, initial) == -1 && initial != NULL) {
+	if (lists && inherit(fd, dirfd, host_path, &parent, initial) == -1
+			&& initial != NULL) {
 		int error = errno;
 		close(fd);
 		unlinkat(dirfd, host_path, AT_REMOVEDIR);
@@ -433,7 +607,7 @@ acl_filesec_at(int dirfd, const char *host_path, int at_flags, void *buffer,
 	char path[48];
 	object_path(fd, path, sizeof(path));
 	struct acl_list list;
-	acl_record_read(path, &list);
+	acl_record_read(path, false, &list);
 	close(fd);
 	if (list.count == KAUTH_FILESEC_NOACL) {
 		return 0;
