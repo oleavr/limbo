@@ -33,6 +33,7 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
@@ -86,7 +87,9 @@ static const uint8_t group_prefix[GUID_PREFIX_SIZE] = {0xab, 0xcd, 0xef, 0xab,
 
 static bool valid(const struct acl_list *list, ssize_t size);
 static size_t list_size(const struct acl_list *list);
-static int record_write(const char *path, const struct acl_list *list);
+static int record_write(const char *path, const char *name,
+		const struct acl_list *list);
+static bool trusted_unavailable(int error);
 static size_t named_entries(const struct acl_list *list, bool directory,
 		struct posix_entry *named);
 static uint16_t posix_perm(uint32_t rights, bool directory);
@@ -97,10 +100,28 @@ static bool guid_id(const uint8_t guid[16],
 		const uint8_t prefix[GUID_PREFIX_SIZE], uint32_t *id);
 static uint32_t expanded(uint32_t rights);
 
-void
-acl_record_read(const char *path, struct acl_list *list)
+bool
+acl_trusted_available(void)
 {
-	ssize_t size = getxattr(path, ACL_XATTR, list, sizeof(*list));
+	static int available = -1;
+	if (available == -1) {
+		unsigned long inside = 1, outside = 1, count = 0;
+		FILE *map = fopen("/proc/self/uid_map", "re");
+		if (map != NULL) {
+			(void)!fscanf(map, "%lu %lu %lu", &inside, &outside,
+					&count);
+			fclose(map);
+		}
+		available = inside == 0 && outside == 0 && count == UINT32_MAX;
+	}
+	return available;
+}
+
+void
+acl_record_read(const char *path, bool trusted, struct acl_list *list)
+{
+	const char *name = trusted ? ACL_TRUSTED_XATTR : ACL_XATTR;
+	ssize_t size = getxattr(path, name, list, sizeof(*list));
 	if (!valid(list, size)) {
 		list->count = KAUTH_FILESEC_NOACL;
 		list->flags = 0;
@@ -122,9 +143,14 @@ list_size(const struct acl_list *list)
 }
 
 int
-acl_store(const char *path, const struct stat *s, const struct acl_list *list)
+acl_store(const char *path, const struct stat *s, const struct acl_list *list,
+		bool trusted)
 {
-	if (record_write(path, list) == -1) {
+	if (trusted && record_write(path, ACL_TRUSTED_XATTR, list) == -1
+			&& !trusted_unavailable(errno)) {
+		return -1;
+	}
+	if (record_write(path, ACL_XATTR, list) == -1) {
 		return -1;
 	}
 	int kept = acl_posix_group(path, true);
@@ -137,13 +163,19 @@ acl_store(const char *path, const struct stat *s, const struct acl_list *list)
 }
 
 static int
-record_write(const char *path, const struct acl_list *list)
+record_write(const char *path, const char *name, const struct acl_list *list)
 {
 	if (list->count == KAUTH_FILESEC_NOACL) {
-		int r = removexattr(path, ACL_XATTR);
+		int r = removexattr(path, name);
 		return (r == -1 && errno == ENODATA) ? 0 : r;
 	}
-	return setxattr(path, ACL_XATTR, list, list_size(list), 0);
+	return setxattr(path, name, list, list_size(list), 0);
+}
+
+static bool
+trusted_unavailable(int error)
+{
+	return error == EPERM || error == EOPNOTSUPP;
 }
 
 int
