@@ -419,6 +419,53 @@ same_file(const struct stat *s, const char *path)
 			&& other.st_ino == s->st_ino;
 }
 
+#define QUARANTINE_SET_TOKEN_RESPONSIBLE  184
+#define QUARANTINE_SET_CALLER_RESPONSIBLE 185
+
+struct quarantine_token_args {
+	uint64_t pid;
+	uint64_t pidversion;
+};
+
+static int set_responsible(int32_t responsible);
+
+static int
+quarantine_set_token_responsible(const struct quarantine_token_args *args)
+{
+	if (!codesign_entitled(getpid(),
+			    "com.apple.private.responsibility.set-to-other")) {
+		return _EPERM;
+	}
+	if (args == NULL) {
+		return _EFAULT;
+	}
+	return set_responsible((int32_t)args->pid);
+}
+
+static int
+quarantine_set_caller_responsible(void)
+{
+	if (!codesign_entitled(getpid(),
+			    "com.apple.private.responsibility.set-to-self")) {
+		return _EPERM;
+	}
+	return set_responsible(getpid());
+}
+
+static int
+set_responsible(int32_t responsible)
+{
+	struct process named;
+	if (process_lookup(responsible, &named) != 0) {
+		return _ESRCH;
+	}
+	char value[64];
+	snprintf(value, sizeof(value), "%d:%llu", (int)named.pid,
+			(unsigned long long)named.start_ticks);
+	setenv(RESPONSIBILITY_VARIABLE, value, 1);
+	return 0;
+}
+
 static int
 quarantine_handle_syscall(int call, void *arg)
 {
@@ -436,6 +483,10 @@ quarantine_handle_syscall(int call, void *arg)
 		return quarantine_responsible(arg);
 	case QUARANTINE_MOUNT_POINT:
 		return quarantine_mount_point(arg);
+	case QUARANTINE_SET_TOKEN_RESPONSIBLE:
+		return quarantine_set_token_responsible(arg);
+	case QUARANTINE_SET_CALLER_RESPONSIBLE:
+		return quarantine_set_caller_responsible();
 	default:
 		unimplemented();
 	}
