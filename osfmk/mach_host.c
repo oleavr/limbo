@@ -33,6 +33,8 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include "bsd/codesign.h"
+#include "commpage.h"
 #include "ipc.h"
 #include "mach_vm.h"
 #include "shared_cache.h"
@@ -520,7 +522,11 @@ mach_memory_info(mach_port_t host, mach_zone_name_array_t *names,
 kern_return_t
 host_set_multiuser_config_flags(host_priv_t host_priv, uint32_t multiuser_flags)
 {
-	return KERN_NOT_SUPPORTED;
+	if (!codesign_embedded()) {
+		return KERN_NOT_SUPPORTED;
+	}
+	commpage_set_multiuser_config(multiuser_flags);
+	return KERN_SUCCESS;
 }
 
 kern_return_t
