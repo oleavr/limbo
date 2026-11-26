@@ -1130,9 +1130,11 @@ set_attributes(int dirfd, const char *path, int flags, void *alist,
 			cursor += sizeof(group);
 		}
 		int r = (path == NULL)
-				? fchown(dirfd, owner, group)
-				: fchownat(dirfd, path, owner, group,
-						  flags & AT_SYMLINK_NOFOLLOW);
+				? acl_chown_at(dirfd, "", AT_EMPTY_PATH, owner,
+						  group)
+				: acl_chown_at(dirfd, path,
+						  flags & AT_SYMLINK_NOFOLLOW,
+						  owner, group);
 		if (r == -1) {
 			return -1;
 		}

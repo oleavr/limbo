@@ -546,7 +546,8 @@ sys_chown(user_addr_t path, int uid, int gid)
 		return _EPERM;
 	}
 	char buffer[PATH_MAX];
-	return errno_map(chown(sysroot_host_path(path, 0, buffer), uid, gid));
+	return errno_map(acl_chown_at(AT_FDCWD,
+			sysroot_host_path(path, 0, buffer), 0, uid, gid));
 }
 
 int
@@ -2129,7 +2130,7 @@ sys_fchown(int fd, int uid, int gid)
 	if (mac_sandbox_denies_fd(SANDBOX_FILE_WRITE_OWNER, fd)) {
 		return _EPERM;
 	}
-	return errno_map(fchown(fd, uid, gid));
+	return errno_map(acl_chown_at(fd, "", AT_EMPTY_PATH, uid, gid));
 }
 
 int
@@ -3488,7 +3489,7 @@ sys_chmod_extended(user_addr_t path, void *uid, void *gid, int mode,
 	}
 	char buffer[PATH_MAX];
 	const char *host_path = sysroot_host_path(path, 0, buffer);
-	if (chown(host_path,
+	if (acl_chown_at(AT_FDCWD, host_path, 0,
 			    ((uid_t)(uintptr_t)uid == KAUTH_UID_NONE)
 					    ? (uid_t)-1
 					    : (uid_t)(uintptr_t)uid,
@@ -3528,7 +3529,8 @@ sys_fchmod_extended(
 			&& mac_sandbox_denies_fd(SANDBOX_FILE_WRITE_ACL, fd)) {
 		return _EPERM;
 	}
-	if (fchown(fd, (uid == KAUTH_UID_NONE) ? (uid_t)-1 : uid,
+	if (acl_chown_at(fd, "", AT_EMPTY_PATH,
+			    (uid == KAUTH_UID_NONE) ? (uid_t)-1 : uid,
 			    (gid == KAUTH_GID_NONE) ? (gid_t)-1 : gid)
 			== -1) {
 		return err_map(errno);
@@ -4457,9 +4459,10 @@ sys_lchown(user_addr_t path, void *owner, void *group)
 		return _EPERM;
 	}
 	char buffer[PATH_MAX];
-	return errno_map(lchown(
+	return errno_map(acl_chown_at(AT_FDCWD,
 			sysroot_host_path(path, AT_SYMLINK_NOFOLLOW, buffer),
-			(uid_t)(uintptr_t)owner, (gid_t)(uintptr_t)group));
+			AT_SYMLINK_NOFOLLOW, (uid_t)(uintptr_t)owner,
+			(gid_t)(uintptr_t)group));
 }
 
 int
@@ -4981,9 +4984,9 @@ sys_fchownat(int fd, user_addr_t path, void *uid, void *gid, int flag)
 	}
 	char buffer[PATH_MAX];
 	int flags = at_flags(flag);
-	return errno_map(fchownat(at_fd(fd),
-			sysroot_host_path(path, flags, buffer),
-			(uid_t)(uintptr_t)uid, (gid_t)(uintptr_t)gid, flags));
+	return errno_map(acl_chown_at(at_fd(fd),
+			sysroot_host_path(path, flags, buffer), flags,
+			(uid_t)(uintptr_t)uid, (gid_t)(uintptr_t)gid));
 }
 
 int

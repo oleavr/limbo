@@ -43,6 +43,8 @@ int acl_from_filesec(const void *xsecurity, struct acl_list *list);
 int acl_set_at(int dirfd, const char *host_path, int at_flags,
 		const struct acl_list *list);
 int acl_chmod_at(int dirfd, const char *host_path, int at_flags, mode_t mode);
+int acl_chown_at(int dirfd, const char *host_path, int at_flags, uid_t uid,
+		gid_t gid);
 int acl_openat(int dirfd, const char *host_path, int flags, mode_t mode,
 		const struct acl_list *initial, bool *created);
 int acl_mkdirat(int dirfd, const char *host_path, mode_t mode,

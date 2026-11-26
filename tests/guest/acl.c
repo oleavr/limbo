@@ -97,6 +97,8 @@ static int write_filesec(
 static void check_enforced(void);
 static void works_inside(void);
 static void kept_out(void);
+static void check_brokered(void);
+static void change_staging(void);
 static int as_user(void (*body)(void));
 
 static char folder[] = "/tmp/limbo-access-XXXXXX";
@@ -121,6 +123,7 @@ main(void)
 	check_opened_with();
 	check_made_with();
 	check_enforced();
+	check_brokered();
 
 	CHECK(rmdir("shared") == 0);
 	CHECK(chdir("/") == 0);
@@ -608,6 +611,55 @@ static void
 kept_out(void)
 {
 	CHECK(mkdir("entered/folder", 0755) == -1 && errno == EACCES);
+}
+
+static void
+check_brokered(void)
+{
+	if (geteuid() != 0 || getenv("LIMBO_BROKER") == NULL
+			|| getenv("LIMBO_TEST_NAMESPACE") != NULL) {
+		skipped = true;
+		return;
+	}
+	CHECK(mkdir("broker", 0755) == 0);
+	uid_t users[] = {USER};
+	acl_perm_t perms[] = {ACL_LIST_DIRECTORY | ACL_ADD_FILE | ACL_SEARCH
+			| ACL_ADD_SUBDIRECTORY | ACL_DELETE_CHILD
+			| ACL_WRITE_SECURITY | ACL_CHANGE_OWNER};
+	int flags[] = {FILE_INHERIT | DIRECTORY_INHERIT};
+	set_list("broker", 1, users, perms, flags);
+	CHECK(mkdir("broker/staging", 0700) == 0);
+	CHECK(entries("broker/staging") == 1);
+	int fd = open("broker/plain", O_CREAT | O_WRONLY, 0644);
+	CHECK(fd != -1 && close(fd) == 0);
+	remove_list("broker/plain");
+
+	int result = as_user(change_staging);
+	CHECK(result == 0 || result == SKIP);
+	skipped = skipped || result == SKIP;
+	CHECK(unlink("broker/plain") == 0);
+	CHECK(rmdir("broker/staging") == 0);
+	CHECK(rmdir("broker") == 0);
+}
+
+static void
+change_staging(void)
+{
+	struct stat st;
+	CHECK(chmod("broker/staging", 0755) == 0);
+	CHECK(stat("broker/staging", &st) == 0 && (st.st_mode & 07777) == 0755);
+	CHECK(chmod("broker/staging", 04755) == 0);
+	CHECK(stat("broker/staging", &st) == 0 && (st.st_mode & 07777) == 0755);
+	CHECK(chown("broker/staging", 502, -1) == -1 && errno == EPERM);
+	CHECK(chown("broker/staging", USER, -1) == 0);
+	CHECK(stat("broker/staging", &st) == 0 && st.st_uid == USER);
+	CHECK(mkdir("broker/mine", 0) == 0);
+	CHECK(stat("broker/mine", &st) == 0 && (st.st_mode & 0777) == 0);
+	CHECK(chmod("broker/mine", 0700) == 0);
+	CHECK(entries("broker/mine") == 1);
+	CHECK(rmdir("broker/mine") == 0);
+	CHECK(chmod("broker/plain", 0666) == -1 && errno == EPERM);
+	CHECK(chown("broker/plain", USER, -1) == -1 && errno == EPERM);
 }
 
 static int
