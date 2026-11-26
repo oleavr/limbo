@@ -408,6 +408,32 @@ mode_changed(int fd)
 }
 
 int
+acl_chown_at(int dirfd, const char *host_path, int at_flags, uid_t uid,
+		gid_t gid)
+{
+	bool by_fd = (at_flags & AT_EMPTY_PATH) && host_path[0] == '\0';
+	int r = by_fd ? fchown(dirfd, uid, gid)
+		      : fchownat(dirfd, host_path, uid, gid, at_flags);
+	if (r == 0 || errno != EPERM || !through_broker()) {
+		return r;
+	}
+	int fd = object_open(dirfd, host_path, at_flags);
+	if (fd == -1) {
+		errno = EPERM;
+		return -1;
+	}
+	struct broker_acl request = {
+			.op = BROKER_ACL_CHOWN,
+			.uid = uid,
+			.gid = gid,
+	};
+	int error = ask_broker(&request, fd, -1);
+	close(fd);
+	bool refused = error == BROKER_ACL_UNKEPT || error == EOPNOTSUPP;
+	return answered(refused ? EPERM : error);
+}
+
+int
 acl_openat(int dirfd, const char *host_path, int flags, mode_t mode,
 		const struct acl_list *initial, bool *created)
 {

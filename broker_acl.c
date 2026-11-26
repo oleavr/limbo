@@ -69,6 +69,9 @@ static bool made_in(int folder, const char *name, const struct stat *s);
 static int rederive(const struct object *object);
 static int change_mode(const struct broker_acl *request,
 		const struct requester *who, struct object *object);
+static int change_owner(const struct broker_acl *request,
+		const struct requester *who, const struct object *object);
+static bool in_groups(const struct requester *who, gid_t gid);
 
 int
 broker_acl(int connection, const struct broker_acl *request, const int *fds,
@@ -99,6 +102,8 @@ broker_acl(int connection, const struct broker_acl *request, const int *fds,
 		return object.owned ? rederive(&object) : EPERM;
 	case BROKER_ACL_CHMOD:
 		return change_mode(request, &who, &object);
+	case BROKER_ACL_CHOWN:
+		return change_owner(request, &who, &object);
 	}
 	return EINVAL;
 }
@@ -226,4 +231,35 @@ change_mode(const struct broker_acl *request, const struct requester *who,
 	}
 	object->s.st_mode = (object->s.st_mode & S_IFMT) | mode;
 	return rederive(object);
+}
+
+static int
+change_owner(const struct broker_acl *request, const struct requester *who,
+		const struct object *object)
+{
+	bool itself = (request->uid == (uid_t)-1 || request->uid == who->uid)
+			&& (request->gid == (gid_t)-1
+					|| in_groups(who, request->gid));
+	bool takes = object->owned
+			|| grants(&object->list, who,
+					KAUTH_VNODE_TAKE_OWNERSHIP);
+	if (who->uid != 0 && !(itself && takes)) {
+		return EPERM;
+	}
+	int r = chown(object->path, request->uid, request->gid);
+	return r == 0 ? 0 : errno;
+}
+
+static bool
+in_groups(const struct requester *who, gid_t gid)
+{
+	if (gid == who->gid) {
+		return true;
+	}
+	for (size_t i = 0; i < who->group_count; i++) {
+		if (who->groups[i] == gid) {
+			return true;
+		}
+	}
+	return false;
 }
