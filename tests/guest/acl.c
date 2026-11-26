@@ -94,6 +94,10 @@ static bool read_filesec(const char *path, struct filesec *filesec);
 static bool entry_for(const char *path, uid_t user, struct entry *found);
 static int write_filesec(
 		const char *path, const struct filesec *filesec, size_t size);
+static void check_enforced(void);
+static void works_inside(void);
+static void kept_out(void);
+static int as_user(void (*body)(void));
 
 static char folder[] = "/tmp/limbo-access-XXXXXX";
 static pid_t owner;
@@ -116,6 +120,7 @@ main(void)
 	check_inherited();
 	check_opened_with();
 	check_made_with();
+	check_enforced();
 
 	CHECK(rmdir("shared") == 0);
 	CHECK(chdir("/") == 0);
@@ -534,6 +539,94 @@ check_made_with(void)
 	filesec_free(with_one);
 	acl_free(two);
 	acl_free(one);
+}
+
+static void
+check_enforced(void)
+{
+	if (geteuid() != 0) {
+		skipped = true;
+		return;
+	}
+	CHECK(mkdir("entered", 0700) == 0);
+	CHECK(mkdir("closed", 0700) == 0);
+	CHECK(mkdir("writable", 0755) == 0);
+	int fd = open("readable", O_CREAT | O_WRONLY | O_EXCL, 0640);
+	CHECK(fd != -1 && close(fd) == 0);
+	uid_t users[] = {USER};
+	int flags[] = {0};
+	acl_perm_t enter[] = {ACL_LIST_DIRECTORY | ACL_ADD_FILE | ACL_SEARCH
+			| ACL_ADD_SUBDIRECTORY | ACL_DELETE_CHILD};
+	set_list("entered", 1, users, enter, flags);
+	acl_perm_t add[] = {ACL_ADD_FILE};
+	set_list("writable", 1, users, add, flags);
+	acl_perm_t read[] = {ACL_READ_DATA};
+	set_list("readable", 1, users, read, flags);
+	struct stat st;
+	CHECK(stat("entered", &st) == 0 && (st.st_mode & 0777) == 0700);
+	CHECK(stat("readable", &st) == 0 && (st.st_mode & 0777) == 0640);
+
+	int result = as_user(works_inside);
+	if (result == SKIP) {
+		skipped = true;
+	} else {
+		CHECK(result == 0);
+		CHECK(chmod("entered", 0750) == 0);
+		CHECK(stat("entered", &st) == 0 && (st.st_mode & 0777) == 0750);
+		CHECK(entries("entered") == 1);
+		CHECK(as_user(works_inside) == 0);
+		CHECK(chmod("entered", 0700) == 0);
+		CHECK(as_user(works_inside) == 0);
+		remove_list("entered");
+		CHECK(stat("entered", &st) == 0 && (st.st_mode & 0777) == 0700);
+		CHECK(as_user(kept_out) == 0);
+	}
+	CHECK(unlink("readable") == 0);
+	CHECK(rmdir("writable") == 0);
+	CHECK(rmdir("closed") == 0);
+	CHECK(rmdir("entered") == 0);
+}
+
+static void
+works_inside(void)
+{
+	CHECK(mkdir("entered/folder", 0755) == 0);
+	int fd = open("entered/folder/file", O_CREAT | O_WRONLY, 0644);
+	CHECK(fd != -1 && close(fd) == 0);
+	CHECK(unlink("entered/folder/file") == 0);
+	CHECK(rmdir("entered/folder") == 0);
+	CHECK(mkdir("closed/folder", 0755) == -1 && errno == EACCES);
+	fd = open("writable/file", O_CREAT | O_WRONLY, 0644);
+	CHECK(fd != -1 && close(fd) == 0);
+	CHECK(unlink("writable/file") == 0);
+	fd = open("readable", O_RDONLY);
+	CHECK(fd != -1 && close(fd) == 0);
+	CHECK(open("readable", O_WRONLY) == -1 && errno == EACCES);
+}
+
+static void
+kept_out(void)
+{
+	CHECK(mkdir("entered/folder", 0755) == -1 && errno == EACCES);
+}
+
+static int
+as_user(void (*body)(void))
+{
+	pid_t child = fork();
+	CHECK(child != -1);
+	if (child == 0) {
+		if (setgid(USER) != 0 || setuid(USER) != 0
+				|| getuid() != USER) {
+			_exit(SKIP);
+		}
+		body();
+		_exit(0);
+	}
+	int status;
+	CHECK(waitpid(child, &status, 0) == child);
+	CHECK(WIFEXITED(status));
+	return WEXITSTATUS(status);
 }
 
 static filesec_t
