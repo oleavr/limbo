@@ -67,6 +67,8 @@ static int inherit(const struct broker_acl *request,
 		const struct object *object, int folder);
 static bool made_in(int folder, const char *name, const struct stat *s);
 static int rederive(const struct object *object);
+static int change_mode(const struct broker_acl *request,
+		const struct requester *who, struct object *object);
 
 int
 broker_acl(int connection, const struct broker_acl *request, const int *fds,
@@ -95,6 +97,8 @@ broker_acl(int connection, const struct broker_acl *request, const int *fds,
 		return fd_count < 2 ? EPERM : inherit(request, &object, fds[1]);
 	case BROKER_ACL_REDERIVE:
 		return object.owned ? rederive(&object) : EPERM;
+	case BROKER_ACL_CHMOD:
+		return change_mode(request, &who, &object);
 	}
 	return EINVAL;
 }
@@ -205,4 +209,21 @@ rederive(const struct object *object)
 		return errno;
 	}
 	return 0;
+}
+
+static int
+change_mode(const struct broker_acl *request, const struct requester *who,
+		struct object *object)
+{
+	mode_t mode = request->mode & 07777;
+	bool lets = grants(&object->list, who, KAUTH_VNODE_WRITE_SECURITY)
+			&& !(mode & (S_ISUID | S_ISGID));
+	if (!object->owned && !lets) {
+		return EPERM;
+	}
+	if (chmod(object->path, mode) == -1) {
+		return errno;
+	}
+	object->s.st_mode = (object->s.st_mode & S_IFMT) | mode;
+	return rederive(object);
 }
