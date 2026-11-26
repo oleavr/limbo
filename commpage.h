@@ -1,5 +1,6 @@
 /*
  * Copyright © 2021 Keegan Saunders
+ * Copyright © 2026 Håvard Sørbø
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -89,3 +90,4 @@ uint64_t commpage_absolute_time(void);
 void commpage_timebase(uint32_t *numer, uint32_t *denom);
 uint64_t commpage_absolute_to_nanoseconds(uint64_t absolute);
 uint64_t commpage_boot_nanoseconds(void);
+void commpage_set_multiuser_config(uint32_t config);

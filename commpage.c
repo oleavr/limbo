@@ -57,6 +57,20 @@ static struct boot_state timebase_state
 		= BOOT_STATE_INIT(TIMEBASE_PATH, TIMEBASE_MAGIC, &timebase);
 static uint64_t boot_ns;
 
+#define MULTIUSER_PATH             "/private/var/run/limbo-multiuser"
+#define MULTIUSER_MAGIC            0x6d757372
+#define COMM_PAGE_MULTIUSER_CONFIG 0x108
+
+struct multiuser {
+	struct boot_state_header header;
+	uint32_t config;
+	uint32_t reserved;
+};
+
+static struct multiuser multiuser;
+static struct boot_state multiuser_state
+		= BOOT_STATE_INIT(MULTIUSER_PATH, MULTIUSER_MAGIC, &multiuser);
+
 static uint64_t monotonic_ns(void);
 
 static void
@@ -303,6 +317,7 @@ sample_clocks(uint64_t *tsc)
 #else /* __arm64__ */
 
 static uint64_t counter(void);
+static uint32_t multiuser_config(void);
 
 static const uint8_t commpage_snapshot[] = {
 	0x63, 0x6f, 0x6d, 0x6d, 0x70, 0x61, 0x67, 0x65, 0x20, 0x36, 0x34, 0x2d,
@@ -429,8 +444,26 @@ commpage_mmap(void)
 			= ((uint64_t)now.tv_sec * 1000000000 + now.tv_nsec
 					  - uptime_ns)
 			/ 1000;
+	uint32_t multiuser_word = multiuser_config();
+	if (multiuser_word != 0) {
+		*(uint32_t *)(commpage + COMM_PAGE_MULTIUSER_CONFIG)
+				= multiuser_word;
+	}
 
 	return 0;
+}
+
+static uint32_t
+multiuser_config(void)
+{
+	struct multiuser *shared = boot_state_begin(&multiuser_state);
+	if (shared == NULL) {
+		return 0;
+	}
+	uint32_t config = shared->config;
+	boot_state_end(&multiuser_state, false);
+	boot_state_close(&multiuser_state);
+	return config;
 }
 
 static int
@@ -473,6 +506,20 @@ commpage_absolute_to_nanoseconds(uint64_t absolute)
 	uint32_t numer, denom;
 	commpage_timebase(&numer, &denom);
 	return (unsigned __int128)absolute * numer / denom;
+}
+
+void
+commpage_set_multiuser_config(uint32_t config)
+{
+	struct multiuser *shared = boot_state_begin(&multiuser_state);
+	if (shared != NULL) {
+		shared->config = config;
+		boot_state_end(&multiuser_state, true);
+	}
+#ifndef __x86_64__
+	*(volatile uint32_t *)(_COMM_PAGE_START_ADDRESS
+			+ COMM_PAGE_MULTIUSER_CONFIG) = config;
+#endif
 }
 
 static uint64_t
