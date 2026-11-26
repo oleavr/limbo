@@ -58,6 +58,7 @@
 #define DATA_VOLUME     "/System/Volumes/Data"
 #define IOS_DATA_VOLUME "/private/var"
 
+#define DARWIN_ZONEINFO   "/var/db/timezone/zoneinfo/"
 #define DARWIN_PTY_PREFIX "/dev/ttys"
 
 #define DEVICES_MAX     8
@@ -88,6 +89,7 @@ static const char *pty_host_path(const char *path, char *buffer);
 static bool under(const char *path, const char *prefix);
 static bool covers(const char *path);
 static const char *in_root(const char *path, char *buffer);
+static void follow_host_time_zone(void);
 static int open_in_root(const char *path, int flags, uint64_t resolve);
 static ssize_t read_fd_path(int fd, char *buffer);
 static bool on_data_volume(const char *host_path);
@@ -114,6 +116,7 @@ sysroot_open(void)
 	note_devices();
 	load_firmlinks();
 	note_ios_data_volume();
+	follow_host_time_zone();
 
 	return 0;
 }
@@ -441,6 +444,45 @@ sysroot_guest_path(const char *path)
 		return path + root_length;
 	default:
 		return path;
+	}
+}
+
+static void
+follow_host_time_zone(void)
+{
+	char host[PATH_MAX];
+	ssize_t length = readlink("/etc/localtime", host, sizeof(host) - 1);
+	if (length == -1) {
+		return;
+	}
+	host[length] = '\0';
+	const char *zone = strstr(host, "zoneinfo/");
+	if (zone == NULL) {
+		return;
+	}
+	zone += strlen("zoneinfo/");
+
+	char target[PATH_MAX];
+	snprintf(target, sizeof(target), DARWIN_ZONEINFO "%s", zone);
+	int fd = open_in_root(target, 0, 0);
+	if (fd == -1) {
+		return;
+	}
+	close(fd);
+
+	char link[PATH_MAX + sizeof("/etc/localtime")], current[PATH_MAX];
+	snprintf(link, sizeof(link), "%s/etc/localtime", root);
+	length = readlink(link, current, sizeof(current) - 1);
+	if (length != -1 && (size_t)length == strlen(target)
+			&& memcmp(current, target, length) == 0) {
+		return;
+	}
+
+	char temporary[sizeof(link) + sizeof(".2147483647")];
+	snprintf(temporary, sizeof(temporary), "%s/etc/.localtime.%d", root,
+			(int)getpid());
+	if (symlink(target, temporary) == 0 && rename(temporary, link) != 0) {
+		unlink(temporary);
 	}
 }
 
