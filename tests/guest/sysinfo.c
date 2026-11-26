@@ -220,6 +220,9 @@ main(void)
 	CHECK(sysctlbyname("vfs.generic.root_unmounted_cleanly", &value, &size,
 			      NULL, 0) == 0
 			&& value == 1);
+	value = -1;
+	CHECK(sysctlbyname("kern.hv_vmm_present", &value, &size, NULL, 0) == 0
+			&& value == 0);
 
 	struct kinfo_proc info;
 	size = sizeof(info);

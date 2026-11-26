@@ -212,6 +212,8 @@ struct __darwin_kinfo_proc {
 static int read_hostname(void *old, size_t *oldlenp);
 static int read_boottime(void *old, size_t *oldlenp);
 static int read_bootsessionuuid(void *old, size_t *oldlenp);
+static int read_hv_vmm_present(void *old, size_t *oldlenp);
+static bool machine_is_virtual(void);
 static int read_sandbox_sentinel(void *old, size_t *oldlenp);
 static int read_ncpu(void *old, size_t *oldlenp);
 static int read_msgbuf(void *old, size_t *oldlenp);
@@ -294,6 +296,8 @@ static const struct sysctl_node nodes[] = {
 		{"kern.exclaves_status", {0, 0}, SYSCTL_INT,
 				.number = EXCLAVES_STATUS_NOT_SUPPORTED},
 		{"kern.check_openevt", {0, 0}, SYSCTL_INT, .number = 0},
+		{"kern.hv_vmm_present", {0, 0}, SYSCTL_READER,
+				.reader = read_hv_vmm_present},
 
 		{"kern.wq_max_threads", {0, 0}, SYSCTL_INT, .number = 512},
 		{"kern.wq_max_constrained_threads", {0, 0}, SYSCTL_INT,
@@ -953,6 +957,35 @@ read_bootsessionuuid(void *old, size_t *oldlenp)
 		*c = (char)toupper((unsigned char)*c);
 	}
 	return read_bytes(uuid, strlen(uuid) + 1, old, oldlenp);
+}
+
+#define MACHINE_PROFILE_PATH "/private/var/db/limbo/machine"
+
+static int
+read_hv_vmm_present(void *old, size_t *oldlenp)
+{
+	static int32_t present = -1;
+	if (present == -1) {
+		present = machine_is_virtual();
+	}
+	return read_number(present, sizeof(present), old, oldlenp);
+}
+
+static bool
+machine_is_virtual(void)
+{
+	char buffer[PATH_MAX];
+	char word[32] = "";
+	FILE *profile = fopen(
+			sysroot_host_path(MACHINE_PROFILE_PATH, 0, buffer),
+			"re");
+	if (profile == NULL) {
+		return false;
+	}
+	(void)!fgets(word, sizeof(word), profile);
+	fclose(profile);
+	word[strcspn(word, " \t\r\n")] = '\0';
+	return strcmp(word, "virtual") == 0;
 }
 
 static int
