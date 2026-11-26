@@ -85,6 +85,7 @@ struct acl_list {
 
 void acl_record_read(const char *path, struct acl_list *list);
 int acl_store(const char *path, const struct acl_list *list);
+int acl_posix_group(const char *path, bool follow);
 bool acl_inheritable(const struct acl_list *list);
 bool acl_inherit(const struct acl_list *parent, const struct acl_list *initial,
 		bool directory, struct acl_list *list);

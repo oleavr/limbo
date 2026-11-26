@@ -48,6 +48,8 @@ int acl_mkdirat(int dirfd, const char *host_path, mode_t mode,
 		const struct acl_list *initial);
 size_t acl_filesec_at(int dirfd, const char *host_path, int at_flags,
 		void *buffer, size_t size);
+mode_t acl_darwin_mode_at(
+		int dirfd, const char *host_path, int at_flags, mode_t mode);
 int acl_check_at(int dirfd, const char *host_path, int at_flags,
 		uint32_t rights);
 int acl_check_delete_at(int dirfd, const char *host_path);

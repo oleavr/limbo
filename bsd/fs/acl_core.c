@@ -37,9 +37,12 @@
 #include <sys/types.h>
 #include <sys/xattr.h>
 
-#define LIST_HEADER_SIZE offsetof(struct acl_list, ace)
-#define GUID_PREFIX_SIZE 12
-#define EVERYONE_GID     12
+#define LIST_HEADER_SIZE    offsetof(struct acl_list, ace)
+#define POSIX_ACL_XATTR     "system.posix_acl_access"
+#define POSIX_ACL_GROUP_OBJ 0x04
+#define POSIX_OWN_ENTRIES   4
+#define GUID_PREFIX_SIZE    12
+#define EVERYONE_GID        12
 #define GENERIC_READ_BITS                                                      \
 	(KAUTH_VNODE_READ_DATA | KAUTH_VNODE_READ_ATTRIBUTES                   \
 			| KAUTH_VNODE_READ_EXTATTRIBUTES                       \
@@ -50,6 +53,17 @@
 			| KAUTH_VNODE_WRITE_ATTRIBUTES                         \
 			| KAUTH_VNODE_WRITE_EXTATTRIBUTES                      \
 			| KAUTH_VNODE_WRITE_SECURITY)
+
+struct posix_entry {
+	uint16_t tag;
+	uint16_t perm;
+	uint32_t id;
+};
+
+struct posix_acl {
+	uint32_t version;
+	struct posix_entry entry[POSIX_OWN_ENTRIES + KAUTH_ACL_MAX_ENTRIES];
+};
 
 static const uint8_t user_prefix[GUID_PREFIX_SIZE] = {0xff, 0xff, 0xee, 0xee,
 		0xdd, 0xdd, 0xcc, 0xcc, 0xbb, 0xbb, 0xaa, 0xaa};
@@ -96,6 +110,25 @@ acl_store(const char *path, const struct acl_list *list)
 		return (r == -1 && errno == ENODATA) ? 0 : r;
 	}
 	return setxattr(path, ACL_XATTR, list, list_size(list), 0);
+}
+
+int
+acl_posix_group(const char *path, bool follow)
+{
+	struct posix_acl acl;
+	ssize_t size = follow
+			? getxattr(path, POSIX_ACL_XATTR, &acl, sizeof(acl))
+			: lgetxattr(path, POSIX_ACL_XATTR, &acl, sizeof(acl));
+	if (size < (ssize_t)sizeof(acl.version)) {
+		return -1;
+	}
+	size_t count = (size - sizeof(acl.version)) / sizeof(acl.entry[0]);
+	for (size_t i = 0; i < count; i++) {
+		if (acl.entry[i].tag == POSIX_ACL_GROUP_OBJ) {
+			return acl.entry[i].perm;
+		}
+	}
+	return -1;
 }
 
 bool

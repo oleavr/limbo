@@ -485,7 +485,11 @@ pack_attributes(int fd, bool data, const struct __darwin_attrlist *alistp,
 	}
 
 	if (returned.commonattr & ATTR_CMN_ACCESSMASK) {
-		offset = pack_u32(buffer, offset, s.st_mode);
+		mode_t mode = S_ISLNK(s.st_mode)
+				? s.st_mode
+				: acl_darwin_mode_at(fd, "", AT_EMPTY_PATH,
+						  s.st_mode);
+		offset = pack_u32(buffer, offset, mode);
 		commonattr &= ~ATTR_CMN_ACCESSMASK;
 	}
 

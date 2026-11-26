@@ -416,3 +416,21 @@ acl_filesec_at(int dirfd, const char *host_path, int at_flags, void *buffer,
 	}
 	return length;
 }
+
+mode_t
+acl_darwin_mode_at(int dirfd, const char *host_path, int at_flags, mode_t mode)
+{
+	char path[PATH_MAX + 48];
+	bool follow = !(at_flags & AT_SYMLINK_NOFOLLOW);
+	if ((at_flags & AT_EMPTY_PATH) && host_path[0] == '\0') {
+		object_path(dirfd, path, sizeof(path));
+		follow = true;
+	} else if (host_path[0] == '/' || dirfd == AT_FDCWD) {
+		snprintf(path, sizeof(path), "%s", host_path);
+	} else {
+		snprintf(path, sizeof(path), "/proc/thread-self/fd/%d/%s",
+				dirfd, host_path);
+	}
+	int group = acl_posix_group(path, follow);
+	return group < 0 ? mode : (mode & ~S_IRWXG) | (mode_t)(group << 3);
+}
